@@ -175,9 +175,11 @@
   content: "";
 }
 
-.book-cover:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 22px 48px color-mix(in srgb, var(--accent) 13%, transparent);
+@media (hover: hover) {
+  .book-cover:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 22px 48px color-mix(in srgb, var(--accent) 13%, transparent);
+  }
 }
 
 .book-cover > span {
@@ -618,4 +620,25 @@
   margin: 0.9rem 0 0;
   color: var(--text-muted);
   font-size: 0.82rem;
+}
+
+/* One swipeable row instead of stacked chip rows on phones; bleeds to the
+   screen edge so the scroll affordance is visible. */
+@media (max-width: 560px) {
+  .library-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin-inline: -1rem;
+    padding-inline: 1rem;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, black calc(100% - 1.75rem), transparent);
+  }
+
+  .library-filters::-webkit-scrollbar {
+    display: none;
+  }
+
+  .filter-chip {
+    flex: 0 0 auto;
+  }
 }

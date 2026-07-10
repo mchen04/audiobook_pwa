@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ArrowCounterClockwise,
+  ArrowClockwise,
   ArrowLeft,
   BookmarkSimple,
   CaretLeft,
@@ -10,8 +12,6 @@ import {
   ListBullets,
   Pause,
   Play,
-  SkipBack,
-  SkipForward,
   Trash,
 } from "@phosphor-icons/react";
 import Link from "next/link";
@@ -129,24 +129,11 @@ export function FullPlayer({
             </div>
           </div>
 
-          <div className="scrubber">
-            <input
-              type="range"
-              min={0}
-              max={playerBook.durationMs}
-              step={Math.max(1_000, Math.round(playerBook.durationMs / 600 / 1000) * 1000)}
-              value={Math.min(playback.currentTimeMs, playerBook.durationMs)}
-              onChange={(event) => playback.seek(Number(event.target.value))}
-              aria-label="Audiobook position"
-              aria-valuetext={`${formatClock(playback.currentTimeMs)} of ${formatClock(playerBook.durationMs)}`}
-            />
-            <div>
-              <span>{formatClock(playback.currentTimeMs)}</span>
-              <span>
-                -{formatClock(Math.max(0, playerBook.durationMs - playback.currentTimeMs))}
-              </span>
-            </div>
-          </div>
+          <Scrubber
+            durationMs={playerBook.durationMs}
+            currentTimeMs={playback.currentTimeMs}
+            onSeek={playback.seek}
+          />
 
           <div className="transport-controls">
             <button
@@ -163,7 +150,7 @@ export function FullPlayer({
               aria-label={`Back ${skipBackSeconds} seconds`}
               className="timed-skip"
             >
-              <SkipBack size={28} weight="fill" />
+              <ArrowCounterClockwise size={34} />
               <small>{skipBackSeconds}</small>
             </button>
             <button
@@ -184,7 +171,7 @@ export function FullPlayer({
               aria-label={`Forward ${skipForwardSeconds} seconds`}
               className="timed-skip"
             >
-              <SkipForward size={28} weight="fill" />
+              <ArrowClockwise size={34} />
               <small>{skipForwardSeconds}</small>
             </button>
             <button
@@ -287,6 +274,61 @@ export function FullPlayer({
           onClose={() => setDetailsOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+function Scrubber({
+  durationMs,
+  currentTimeMs,
+  onSeek,
+}: {
+  durationMs: number;
+  currentTimeMs: number;
+  onSeek: (positionMs: number) => void;
+}) {
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const draggingRef = useRef(false);
+  const shownMs = scrubMs ?? Math.min(currentTimeMs, durationMs);
+  const fillPercent = durationMs ? (shownMs / durationMs) * 100 : 0;
+
+  function commit(value: number) {
+    draggingRef.current = false;
+    setScrubMs(null);
+    onSeek(value);
+  }
+
+  return (
+    <div className={`scrubber ${scrubMs !== null ? "is-scrubbing" : ""}`}>
+      <input
+        type="range"
+        min={0}
+        max={durationMs}
+        step={Math.max(1_000, Math.round(durationMs / 600 / 1000) * 1000)}
+        value={shownMs}
+        style={{ "--scrub-fill": `${fillPercent}%` } as React.CSSProperties}
+        onPointerDown={() => {
+          draggingRef.current = true;
+        }}
+        onChange={(event) => {
+          // While a pointer drag is active, only preview; the seek happens
+          // once on release. Keyboard changes seek immediately.
+          const value = Number(event.target.value);
+          if (draggingRef.current) setScrubMs(value);
+          else onSeek(value);
+        }}
+        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+        onPointerCancel={() => {
+          draggingRef.current = false;
+          setScrubMs(null);
+        }}
+        aria-label="Audiobook position"
+        aria-valuetext={`${formatClock(shownMs)} of ${formatClock(durationMs)}`}
+      />
+      <div>
+        <span>{formatClock(shownMs)}</span>
+        <span>-{formatClock(Math.max(0, durationMs - shownMs))}</span>
+      </div>
     </div>
   );
 }

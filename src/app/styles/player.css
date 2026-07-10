@@ -120,11 +120,66 @@
 }
 
 .scrubber input {
+  --scrub-fill: 0%;
+
   width: 100%;
-  height: 2rem;
+  height: 2.75rem;
   margin: 0;
-  accent-color: var(--accent);
+  appearance: none;
+  background: transparent;
   cursor: pointer;
+  touch-action: pan-y;
+}
+
+.scrubber input::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--scrub-fill),
+    var(--surface-muted) var(--scrub-fill)
+  );
+}
+
+.scrubber input::-webkit-slider-thumb {
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-top: calc(3px - 0.6rem);
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--bg),
+    0 2px 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: transform 120ms ease;
+}
+
+.scrubber.is-scrubbing input::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+
+.scrubber input::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+}
+
+.scrubber input::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.scrubber input::-moz-range-thumb {
+  width: 1.2rem;
+  height: 1.2rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--bg),
+    0 2px 10px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .scrubber > div {
@@ -133,6 +188,12 @@
   color: var(--text-muted);
   font-family: var(--font-mono), monospace;
   font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scrubber.is-scrubbing > div > span:first-child {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .transport-controls {
@@ -183,8 +244,10 @@
   inset: 0;
   display: grid;
   place-items: center;
-  font-size: 0.74rem;
+  transform: translateY(2px);
+  font-size: 0.66rem;
   font-weight: 750;
+  font-variant-numeric: tabular-nums;
 }
 
 .player-options {
@@ -594,6 +657,7 @@
 }
 
 .mini-controls button {
+  position: relative;
   display: grid;
   width: 2.7rem;
   height: 2.7rem;
@@ -603,6 +667,10 @@
   background: transparent;
   color: var(--text);
   cursor: pointer;
+}
+
+.mini-controls .timed-skip small {
+  font-size: 0.54rem;
 }
 
 .mini-controls button:hover {

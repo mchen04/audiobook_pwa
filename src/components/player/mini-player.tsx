@@ -1,6 +1,6 @@
 "use client";
 
-import { Pause, Play, SkipBack, SkipForward } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, Pause, Play } from "@phosphor-icons/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -29,10 +29,12 @@ export function MiniPlayer() {
       <div className="mini-controls">
         <button
           type="button"
+          className="timed-skip"
           onClick={() => skip(-preferences.skipBackMs)}
           aria-label={`Back ${backSeconds} seconds`}
         >
-          <SkipBack size={20} weight="fill" />
+          <ArrowCounterClockwise size={26} />
+          <small>{backSeconds}</small>
         </button>
         <button
           type="button"
@@ -44,10 +46,12 @@ export function MiniPlayer() {
         </button>
         <button
           type="button"
+          className="timed-skip"
           onClick={() => skip(preferences.skipForwardMs)}
           aria-label={`Forward ${forwardSeconds} seconds`}
         >
-          <SkipForward size={20} weight="fill" />
+          <ArrowClockwise size={26} />
+          <small>{forwardSeconds}</small>
         </button>
       </div>
     </aside>

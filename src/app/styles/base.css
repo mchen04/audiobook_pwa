@@ -41,6 +41,8 @@
 
 html {
   background: var(--bg);
+  overscroll-behavior-y: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -58,8 +60,12 @@ input {
 }
 
 button,
-a {
+a,
+select,
+summary,
+label {
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 button {
@@ -234,8 +240,8 @@ a {
 
 .app-page {
   min-height: 100dvh;
-  padding: 0 max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom))
-    max(1rem, env(safe-area-inset-left));
+  padding: env(safe-area-inset-top, 0px) max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
 }
 
 .app-header {
@@ -321,6 +327,12 @@ img.player-cover {
 @keyframes spin {
   to {
     transform: rotate(1turn);
+  }
+}
+
+@media (max-width: 820px), (max-height: 620px) {
+  .app-header-collapsible {
+    display: none;
   }
 }
 
