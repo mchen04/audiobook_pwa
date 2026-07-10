@@ -1,5 +1,5 @@
 .player-page {
-  width: min(100%, 90rem);
+  width: min(100%, 78rem);
   margin: 0 auto;
   padding: 1.25rem 0 8.5rem;
 }
@@ -54,37 +54,23 @@
   align-items: end;
   justify-content: space-between;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border: 1px solid var(--border);
   border-radius: var(--radius-panel);
-  background:
-    radial-gradient(
-      circle at 72% 12%,
-      color-mix(in srgb, var(--accent) 34%, transparent),
-      transparent 36%
-    ),
-    linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--accent) 16%, var(--surface)),
-      var(--surface-muted)
-    );
-  box-shadow: 0 32px 76px color-mix(in srgb, var(--accent) 18%, transparent);
+  background: linear-gradient(
+    160deg,
+    var(--surface-muted),
+    color-mix(in srgb, var(--text) 8%, var(--surface-muted))
+  );
+  box-shadow: var(--shadow);
   padding: 1.45rem;
 }
 
-.player-cover::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 9px;
-  border-right: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  content: "";
-}
-
 .player-cover > span {
-  font-size: clamp(4rem, 10vw, 7.2rem);
-  font-weight: 610;
-  letter-spacing: -0.1em;
-  line-height: 0.78;
+  color: color-mix(in srgb, var(--text) 72%, var(--surface-muted));
+  font-size: clamp(3.2rem, 8vw, 5.5rem);
+  font-weight: 620;
+  letter-spacing: -0.06em;
+  line-height: 0.85;
 }
 
 .player-cover small {
@@ -101,11 +87,12 @@
 
 .player-book-copy h1 {
   margin: 0;
-  font-size: clamp(2rem, 5vw, 4.2rem);
-  font-weight: 620;
-  letter-spacing: -0.065em;
-  line-height: 1;
+  font-size: clamp(1.5rem, 3.5vw, 2.4rem);
+  font-weight: 660;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
   overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .player-book-copy p {
@@ -232,7 +219,14 @@
   justify-self: center;
   background: var(--accent);
   color: var(--accent-contrast);
-  box-shadow: 0 14px 34px color-mix(in srgb, var(--accent) 28%, transparent);
+  box-shadow: var(--shadow-soft);
+  transition:
+    background 140ms ease,
+    transform 100ms ease;
+}
+
+.transport-controls .main-play:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
 .transport-controls .main-play:hover:not(:disabled) {
@@ -763,6 +757,59 @@
   .spin {
     animation: none !important;
   }
+}
+
+/* Shown when this device lacks the book's audio bytes. */
+.local-media-gate {
+  display: grid;
+  width: min(100%, 34rem);
+  min-height: calc(100dvh - var(--header-height) - 4rem);
+  align-content: center;
+  margin: 0 auto;
+  padding: 2rem 0 6rem;
+  text-align: center;
+}
+
+.local-media-gate h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 4vw, 2.2rem);
+  font-weight: 660;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.local-media-gate .gate-author {
+  margin: 0.5rem 0 0;
+  color: var(--text-muted);
+}
+
+.local-media-gate p {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.local-media-gate .primary-button {
+  justify-self: center;
+  margin-top: 0.75rem;
+}
+
+.local-media-gate .form-error {
+  text-align: left;
+}
+
+.gate-danger {
+  display: grid;
+  justify-items: center;
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+}
+
+.gate-danger .details-hint {
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
 }
 
 .player-topbar-actions {

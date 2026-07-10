@@ -13,9 +13,9 @@
 
 .settings-heading h1 {
   margin: 0;
-  font-size: clamp(2.2rem, 6vw, 3.4rem);
-  font-weight: 620;
-  letter-spacing: -0.055em;
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  font-weight: 660;
+  letter-spacing: -0.035em;
 }
 
 .settings-email {

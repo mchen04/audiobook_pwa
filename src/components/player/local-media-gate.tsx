@@ -1,14 +1,15 @@
 "use client";
 
-import { UploadSimple } from "@phosphor-icons/react";
+import { Trash, UploadSimple } from "@phosphor-icons/react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import { FullPlayer } from "@/components/player/full-player";
 import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
 import { fileFingerprint } from "@/lib/local-import";
-import { getOfflineBook, storeLocalBookMedia } from "@/lib/offline-library";
+import { getOfflineBook, removeOfflineBook, storeLocalBookMedia } from "@/lib/offline-library";
 
 type GateState =
   | { phase: "checking" }
@@ -41,8 +42,11 @@ export function LocalMediaGate({
   details: BookDetails | null;
   nextInCollection: NextInCollection | null;
 }) {
+  const router = useRouter();
   const [state, setState] = useState<GateState>({ phase: "checking" });
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -108,6 +112,29 @@ export function LocalMediaGate({
     }
   }
 
+  // The book must stay deletable even when this device lacks the audio,
+  // otherwise a book imported elsewhere could never be removed from here.
+  async function deleteBook() {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    const response = await fetch(`/api/books/${playerBook.id}`, { method: "DELETE" }).catch(
+      () => null,
+    );
+    if (!response?.ok) {
+      setDeleting(false);
+      setConfirmingDelete(false);
+      setError("The book could not be deleted. Check your connection and try again.");
+      return;
+    }
+    await removeOfflineBook(userId, playerBook.id).catch(() => undefined);
+    router.push("/library");
+    router.refresh();
+  }
+
   if (state.phase === "ready") {
     return (
       <FullPlayer
@@ -156,6 +183,24 @@ export function LocalMediaGate({
             <p>
               <Link href="/library">Back to library</Link>
             </p>
+            <div className="gate-danger">
+              <button
+                type="button"
+                className="danger-button"
+                onClick={deleteBook}
+                disabled={deleting}
+              >
+                <Trash size={17} aria-hidden="true" />
+                {deleting
+                  ? "Deleting"
+                  : confirmingDelete
+                    ? "Tap again to permanently delete"
+                    : "Delete this book"}
+              </button>
+              <p className="details-hint">
+                Removes the book, its progress, and bookmarks from your library everywhere.
+              </p>
+            </div>
           </>
         )}
       </section>

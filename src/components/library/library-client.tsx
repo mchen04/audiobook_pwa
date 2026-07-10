@@ -29,6 +29,7 @@ type LibraryClientProps = {
 type UploadState = {
   filename: string;
   percent: number;
+  stage: string;
 };
 
 type StatusFilter = "all" | "in-progress" | "not-started" | "finished" | "archived";
@@ -118,9 +119,11 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
     }
 
     setError(null);
-    setUpload({ filename: file.name, percent: 0 });
+    setUpload({ filename: file.name, percent: 0, stage: "Starting" });
     try {
-      await importLocalMp3(userId, file, (percent) => setUpload({ filename: file.name, percent }));
+      await importLocalMp3(userId, file, (percent, stage) =>
+        setUpload({ filename: file.name, percent, stage }),
+      );
       await reload();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The MP3 could not be imported.");
@@ -309,10 +312,12 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
       {upload && (
         <div className="upload-status" role="status" aria-live="polite">
           <div>
-            <span>Importing {upload.filename}</span>
+            <span>
+              {upload.stage} · {upload.filename}
+            </span>
             <strong>{upload.percent}%</strong>
           </div>
-          <progress value={upload.percent} max={100} aria-label={`Uploading ${upload.filename}`} />
+          <progress value={upload.percent} max={100} aria-label={`Importing ${upload.filename}`} />
         </div>
       )}
 

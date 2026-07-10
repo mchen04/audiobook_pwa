@@ -20,7 +20,7 @@
   width: min(100%, 76rem);
   flex: 1;
   margin: 0 auto;
-  padding: clamp(3rem, 8vw, 6.5rem) 0;
+  padding: clamp(1.8rem, 4vw, 3.25rem) 0;
 }
 
 .offline-heading {
@@ -29,10 +29,10 @@
 
 .offline-heading h1 {
   margin: 0.25rem 0 0;
-  font-size: clamp(3rem, 9vw, 6.5rem);
-  font-weight: 620;
-  letter-spacing: -0.075em;
-  line-height: 0.95;
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  font-weight: 660;
+  letter-spacing: -0.035em;
+  line-height: 1.04;
 }
 
 .offline-heading > p:last-child {

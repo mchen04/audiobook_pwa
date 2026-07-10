@@ -26,12 +26,53 @@ export async function parseLocalMp3(file: File): Promise<ParsedMp3> {
   const { parseBlob } = await import("music-metadata");
   let metadata;
   try {
-    metadata = await parseBlob(file, { duration: true, skipCovers: false });
+    // duration:true would scan every frame when a VBR file lacks a Xing
+    // header — minutes of reading on a multi-gigabyte audiobook. Parse tags
+    // only; when the duration is not cheaply known, the audio decoder below
+    // estimates it instantly instead.
+    metadata = await parseBlob(file, { duration: false, skipCovers: false });
   } catch {
     throw new InvalidMp3Error();
   }
   const fallbackTitle = file.name.replace(/\.[^.]*$/, "");
-  return interpretMp3Metadata(metadata, fallbackTitle);
+  const parsedDuration = metadata.format.duration;
+  const fallbackDurationMs =
+    parsedDuration && Number.isFinite(parsedDuration) && parsedDuration > 0
+      ? undefined
+      : await probeAudioDurationMs(file);
+  return interpretMp3Metadata(metadata, fallbackTitle, fallbackDurationMs);
+}
+
+/**
+ * Reads a file's duration through the platform decoder. Browsers estimate an
+ * MP3's length from its bitrate and byte size without reading the whole file,
+ * which is the only workable option for huge VBR files without Xing headers.
+ */
+function probeAudioDurationMs(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const audio = new Audio();
+    const cleanup = () => {
+      audio.removeAttribute("src");
+      audio.load();
+      URL.revokeObjectURL(url);
+      clearTimeout(timer);
+    };
+    const fail = () => {
+      cleanup();
+      reject(new InvalidMp3Error());
+    };
+    const timer = setTimeout(fail, 30_000);
+    audio.addEventListener("loadedmetadata", () => {
+      const seconds = audio.duration;
+      cleanup();
+      if (Number.isFinite(seconds) && seconds > 0) resolve(Math.round(seconds * 1000));
+      else reject(new InvalidMp3Error());
+    });
+    audio.addEventListener("error", fail);
+    audio.preload = "metadata";
+    audio.src = url;
+  });
 }
 
 /**
@@ -42,13 +83,13 @@ export async function parseLocalMp3(file: File): Promise<ParsedMp3> {
 export async function importLocalMp3(
   userId: string,
   file: File,
-  onProgress: (percent: number) => void,
+  onProgress: (percent: number, stage: string) => void,
 ): Promise<void> {
-  onProgress(5);
+  onProgress(5, "Reading chapters");
   const parsed = await parseLocalMp3(file);
-  onProgress(45);
+  onProgress(45, "Reading chapters");
   const fingerprint = await fileFingerprint(file);
-  onProgress(55);
+  onProgress(55, "Adding to your library");
 
   const response = await fetch("/api/books/local", {
     method: "POST",
@@ -72,7 +113,9 @@ export async function importLocalMp3(
     throw new Error(payload?.error || "The MP3 could not be imported.");
   }
   const { bookId } = (await response.json()) as { bookId: string };
-  onProgress(70);
+  // Copying a multi-gigabyte file into device storage is the long tail of the
+  // import; the stage label keeps the wait legible while the percent holds.
+  onProgress(70, "Saving to this device");
 
   const chapters: PlayerChapter[] = parsed.chapters.map((chapter) => ({
     id: `${bookId}:${chapter.position}`,
@@ -99,5 +142,5 @@ export async function importLocalMp3(
     void fetch(`/api/books/${bookId}`, { method: "DELETE" }).catch(() => undefined);
     throw error;
   }
-  onProgress(100);
+  onProgress(100, "Finishing");
 }

@@ -1,37 +1,39 @@
 :root {
-  --bg: #f5f7fb;
-  --surface: #fcfdff;
+  --bg: #fafafa;
+  --surface: #ffffff;
   --surface-strong: #ffffff;
-  --surface-muted: #e9edf5;
-  --text: #151923;
-  --text-muted: #5a6372;
-  --border: #d9dfeb;
-  --accent: #3157d5;
-  --accent-hover: #2448bf;
-  --accent-contrast: #f9fbff;
-  --danger: #b42335;
-  --focus: #6d8cff;
-  --shadow: 0 24px 70px rgb(64 78 112 / 0.14);
-  --radius-panel: 16px;
+  --surface-muted: #f0f0f2;
+  --text: #18181b;
+  --text-muted: #74747e;
+  --border: #e6e6ea;
+  --accent: #18181b;
+  --accent-hover: #333338;
+  --accent-contrast: #ffffff;
+  --danger: #b3323e;
+  --focus: #52525b;
+  --shadow: 0 18px 50px rgb(24 24 27 / 0.1);
+  --shadow-soft: 0 8px 28px rgb(24 24 27 / 0.07);
+  --radius-panel: 18px;
   --radius-control: 12px;
   --header-height: 72px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #10131a;
-    --surface: #161b24;
-    --surface-strong: #1b212c;
-    --surface-muted: #242c38;
-    --text: #eef2fa;
-    --text-muted: #aab3c2;
-    --border: #303948;
-    --accent: #7392ff;
-    --accent-hover: #8da7ff;
-    --accent-contrast: #10131a;
-    --danger: #ff8796;
-    --focus: #9fb4ff;
-    --shadow: 0 28px 80px rgb(0 0 0 / 0.35);
+    --bg: #0e0e10;
+    --surface: #151517;
+    --surface-strong: #1b1b1e;
+    --surface-muted: #232327;
+    --text: #f4f4f5;
+    --text-muted: #9c9ca5;
+    --border: #2a2a2f;
+    --accent: #f4f4f5;
+    --accent-hover: #ffffff;
+    --accent-contrast: #131315;
+    --danger: #ff8a94;
+    --focus: #a1a1aa;
+    --shadow: 0 24px 60px rgb(0 0 0 / 0.5);
+    --shadow-soft: 0 10px 32px rgb(0 0 0 / 0.4);
   }
 }
 
@@ -43,6 +45,14 @@ html {
   background: var(--bg);
   overscroll-behavior-y: none;
   -webkit-text-size-adjust: 100%;
+}
+
+/* The page may only ever scroll vertically; anything wider than the viewport
+   is clipped instead of dragging the whole document sideways. */
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 body {
@@ -141,10 +151,10 @@ a {
 .auth-eyebrow,
 .library-kicker {
   margin: 0 0 0.8rem;
-  color: var(--accent);
+  color: var(--text-muted);
   font-size: 0.77rem;
-  font-weight: 720;
-  letter-spacing: 0.08em;
+  font-weight: 640;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
 }
 
@@ -286,7 +296,8 @@ a {
   padding: 0.65rem 0.95rem;
 }
 
-a.secondary-button {
+a.secondary-button,
+a.icon-text-button {
   text-decoration: none;
 }
 
@@ -299,10 +310,11 @@ a.secondary-button {
 .empty-library h1,
 .offline-copy h1 {
   margin: 0;
-  font-size: clamp(2.2rem, 7vw, 4rem);
-  font-weight: 620;
-  letter-spacing: -0.06em;
-  line-height: 1;
+  font-size: clamp(1.9rem, 5.5vw, 3rem);
+  font-weight: 640;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
+  text-wrap: balance;
 }
 
 .empty-library > p:not(.library-kicker),

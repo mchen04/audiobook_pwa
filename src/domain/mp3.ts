@@ -36,9 +36,18 @@ export class InvalidMp3Error extends Error {
  * Pure interpretation of a parsed MP3: format validation, metadata cleanup,
  * chapter normalization, artwork sniffing. Shared by the server import parser
  * and the in-browser parser for device-local books.
+ *
+ * `fallbackDurationMs` covers files whose duration the tag parse cannot see
+ * cheaply (VBR without a Xing header) — a full frame scan of a multi-gigabyte
+ * audiobook is not viable in the browser, so the caller probes the duration
+ * through the platform's audio decoder instead.
  */
-export function interpretMp3Metadata(metadata: IAudioMetadata, fallbackTitle: string): ParsedMp3 {
-  const durationSeconds = metadata.format.duration;
+export function interpretMp3Metadata(
+  metadata: IAudioMetadata,
+  fallbackTitle: string,
+  fallbackDurationMs?: number,
+): ParsedMp3 {
+  const durationSeconds = metadata.format.duration || (fallbackDurationMs ?? 0) / 1000;
   if (
     !metadata.format.hasAudio ||
     metadata.format.hasVideo ||
