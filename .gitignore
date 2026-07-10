@@ -1,0 +1,33 @@
+# dependencies
+/node_modules/
+
+# Next.js
+/.next/
+/out/
+
+# local runtime data and generated media
+/.data/
+/uploads/
+*.mp3
+
+# environment and secrets
+.env
+.env.*
+!.env.example
+
+# generated service worker artifacts
+/public/sw.js.map
+
+# test and coverage output
+/coverage/
+/test-results/
+/playwright-report/
+
+# editor and OS files
+.DS_Store
+*.log
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+.vercel

@@ -1,0 +1,7 @@
+.data
+.next
+node_modules
+coverage
+test-results
+tsconfig.tsbuildinfo
+*.mp3

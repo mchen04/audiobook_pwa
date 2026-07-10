@@ -1,0 +1,437 @@
+"use client";
+
+import {
+  BookOpenText,
+  MagnifyingGlass,
+  Play,
+  Rows,
+  SquaresFour,
+  UploadSimple,
+  WarningCircle,
+  X,
+} from "@phosphor-icons/react";
+import Link from "next/link";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+
+import type { LibraryBook } from "@/domain/library";
+import { formatDurationRounded } from "@/lib/format-time";
+import { importLocalMp3 } from "@/lib/local-import";
+import { listOfflineBooks } from "@/lib/offline-library";
+
+import { useLibraryBooks } from "./use-library-books";
+
+type LibraryClientProps = {
+  userId: string;
+  initialBooks: LibraryBook[];
+  initialCursor: string | null;
+};
+
+type UploadState = {
+  filename: string;
+  percent: number;
+};
+
+type StatusFilter = "all" | "in-progress" | "not-started" | "finished" | "archived";
+type SortOrder = "activity" | "added" | "title" | "author";
+
+const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "in-progress", label: "In progress" },
+  { id: "not-started", label: "Not started" },
+  { id: "finished", label: "Finished" },
+  { id: "archived", label: "Archived" },
+];
+
+export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryClientProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const { books, loadingMore, reload } = useLibraryBooks(initialBooks, initialCursor);
+
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortOrder>("activity");
+  const [view, setView] = useState<"grid" | "list">("grid");
+  const [upload, setUpload] = useState<UploadState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [localCovers, setLocalCovers] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let active = true;
+    void listOfflineBooks(userId)
+      .then((records) => {
+        if (!active) return;
+        const covers: Record<string, string> = {};
+        for (const record of records) {
+          if (record.offlineCoverUrl) covers[record.book.id] = record.offlineCoverUrl;
+        }
+        setLocalCovers(covers);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [userId, books]);
+
+  const allTags = useMemo(
+    () => [...new Set(books.flatMap((book) => book.tags))].sort((a, b) => a.localeCompare(b)),
+    [books],
+  );
+
+  const continueBook = useMemo(() => {
+    return books
+      .filter(
+        (book) =>
+          !book.archivedAt &&
+          !book.completed &&
+          (book.positionMs || 0) > 0 &&
+          book.progressUpdatedAt,
+      )
+      .sort((a, b) => (b.progressUpdatedAt || "").localeCompare(a.progressUpdatedAt || ""))[0];
+  }, [books]);
+
+  const visibleBooks = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    let list = books.filter((book) => matchesStatus(book, status));
+    if (activeTag) list = list.filter((book) => book.tags.includes(activeTag));
+    if (normalized) {
+      list = list.filter((book) =>
+        [book.title, book.author, book.narrator, book.series, ...book.tags].some((value) =>
+          value?.toLowerCase().includes(normalized),
+        ),
+      );
+    }
+    return [...list].sort(bookComparator(sort));
+  }, [activeTag, books, query, sort, status]);
+
+  function chooseFile() {
+    setError(null);
+    inputRef.current?.click();
+  }
+
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".mp3")) {
+      setError("Choose an MP3 file. Other audiobook formats are not supported.");
+      return;
+    }
+
+    setError(null);
+    setUpload({ filename: file.name, percent: 0 });
+    try {
+      await importLocalMp3(userId, file, (percent) => setUpload({ filename: file.name, percent }));
+      await reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "The MP3 could not be imported.");
+    } finally {
+      setUpload(null);
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        className="visually-hidden"
+        type="file"
+        accept=".mp3,audio/mpeg,audio/mp3"
+        onChange={handleFile}
+        tabIndex={-1}
+        aria-label="Choose an MP3 file to import"
+      />
+
+      {books.length === 0 ? (
+        <section className="empty-library" aria-labelledby="library-title">
+          <div className="empty-library-art" aria-hidden="true">
+            <BookOpenText size={54} weight="duotone" />
+          </div>
+          <p className="library-kicker">Your private library</p>
+          <h1 id="library-title">Bring your first audiobook.</h1>
+          <p>
+            Choose the chaptered MP3 from Epub Listener. Chapterline will keep its chapters and
+            remember your place.
+          </p>
+          <button type="button" className="primary-button" onClick={chooseFile} disabled={!!upload}>
+            <UploadSimple size={20} weight="bold" aria-hidden="true" />
+            <span>{upload ? "Importing" : "Choose MP3"}</span>
+          </button>
+          <small>MP3 only. Your library is visible only to you.</small>
+        </section>
+      ) : (
+        <section className="library-content" aria-labelledby="library-title">
+          <div className="library-heading">
+            <div>
+              <p className="library-kicker">Your private library</p>
+              <h1 id="library-title">Library</h1>
+            </div>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={chooseFile}
+              disabled={!!upload}
+            >
+              <UploadSimple size={20} weight="bold" aria-hidden="true" />
+              <span>{upload ? "Importing" : "Add MP3"}</span>
+            </button>
+          </div>
+
+          {continueBook && (
+            <Link
+              href={`/books/${continueBook.id}?autoplay=1`}
+              className="continue-card"
+              aria-label={`Continue listening ${continueBook.title}`}
+            >
+              <span className="book-cover continue-cover" aria-hidden="true">
+                <BookCover book={continueBook} coverUrl={localCovers[continueBook.id]} />
+              </span>
+              <span className="continue-copy">
+                <small>Continue listening</small>
+                <strong>{continueBook.title}</strong>
+                <span>
+                  {progressPercent(continueBook)}% · {remainingLabel(continueBook)}
+                </span>
+              </span>
+              <span className="continue-play" aria-hidden="true">
+                <Play size={24} weight="fill" />
+              </span>
+            </Link>
+          )}
+
+          <div className="library-tools">
+            <label className="search-field">
+              <MagnifyingGlass size={19} aria-hidden="true" />
+              <span className="visually-hidden">Search your library</span>
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search title, author, or tag"
+              />
+              {query && (
+                <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
+                  <X size={17} aria-hidden="true" />
+                </button>
+              )}
+            </label>
+            <label className="sort-field">
+              <span className="visually-hidden">Sort books</span>
+              <select value={sort} onChange={(event) => setSort(event.target.value as SortOrder)}>
+                <option value="activity">Recent activity</option>
+                <option value="added">Recently added</option>
+                <option value="title">Title A–Z</option>
+                <option value="author">Author A–Z</option>
+              </select>
+            </label>
+            <div className="view-switch" aria-label="Library view">
+              <button
+                type="button"
+                aria-label="Grid view"
+                aria-pressed={view === "grid"}
+                onClick={() => setView("grid")}
+              >
+                <SquaresFour size={19} weight={view === "grid" ? "fill" : "regular"} />
+              </button>
+              <button
+                type="button"
+                aria-label="List view"
+                aria-pressed={view === "list"}
+                onClick={() => setView("list")}
+              >
+                <Rows size={19} weight={view === "list" ? "bold" : "regular"} />
+              </button>
+            </div>
+          </div>
+
+          <div className="library-filters" role="group" aria-label="Filter by status">
+            {STATUS_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                className="filter-chip"
+                aria-pressed={status === filter.id}
+                onClick={() => setStatus(filter.id)}
+              >
+                {filter.label}
+              </button>
+            ))}
+            {allTags.map((tag) => (
+              <button
+                key={`tag-${tag}`}
+                type="button"
+                className="filter-chip filter-chip-tag"
+                aria-pressed={activeTag === tag}
+                onClick={() => setActiveTag((current) => (current === tag ? null : tag))}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+
+          {loadingMore && (
+            <p className="library-loading" role="status">
+              Loading the rest of your library…
+            </p>
+          )}
+
+          {visibleBooks.length ? (
+            <div className={`book-grid ${view === "list" ? "book-grid-list" : ""}`}>
+              {visibleBooks.map((book) => (
+                <BookItem
+                  book={book}
+                  key={book.id}
+                  compact={view === "list"}
+                  coverUrl={localCovers[book.id]}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="no-results">
+              <MagnifyingGlass size={30} weight="duotone" aria-hidden="true" />
+              <h2>No matching books</h2>
+              <p>Try another search, status, or tag.</p>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setQuery("");
+                  setStatus("all");
+                  setActiveTag(null);
+                }}
+              >
+                Clear filters
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {upload && (
+        <div className="upload-status" role="status" aria-live="polite">
+          <div>
+            <span>Importing {upload.filename}</span>
+            <strong>{upload.percent}%</strong>
+          </div>
+          <progress value={upload.percent} max={100} aria-label={`Uploading ${upload.filename}`} />
+        </div>
+      )}
+
+      {error && (
+        <div className="upload-error" role="alert">
+          <WarningCircle size={21} weight="fill" aria-hidden="true" />
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">
+            <X size={17} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function matchesStatus(book: LibraryBook, status: StatusFilter): boolean {
+  if (status === "archived") return !!book.archivedAt;
+  if (book.archivedAt) return false;
+  if (status === "all") return true;
+  if (status === "finished") return !!book.completed;
+  if (status === "in-progress") return !book.completed && (book.positionMs || 0) > 0;
+  return !book.completed && !(book.positionMs || 0);
+}
+
+function bookComparator(sort: SortOrder): (a: LibraryBook, b: LibraryBook) => number {
+  if (sort === "title") return (a, b) => a.title.localeCompare(b.title);
+  if (sort === "author") return (a, b) => a.author.localeCompare(b.author);
+  if (sort === "added") return (a, b) => b.createdAt.localeCompare(a.createdAt);
+  return (a, b) =>
+    (b.progressUpdatedAt || b.updatedAt).localeCompare(a.progressUpdatedAt || a.updatedAt);
+}
+
+function progressPercent(book: LibraryBook): number {
+  if (!book.durationMs || !book.positionMs) return 0;
+  return Math.min(100, Math.max(0, Math.round((book.positionMs / book.durationMs) * 100)));
+}
+
+function remainingLabel(book: LibraryBook): string {
+  if (!book.durationMs) return "";
+  const remaining = Math.max(0, book.durationMs - (book.positionMs || 0));
+  if (remaining < 60_000) return "under a minute left";
+  return `${formatDurationRounded(remaining)} left`;
+}
+
+function BookCover({ book, coverUrl }: { book: LibraryBook; coverUrl?: string }) {
+  if (coverUrl) {
+    return <img className="book-cover-art" src={coverUrl} alt="" />;
+  }
+  const initials = book.title
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+  return (
+    <>
+      <span>{initials || "AB"}</span>
+      <small>MP3</small>
+    </>
+  );
+}
+
+function BookItem({
+  book,
+  compact,
+  coverUrl,
+}: {
+  book: LibraryBook;
+  compact: boolean;
+  coverUrl?: string;
+}) {
+  const percent = progressPercent(book);
+
+  return (
+    <article className="book-item">
+      {/* The title link is the card's accessible entry; the cover stays clickable
+          without adding a duplicate tab stop. */}
+      <Link href={`/books/${book.id}`} className="book-cover" tabIndex={-1} aria-hidden="true">
+        <BookCover book={book} coverUrl={coverUrl} />
+      </Link>
+      <div className="book-copy">
+        <Link href={`/books/${book.id}`} className="book-title">
+          {book.title}
+        </Link>
+        <p>{book.author}</p>
+        {book.chapterDiagnostic && (
+          <p className="book-diagnostic" title={book.chapterDiagnostic}>
+            <WarningCircle size={15} aria-hidden="true" />
+            One chapter
+          </p>
+        )}
+        {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}
+        <div className="book-progress-copy">
+          <span>
+            {book.completed ? "Finished" : percent ? `${percent}% complete` : "Not started"}
+          </span>
+          {book.durationMs && <span>{formatDurationRounded(book.durationMs)}</span>}
+        </div>
+        <div
+          className="book-progress"
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="Listening progress"
+        >
+          <span style={{ width: `${percent}%` }} />
+        </div>
+      </div>
+      {compact && (
+        <Link
+          href={`/books/${book.id}?autoplay=1`}
+          className="book-play-button"
+          aria-label={`Play ${book.title}`}
+        >
+          <Play size={19} weight="fill" aria-hidden="true" />
+        </Link>
+      )}
+    </article>
+  );
+}

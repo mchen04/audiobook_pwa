@@ -1,0 +1,868 @@
+.player-page {
+  width: min(100%, 90rem);
+  margin: 0 auto;
+  padding: 1.25rem 0 8.5rem;
+}
+
+.player-topbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 1rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.player-topbar > :last-child {
+  justify-self: end;
+}
+
+.player-topbar > :first-child {
+  justify-self: start;
+}
+
+.player-topbar > span {
+  max-width: 30rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
+  gap: clamp(2rem, 5vw, 5.5rem);
+  align-items: start;
+  margin-top: clamp(2rem, 6vw, 5rem);
+}
+
+.player-main {
+  display: grid;
+  justify-items: center;
+}
+
+.player-hero {
+  display: grid;
+  justify-items: center;
+}
+
+.player-cover {
+  position: relative;
+  display: flex;
+  width: min(58vw, 20rem, calc(38dvh * 0.78));
+  aspect-ratio: 0.78;
+  align-items: end;
+  justify-content: space-between;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: var(--radius-panel);
+  background:
+    radial-gradient(
+      circle at 72% 12%,
+      color-mix(in srgb, var(--accent) 34%, transparent),
+      transparent 36%
+    ),
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--accent) 16%, var(--surface)),
+      var(--surface-muted)
+    );
+  box-shadow: 0 32px 76px color-mix(in srgb, var(--accent) 18%, transparent);
+  padding: 1.45rem;
+}
+
+.player-cover::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 9px;
+  border-right: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  content: "";
+}
+
+.player-cover > span {
+  font-size: clamp(4rem, 10vw, 7.2rem);
+  font-weight: 610;
+  letter-spacing: -0.1em;
+  line-height: 0.78;
+}
+
+.player-cover small {
+  color: var(--text-muted);
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.08em;
+}
+
+.player-book-copy {
+  max-width: 42rem;
+  margin-top: 2rem;
+  text-align: center;
+}
+
+.player-book-copy h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 4.2rem);
+  font-weight: 620;
+  letter-spacing: -0.065em;
+  line-height: 1;
+  overflow-wrap: anywhere;
+}
+
+.player-book-copy p {
+  margin: 0.65rem 0 0;
+  color: var(--text-muted);
+  font-size: 1rem;
+}
+
+.scrubber {
+  width: min(100%, 42rem);
+  margin-top: 2rem;
+}
+
+.scrubber input {
+  width: 100%;
+  height: 2rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.scrubber > div {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.75rem;
+}
+
+.transport-controls {
+  display: grid;
+  grid-template-columns: repeat(5, 3.5rem);
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.1rem, 1.4vw, 0.8rem);
+  margin-top: 1.15rem;
+}
+
+.transport-controls > button {
+  position: relative;
+  display: grid;
+  width: 3.5rem;
+  height: 3.5rem;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.transport-controls > button:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.transport-controls > button:disabled {
+  cursor: default;
+  opacity: 0.28;
+}
+
+.transport-controls .main-play {
+  width: 4.4rem;
+  height: 4.4rem;
+  justify-self: center;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.transport-controls .main-play:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.timed-skip small {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.player-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  margin-top: 1.5rem;
+}
+
+.download-action {
+  display: grid;
+  justify-items: center;
+}
+
+.download-action > p {
+  max-width: 24rem;
+  margin: 0.55rem 0 0;
+  color: var(--danger);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.download-button {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.55rem 0.9rem;
+  font-size: 0.84rem;
+  font-weight: 680;
+}
+
+.download-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-muted);
+}
+
+.download-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.download-button.is-downloaded {
+  color: var(--accent);
+}
+
+.download-button.is-downloaded svg:last-child {
+  margin-left: 0.25rem;
+  color: var(--text-muted);
+}
+
+.player-options > label,
+.sleep-menu > summary {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 0.55rem 0.85rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.84rem;
+}
+
+.player-options select {
+  min-height: 2.75rem;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 680;
+}
+
+.player-options > label:focus-within,
+.sleep-menu > summary:focus-visible {
+  border-color: var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.sleep-menu {
+  position: relative;
+}
+
+.sleep-menu > summary {
+  color: var(--text);
+  font-weight: 650;
+  list-style: none;
+}
+
+.sleep-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* The options row sits near the fold, so the menu always opens upward
+   where the transport area guarantees room. */
+.sleep-menu > div {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 0.55rem);
+  right: 0;
+  display: grid;
+  width: 12rem;
+  max-height: min(60dvh, 22rem);
+  overflow: hidden auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+  padding: 0.35rem;
+}
+
+.sleep-custom {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.2rem 0.25rem;
+}
+
+.sleep-custom input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  font-size: 1rem;
+}
+
+.sleep-custom button {
+  flex-shrink: 0;
+}
+
+.sleep-menu > div button {
+  min-height: 2.6rem;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+}
+
+.sleep-menu > div button:hover {
+  background: var(--surface-muted);
+}
+
+.chapter-panel {
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100dvh - 8.5rem);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: 0 18px 54px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.chapter-panel-heading {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  min-height: 4rem;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(16px);
+  padding: 0 1rem;
+}
+
+.chapter-panel-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.chapter-panel-heading h2,
+.bookmark-list h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.chapter-panel-heading > span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.chapter-panel ol,
+.bookmark-list ul {
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+}
+
+.chapter-panel li > button {
+  display: grid;
+  width: 100%;
+  min-height: 3.8rem;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.55rem 0.7rem;
+  text-align: left;
+}
+
+.chapter-panel li > button:hover,
+.chapter-panel li > button[aria-current="true"] {
+  background: var(--surface-muted);
+}
+
+.chapter-panel li > button[aria-current="true"] > span:first-child {
+  color: var(--accent);
+  font-weight: 750;
+}
+
+.chapter-panel li > button > span:first-child {
+  color: var(--text-muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.75rem;
+}
+
+.chapter-panel li strong,
+.chapter-panel li small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chapter-panel li strong {
+  font-size: 0.86rem;
+}
+
+.chapter-panel li small {
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+}
+
+.playing-bars {
+  display: flex;
+  height: 1rem;
+  align-items: end;
+  gap: 2px;
+}
+
+.playing-bars i {
+  width: 2px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: playing-bars 0.8s ease-in-out infinite alternate;
+}
+
+.playing-bars i:nth-child(2) {
+  height: 60%;
+  animation-delay: 0.2s;
+}
+
+.playing-bars i:nth-child(3) {
+  height: 80%;
+  animation-delay: 0.4s;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.bookmark-list {
+  border-top: 1px solid var(--border);
+  padding: 1rem 0.65rem;
+}
+
+.bookmark-list h2 {
+  padding: 0 0.4rem 0.45rem;
+}
+
+.bookmark-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem;
+}
+
+.bookmark-list li button {
+  min-height: 2.5rem;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+.bookmark-list li button:hover {
+  background: var(--surface-muted);
+}
+
+.bookmark-list li button small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.mini-player {
+  position: fixed;
+  z-index: 25;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  left: max(1rem, env(safe-area-inset-left));
+  display: grid;
+  width: min(calc(100% - 2rem), 48rem);
+  min-height: 4.7rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(22px);
+  padding: 0.55rem 0.65rem;
+}
+
+.mini-progress {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: var(--surface-muted);
+}
+
+.mini-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.mini-book {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.mini-cover {
+  display: grid;
+  width: 3.35rem;
+  height: 3.35rem;
+  flex: 0 0 auto;
+  place-items: end start;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface-muted));
+  color: var(--text);
+  font-weight: 750;
+  padding: 0.45rem;
+}
+
+.mini-book > span:last-child {
+  min-width: 0;
+}
+
+.mini-book strong,
+.mini-book small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-book strong {
+  font-size: 0.9rem;
+}
+
+.mini-book small {
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.mini-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.mini-controls button {
+  display: grid;
+  width: 2.7rem;
+  height: 2.7rem;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.mini-controls button:hover {
+  background: var(--surface-muted);
+}
+
+.mini-controls .mini-play {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+@media (max-width: 820px) {
+  .player-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .chapter-panel {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .player-page {
+    padding-top: 0.8rem;
+  }
+
+  .player-topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .player-topbar .icon-text-button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .player-topbar .icon-text-button {
+    width: 2.9rem;
+    padding: 0;
+  }
+
+  .player-layout {
+    gap: 2.75rem;
+    margin-top: 2rem;
+  }
+
+  .player-cover {
+    width: min(68vw, 17rem);
+  }
+
+  .player-book-copy {
+    margin-top: 1.5rem;
+  }
+
+  .transport-controls {
+    grid-template-columns: repeat(5, minmax(2.7rem, 3.5rem));
+    width: 100%;
+  }
+
+  .transport-controls > button {
+    width: 100%;
+  }
+
+  .player-options {
+    flex-wrap: wrap;
+  }
+
+  .mini-player {
+    bottom: max(0.55rem, env(safe-area-inset-bottom));
+    left: max(0.55rem, env(safe-area-inset-left));
+    right: max(0.55rem, env(safe-area-inset-right));
+    width: calc(100% - 1.1rem);
+  }
+
+  .mini-controls button:first-child,
+  .mini-controls button:last-child {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .playing-bars i {
+    animation: none !important;
+  }
+
+  .spin {
+    animation: none !important;
+  }
+}
+
+.player-topbar-actions {
+  display: flex;
+  justify-content: end;
+  gap: 0.25rem;
+}
+
+.player-notice {
+  min-height: 1.4rem;
+  margin-top: 0.6rem;
+  color: var(--accent);
+  font-size: 0.86rem;
+  font-weight: 650;
+  text-align: center;
+}
+
+.up-next {
+  margin: 1.1rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  text-align: center;
+}
+
+.up-next a {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.chapter-diagnostic {
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 0.85rem 1.1rem;
+}
+
+.bookmark-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.bookmark-row button:nth-child(2) {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.bookmark-note-form {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.15rem 0.6rem 0.6rem;
+}
+
+.bookmark-note-form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  font-size: 1rem;
+}
+
+/* Height-aware player: transport must be visible without scrolling. */
+@media (max-height: 1000px) {
+  .player-page {
+    padding-top: 0.75rem;
+  }
+
+  .player-layout {
+    margin-top: clamp(0.9rem, 3vh, 2.5rem);
+  }
+
+  .player-cover {
+    width: min(48vw, 17rem, calc(34dvh * 0.78));
+  }
+
+  .player-notice {
+    min-height: 1.1rem;
+    margin-top: 0.35rem;
+  }
+
+  .transport-controls {
+    margin-top: 0.85rem;
+  }
+
+  .player-options {
+    margin-top: 1rem;
+  }
+
+  .player-book-copy {
+    margin-top: clamp(0.7rem, 2.2vh, 2rem);
+  }
+
+  .player-book-copy h1 {
+    font-size: clamp(1.5rem, 3.2vh, 3rem);
+  }
+
+  .scrubber {
+    margin-top: clamp(0.7rem, 2.2vh, 2rem);
+  }
+
+  .player-page {
+    padding-bottom: 5rem;
+  }
+}
+
+/* Very short viewports (phone landscape): cover sits beside the title. */
+@media (max-height: 620px) {
+  .player-hero {
+    display: flex;
+    width: min(100%, 42rem);
+    align-items: center;
+    justify-content: center;
+    gap: 1.1rem;
+  }
+
+  .player-cover {
+    width: calc(19dvh * 0.78);
+    flex-shrink: 0;
+    padding: 0.5rem;
+    box-shadow: none;
+  }
+
+  .player-cover > span {
+    font-size: 1.6rem;
+  }
+
+  .player-cover small {
+    display: none;
+  }
+
+  .player-book-copy {
+    margin-top: 0;
+    text-align: left;
+  }
+
+  .player-book-copy h1 {
+    font-size: clamp(1.2rem, 4.6vh, 1.8rem);
+  }
+
+  .player-book-copy p {
+    margin-top: 0.25rem;
+    font-size: 0.88rem;
+  }
+
+  .scrubber,
+  .transport-controls,
+  .player-options {
+    margin-top: 0.55rem;
+  }
+
+  .player-notice {
+    min-height: 0.9rem;
+    margin-top: 0.15rem;
+  }
+
+  .player-page {
+    padding-top: 0.4rem;
+  }
+
+  .player-cover {
+    width: calc(16dvh * 0.78);
+  }
+}

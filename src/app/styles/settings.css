@@ -1,0 +1,124 @@
+.settings-page {
+  width: min(100%, 46rem);
+  margin: 0 auto;
+  padding: 1.5rem 0 6rem;
+}
+
+.settings-heading {
+  display: grid;
+  justify-items: start;
+  gap: 0.35rem;
+  margin-bottom: 2rem;
+}
+
+.settings-heading h1 {
+  margin: 0;
+  font-size: clamp(2.2rem, 6vw, 3.4rem);
+  font-weight: 620;
+  letter-spacing: -0.055em;
+}
+
+.settings-email {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.settings-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  padding: clamp(1.1rem, 3vw, 1.6rem);
+  margin-top: 1.1rem;
+}
+
+.settings-group h2 {
+  margin: 0 0 0.9rem;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.settings-fields {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.settings-fields > label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.settings-fields select {
+  min-height: 2.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.45rem 0.65rem;
+  font-size: 1rem;
+}
+
+.settings-fields select:focus-visible {
+  border-color: var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.settings-toggle {
+  display: flex !important;
+  align-items: start;
+  gap: 0.7rem;
+  cursor: pointer;
+}
+
+.settings-toggle input {
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-top: 0.15rem;
+  accent-color: var(--accent);
+}
+
+.settings-toggle span {
+  display: grid;
+  gap: 0.15rem;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.settings-toggle small {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.settings-group .secondary-button {
+  margin-top: 0.9rem;
+}
+
+.delete-account-form {
+  display: grid;
+  justify-items: start;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
+.delete-account-form label {
+  display: grid;
+  width: min(100%, 24rem);
+  gap: 0.3rem;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.delete-account-form input {
+  min-height: 2.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  color: var(--text);
+  padding: 0.5rem 0.7rem;
+  font-size: 1rem;
+}
