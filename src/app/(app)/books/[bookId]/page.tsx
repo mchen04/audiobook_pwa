@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { z } from "zod";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import { LocalMediaGate } from "@/components/player/local-media-gate";
@@ -23,6 +24,7 @@ export default async function BookPage({
 }) {
   const session = await requireSession();
   const { bookId } = await params;
+  if (!z.uuid().safeParse(bookId).success) notFound();
   const { autoplay } = await searchParams;
   const [book, bookmarkRows, nextInCollection, recentSessions] = await Promise.all([
     getBookForUser(session.user.id, bookId),
@@ -49,6 +51,7 @@ export default async function BookPage({
       endMs: chapter.endMs,
     })),
     initialPositionMs: book.positionMs || 0,
+    initialProgressOccurredAt: book.progressOccurredAt?.toISOString() || null,
     initialPlaybackRate: Number(book.playbackRate || 1),
     completed: book.completed || false,
   };
@@ -81,6 +84,7 @@ export default async function BookPage({
       userId={session.user.id}
       playerBook={playerBook}
       mediaFingerprint={book.mediaFingerprint}
+      mediaFingerprintKind={book.mediaFingerprintKind}
       byteSize={book.byteSize}
       initialBookmarks={initialBookmarks}
       autoplay={autoplay === "1"}

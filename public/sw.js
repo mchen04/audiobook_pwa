@@ -13,10 +13,10 @@ async function precacheShell() {
   const cache = await caches.open(CACHE_VERSION);
   await cache.addAll(PRECACHE);
   const offlinePage = await cache.match(OFFLINE_URL);
-  if (!offlinePage) return;
+  if (!offlinePage) throw new Error("The required offline page was not cached.");
   const html = await offlinePage.clone().text();
   const assets = [...new Set(html.match(/\/_next\/static\/[^"'\s\\]+/g) || [])];
-  await Promise.all(assets.map((asset) => cache.add(asset).catch(() => undefined)));
+  await Promise.all(assets.map((asset) => cache.add(asset)));
 }
 
 self.addEventListener("activate", (event) => {

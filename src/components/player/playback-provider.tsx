@@ -15,7 +15,8 @@ import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import { createListeningTracker } from "@/lib/listening-tracker";
 import {
   markPausedNow,
-  readLocalPosition,
+  freshestPosition,
+  readLocalProgress,
   readMsSinceLastPause,
   resolveStartPosition,
   saveLocalPosition,
@@ -62,6 +63,7 @@ type PlaybackContextValue = {
   clearSleep: () => void;
   markFinished: () => void;
   restart: () => void;
+  unloadBook: () => void;
 };
 
 const PlaybackContext = createContext<PlaybackContextValue | null>(null);
@@ -70,6 +72,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const audioRef = useRef<HTMLAudioElement>(null);
   const activeBookRef = useRef<PlayerBook | null>(null);
   const trackerRef = useRef(createListeningTracker());
+  const suppressNextPauseRef = useRef(false);
   const preferencesRef = useRef<PlayerPreferences>(DEFAULT_PREFERENCES);
   const [book, setBook] = useState<PlayerBook | null>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
@@ -79,7 +82,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const [lastEndedAt, setLastEndedAt] = useState(0);
 
   const announcePlaying = useTabArbitration(audioRef);
-  const { persistProgress, onListeningTick } = useProgressPersistence(
+  const { persistProgress, onListeningTick, markInProgress } = useProgressPersistence(
     userId,
     audioRef,
     activeBookRef,
@@ -87,10 +90,18 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const {
     sleepMode,
     setSleepMinutes,
-    setSleepAtChapterEnd,
+    setSleepAtChapterEnd: setSleepAtChapterEndTarget,
     clearSleep,
     onTimeUpdate: onSleepTick,
   } = useSleepTimer(audioRef);
+
+  const setSleepAtChapterEnd = useCallback(() => {
+    const activeBook = activeBookRef.current;
+    const audio = audioRef.current;
+    if (activeBook && audio) {
+      setSleepAtChapterEndTarget(audio.currentTime * 1000, activeBook.chapters);
+    }
+  }, [setSleepAtChapterEndTarget]);
 
   useEffect(() => {
     activeBookRef.current = book;
@@ -112,8 +123,15 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         if (active) setPreferences(fresh);
       })
       .catch(() => undefined);
+    const refresh = () => {
+      void fetchPreferences(userId).then((fresh) => {
+        if (active) setPreferences(fresh);
+      });
+    };
+    window.addEventListener("online", refresh);
     return () => {
       active = false;
+      window.removeEventListener("online", refresh);
     };
   }, [userId]);
 
@@ -138,11 +156,12 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       // persist, otherwise merely opening a book would overwrite the position.
       if (!audio.paused) onListeningTick(positionMs);
       if (activeBookRef.current) {
-        onSleepTick(audio, activeBookRef.current.chapters);
+        onSleepTick(audio);
         syncMediaSessionPosition(audio, activeBookRef.current.durationMs);
       }
     };
     const markPlaying = () => {
+      markInProgress();
       setIsPlaying(true);
       trackerRef.current.begin(audio.currentTime * 1000);
       announcePlaying();
@@ -151,6 +170,10 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     const markPaused = () => {
       setIsPlaying(false);
       setMediaSessionPlaybackState("paused");
+      if (suppressNextPauseRef.current) {
+        suppressNextPauseRef.current = false;
+        return;
+      }
       markPausedNow();
       const positionMs = audio.currentTime * 1000;
       if (activeBookRef.current) {
@@ -177,7 +200,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       audio.removeEventListener("pause", markPaused);
       audio.removeEventListener("ended", markEnded);
     };
-  }, [announcePlaying, onListeningTick, onSleepTick, persistProgress, userId]);
+  }, [announcePlaying, markInProgress, onListeningTick, onSleepTick, persistProgress, userId]);
 
   const seek = useCallback(
     (positionMs: number) => {
@@ -197,13 +220,23 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       const audio = audioRef.current;
       if (!audio) return;
       if (activeBookRef.current?.id !== nextBook.id) {
-        if (!audio.paused && activeBookRef.current) {
-          trackerRef.current.end(activeBookRef.current.id, audio.currentTime * 1000);
+        const previousBook = activeBookRef.current;
+        if (!audio.paused && previousBook) {
+          const previousPositionMs = audio.currentTime * 1000;
+          suppressNextPauseRef.current = true;
+          audio.pause();
+          saveLocalPosition(userId, previousBook.id, previousPositionMs);
+          trackerRef.current.end(previousBook.id, previousPositionMs);
+          void persistProgress(previousPositionMs, false, previousBook);
         }
         trackerRef.current.reset();
 
         const { startAtMs, appliedRewindMs } = resolveStartPosition({
-          storedPositionMs: readLocalPosition(userId, nextBook.id) ?? nextBook.initialPositionMs,
+          storedPositionMs: freshestPosition({
+            local: readLocalProgress(userId, nextBook.id),
+            serverPositionMs: nextBook.initialPositionMs,
+            serverOccurredAt: nextBook.initialProgressOccurredAt,
+          }),
           durationMs: nextBook.durationMs,
           smartRewindEnabled: preferencesRef.current.smartRewind,
           msSinceLastPause: readMsSinceLastPause(),
@@ -223,7 +256,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       }
       if (autoplay) safePlay(audio);
     },
-    [userId],
+    [persistProgress, userId],
   );
 
   const play = useCallback(() => {
@@ -258,6 +291,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     const audio = audioRef.current;
     const activeBook = activeBookRef.current;
     if (!audio || !activeBook) return;
+    if (!audio.paused) suppressNextPauseRef.current = true;
     audio.pause();
     audio.currentTime = activeBook.durationMs / 1000;
     setCurrentTimeMs(activeBook.durationMs);
@@ -271,6 +305,42 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     setCurrentTimeMs(0);
     void persistProgress(0, false);
   }, [persistProgress]);
+
+  const unloadBook = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    activeBookRef.current = null;
+    setBook(null);
+    setCurrentTimeMs(0);
+    setIsPlaying(false);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("chapterline:unload-player", unloadBook);
+    return () => window.removeEventListener("chapterline:unload-player", unloadBook);
+  }, [unloadBook]);
+
+  useEffect(() => {
+    const reconcile = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          userId: string;
+          bookId: string;
+          positionMs: number;
+          playbackRate: number;
+        }>
+      ).detail;
+      if (detail.userId !== userId || activeBookRef.current?.id !== detail.bookId) return;
+      setCurrentTimeMs(detail.positionMs);
+      setRateState(detail.playbackRate);
+    };
+    window.addEventListener("chapterline:progress-conflict", reconcile);
+    return () => window.removeEventListener("chapterline:progress-conflict", reconcile);
+  }, [userId]);
 
   useMediaSession({ audioRef, preferencesRef, play, seek, skip });
 
@@ -302,6 +372,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       clearSleep,
       markFinished,
       restart,
+      unloadBook,
     }),
     [
       userId,
@@ -325,6 +396,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       clearSleep,
       markFinished,
       restart,
+      unloadBook,
     ],
   );
 

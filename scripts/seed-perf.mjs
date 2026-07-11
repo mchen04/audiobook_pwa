@@ -86,16 +86,17 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
       title,
       author: authors[index % authors.length],
       series: index % 5 === 0 ? `Perf Series ${index % 40}` : null,
-      status: "ready",
       created_at: createdAt,
       updated_at: createdAt,
     });
     media.push({
+      owner_id: userId,
       book_id: bookId,
       original_filename: `${title}.mp3`,
       mime_type: "audio/mpeg",
       byte_size: 25_000_000 + index * 1_000,
-      sha256: createHash("sha256").update(`perf-${bookId}`).digest("hex"),
+      fingerprint: createHash("sha256").update(`perf-${bookId}`).digest("hex"),
+      fingerprint_kind: "sha256-v1",
       duration_ms: durationMs,
     });
     for (let position = 0; position < CHAPTERS_PER_BOOK; position += 1) {

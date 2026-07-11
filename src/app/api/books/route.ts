@@ -1,36 +1,43 @@
-import { z } from "zod";
-
 import { withQuery } from "@/server/api/route-handler";
 import { toLibraryBookDto } from "@/server/books/dto";
-import { encodeLibraryCursor, listBooksForUser, type LibraryCursor } from "@/server/books/queries";
+import { InvalidLibraryCursorError } from "@/server/books/library-cursor";
+import { listBooksForUser } from "@/server/books/queries";
 
 export const runtime = "nodejs";
 
-const cursorSchema = z.object({
-  updatedAt: z.iso.datetime(),
-  id: z.uuid(),
-});
-
 export const GET = withQuery(async ({ request, session }) => {
-  const rawCursor = new URL(request.url).searchParams.get("cursor");
-  let cursor: LibraryCursor | undefined;
-  if (rawCursor) {
-    cursor = decodeCursor(rawCursor);
-    if (!cursor) return Response.json({ error: "Invalid cursor." }, { status: 400 });
+  const url = new URL(request.url);
+  let library;
+  try {
+    library = await listBooksForUser(session.user.id, {
+      query: url.searchParams.get("query") || undefined,
+      status: parseEnum(url.searchParams.get("status"), [
+        "all",
+        "in-progress",
+        "not-started",
+        "finished",
+        "archived",
+      ]),
+      tag: url.searchParams.get("tag") || undefined,
+      sort: parseEnum(url.searchParams.get("sort"), ["activity", "added", "title", "author"]),
+      cursor: url.searchParams.get("cursor") || undefined,
+      includeMeta: url.searchParams.get("meta") !== "0",
+    });
+  } catch (error) {
+    if (error instanceof InvalidLibraryCursorError) {
+      return Response.json({ error: "Invalid library cursor." }, { status: 400 });
+    }
+    throw error;
   }
-
-  const page = await listBooksForUser(session.user.id, cursor);
   return Response.json({
-    books: page.books.map(toLibraryBookDto),
-    nextCursor: page.nextCursor ? encodeLibraryCursor(page.nextCursor) : null,
+    ...library,
+    books: library.books.map(toLibraryBookDto),
+    ...("continueBook" in library
+      ? { continueBook: library.continueBook ? toLibraryBookDto(library.continueBook) : null }
+      : {}),
   });
 });
 
-function decodeCursor(raw: string): LibraryCursor | undefined {
-  try {
-    const parsed = cursorSchema.safeParse(JSON.parse(Buffer.from(raw, "base64url").toString()));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
+function parseEnum<T extends string>(value: string | null, choices: readonly T[]): T | undefined {
+  return choices.find((choice) => choice === value);
 }

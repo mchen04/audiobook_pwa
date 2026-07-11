@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { withMutation } from "@/server/api/route-handler";
+import { withMutationParams } from "@/server/api/route-handler";
 import { saveProgress } from "@/server/playback/progress";
 
 export const runtime = "nodejs";
@@ -14,7 +14,8 @@ const progressSchema = z.object({
   eventOccurredAt: z.coerce.date(),
 });
 
-export const PATCH = withMutation<typeof progressSchema, { bookId: string }>(
+export const PATCH = withMutationParams(
+  z.object({ bookId: z.uuid() }),
   progressSchema,
   "Invalid progress update.",
   async ({ session, params, data }) => {

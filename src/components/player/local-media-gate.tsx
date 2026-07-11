@@ -1,20 +1,27 @@
 "use client";
 
-import { Trash, UploadSimple } from "@phosphor-icons/react";
+import { ArrowClockwise, Trash, UploadSimple } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import { FullPlayer } from "@/components/player/full-player";
 import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
-import { fileFingerprint } from "@/lib/local-import";
-import { getOfflineBook, removeOfflineBook, storeLocalBookMedia } from "@/lib/offline-library";
+import { type MediaFingerprintKind, fingerprintMedia } from "@/lib/media-fingerprint";
+import { parseLocalMp3 } from "@/lib/local-import";
+import {
+  getOfflineBook,
+  removeOfflineBook,
+  storeLocalBookMedia,
+  storeOfflineBookmarks,
+} from "@/lib/offline-library";
 
 type GateState =
   | { phase: "checking" }
   | { phase: "ready"; mediaUrl: string; coverUrl: string | null }
   | { phase: "missing" }
+  | { phase: "unavailable" }
   | { phase: "attaching" };
 
 /**
@@ -27,6 +34,7 @@ export function LocalMediaGate({
   userId,
   playerBook,
   mediaFingerprint,
+  mediaFingerprintKind,
   byteSize,
   initialBookmarks,
   autoplay,
@@ -36,6 +44,7 @@ export function LocalMediaGate({
   userId: string;
   playerBook: PlayerBook;
   mediaFingerprint: string | null;
+  mediaFingerprintKind: MediaFingerprintKind | null;
   byteSize: number | null;
   initialBookmarks: Bookmark[];
   autoplay: boolean;
@@ -47,7 +56,21 @@ export function LocalMediaGate({
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [checkAttempt, setCheckAttempt] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const readyMediaUrl = state.phase === "ready" ? state.mediaUrl : null;
+  const readyCoverUrl = state.phase === "ready" ? state.coverUrl : null;
+  const resolvedPlayerBook = useMemo(
+    () =>
+      readyMediaUrl ? { ...playerBook, mediaUrl: readyMediaUrl, coverUrl: readyCoverUrl } : null,
+    [playerBook, readyCoverUrl, readyMediaUrl],
+  );
+
+  useEffect(() => {
+    if (state.phase === "ready") {
+      void storeOfflineBookmarks(userId, playerBook.id, initialBookmarks).catch(() => undefined);
+    }
+  }, [initialBookmarks, playerBook.id, state.phase, userId]);
 
   useEffect(() => {
     let active = true;
@@ -64,11 +87,11 @@ export function LocalMediaGate({
           setState({ phase: "missing" });
         }
       })
-      .catch(() => active && setState({ phase: "missing" }));
+      .catch(() => active && setState({ phase: "unavailable" }));
     return () => {
       active = false;
     };
-  }, [userId, playerBook.id]);
+  }, [userId, playerBook.id, checkAttempt]);
 
   async function attachFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -83,7 +106,11 @@ export function LocalMediaGate({
           `This file is not the one this book was imported from (expected ${formatBytes(byteSize)}).`,
         );
       }
-      if (mediaFingerprint && (await fileFingerprint(file)) !== mediaFingerprint) {
+      if (
+        mediaFingerprint &&
+        mediaFingerprintKind &&
+        (await fingerprintMedia(file, mediaFingerprintKind)) !== mediaFingerprint
+      ) {
         throw new Error("This file's content does not match this book.");
       }
       const record = await storeLocalBookMedia(
@@ -95,11 +122,12 @@ export function LocalMediaGate({
           durationMs: playerBook.durationMs,
           chapters: playerBook.chapters,
           initialPositionMs: playerBook.initialPositionMs,
+          initialProgressOccurredAt: playerBook.initialProgressOccurredAt,
           initialPlaybackRate: playerBook.initialPlaybackRate,
           completed: playerBook.completed,
         },
         file,
-        null,
+        (await parseLocalMp3(file)).artwork,
       );
       setState({
         phase: "ready",
@@ -130,15 +158,18 @@ export function LocalMediaGate({
       setError("The book could not be deleted. Check your connection and try again.");
       return;
     }
-    await removeOfflineBook(userId, playerBook.id).catch(() => undefined);
+    window.dispatchEvent(new Event("chapterline:unload-player"));
+    await removeOfflineBook(userId, playerBook.id).catch(() => {
+      setError("The book was deleted, but device cleanup will retry automatically.");
+    });
     router.push("/library");
     router.refresh();
   }
 
-  if (state.phase === "ready") {
+  if (resolvedPlayerBook) {
     return (
       <FullPlayer
-        playerBook={{ ...playerBook, mediaUrl: state.mediaUrl, coverUrl: state.coverUrl }}
+        playerBook={resolvedPlayerBook}
         initialBookmarks={initialBookmarks}
         autoplay={autoplay}
         details={details}
@@ -154,11 +185,34 @@ export function LocalMediaGate({
         <p className="gate-author">{playerBook.author}</p>
         {state.phase === "checking" && <p>Checking this device for the audio…</p>}
         {state.phase === "attaching" && <p>Verifying and storing the MP3 on this device…</p>}
+        {state.phase === "unavailable" && (
+          <>
+            <p>
+              Chapterline could not access this device&apos;s saved audio. This can be temporary;
+              retry before attaching the MP3 again.
+            </p>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setState({ phase: "checking" });
+                setError(null);
+                setCheckAttempt((attempt) => attempt + 1);
+              }}
+            >
+              <ArrowClockwise size={18} aria-hidden="true" />
+              Try again
+            </button>
+            <p>
+              <Link href="/library">Back to library</Link>
+            </p>
+          </>
+        )}
         {state.phase === "missing" && (
           <>
             <p>
               The audio for this book is stored on your devices, not in the cloud — and this device
-              does not have it yet. Attach the original MP3
+              does not currently have it. Attach the original MP3
               {byteSize ? ` (${formatBytes(byteSize)})` : ""} to listen here. Your reading position
               and bookmarks are already synced.
             </p>

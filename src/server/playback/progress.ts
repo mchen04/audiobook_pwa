@@ -1,4 +1,4 @@
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 
 import { expectRow } from "@/server/books/queries";
 import { db } from "@/server/db/client";
@@ -18,11 +18,14 @@ export type ProgressInput = {
 
 export async function saveProgress(userId: string, input: ProgressInput) {
   return db.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${userId}:${input.bookId}`}, 0))`,
+    );
     const [ownedBook] = await transaction
       .select({ durationMs: mediaAssets.durationMs })
       .from(books)
       .innerJoin(mediaAssets, eq(mediaAssets.bookId, books.id))
-      .where(and(eq(books.id, input.bookId), eq(books.ownerId, userId), eq(books.status, "ready")))
+      .where(and(eq(books.id, input.bookId), eq(books.ownerId, userId)))
       .limit(1);
     if (!ownedBook) return { kind: "not-found" as const };
 
@@ -87,6 +90,11 @@ export async function saveProgress(userId: string, input: ProgressInput) {
         },
       })
       .returning();
+
+    await transaction
+      .update(books)
+      .set({ updatedAt: new Date() })
+      .where(eq(books.id, input.bookId));
 
     return { kind: "saved" as const, state: expectRow(stateRows) };
   });

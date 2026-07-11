@@ -1,25 +1,7 @@
 import { interpretMp3Metadata, InvalidMp3Error, type ParsedMp3 } from "@/domain/mp3";
-import type { PlayerChapter } from "@/domain/player";
+import type { Bookmark, PlayerBook, PlayerChapter } from "@/domain/player";
+import { fingerprintMedia } from "@/lib/media-fingerprint";
 import { storeLocalBookMedia } from "@/lib/offline-library";
-
-const FINGERPRINT_SAMPLE_BYTES = 1024 * 1024;
-
-/**
- * A cheap, stable identity for a media file: SHA-256 over the byte count plus
- * the first and last megabyte. Hashing whole multi-gigabyte audiobooks in the
- * browser is not practical; this is a dedup aid, not a security boundary.
- */
-export async function fileFingerprint(file: File): Promise<string> {
-  const head = await file.slice(0, FINGERPRINT_SAMPLE_BYTES).arrayBuffer();
-  const tail = await file.slice(Math.max(0, file.size - FINGERPRINT_SAMPLE_BYTES)).arrayBuffer();
-  const sizeBytes = new TextEncoder().encode(String(file.size));
-  const combined = new Uint8Array(sizeBytes.length + head.byteLength + tail.byteLength);
-  combined.set(sizeBytes, 0);
-  combined.set(new Uint8Array(head), sizeBytes.length);
-  combined.set(new Uint8Array(tail), sizeBytes.length + head.byteLength);
-  const digest = await crypto.subtle.digest("SHA-256", combined);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 /** Parses an MP3 entirely in the browser; the bytes never leave the device. */
 export async function parseLocalMp3(file: File): Promise<ParsedMp3> {
@@ -85,10 +67,13 @@ export async function importLocalMp3(
   file: File,
   onProgress: (percent: number, stage: string) => void,
 ): Promise<void> {
-  onProgress(5, "Reading chapters");
+  onProgress(5, "Reading metadata");
   const parsed = await parseLocalMp3(file);
-  onProgress(45, "Reading chapters");
-  const fingerprint = await fileFingerprint(file);
+  onProgress(45, "Checking the complete file");
+  const fingerprintKind = "sha256-v1" as const;
+  const fingerprint = await fingerprintMedia(file, fingerprintKind, (fraction) =>
+    onProgress(45 + Math.round(fraction * 10), "Checking the complete file"),
+  );
   onProgress(55, "Adding to your library");
 
   const response = await fetch("/api/books/local", {
@@ -99,6 +84,7 @@ export async function importLocalMp3(
       byteSize: file.size,
       durationMs: parsed.durationMs,
       fingerprint,
+      fingerprintKind,
       title: parsed.title,
       author: parsed.author,
       narrator: parsed.narrator,
@@ -109,20 +95,24 @@ export async function importLocalMp3(
     throw new Error("The book could not be registered. Check your connection.");
   });
   let bookId: string;
-  let createdNewBook = true;
+  let canonicalBook: Omit<PlayerBook, "mediaUrl" | "coverUrl"> | null = null;
+  let canonicalBookmarks: Bookmark[] = [];
   if (response.ok) {
     ({ bookId } = (await response.json()) as { bookId: string });
   } else {
     const payload = (await response.json().catch(() => null)) as {
       error?: string;
       existingBookId?: string;
+      playerBook?: Omit<PlayerBook, "mediaUrl" | "coverUrl">;
+      bookmarks?: Bookmark[];
     } | null;
     // A fingerprint match means this exact file already has a book — most
     // often one whose audio is missing on this device. Reattach the bytes to
     // that book instead of dead-ending on "already in your library".
     if (response.status === 409 && payload?.existingBookId) {
       bookId = payload.existingBookId;
-      createdNewBook = false;
+      canonicalBook = payload.playerBook || null;
+      canonicalBookmarks = payload.bookmarks || [];
     } else {
       throw new Error(payload?.error || "The MP3 could not be imported.");
     }
@@ -138,26 +128,27 @@ export async function importLocalMp3(
   try {
     await storeLocalBookMedia(
       userId,
-      {
+      canonicalBook || {
         id: bookId,
         title: parsed.title,
         author: parsed.author,
         durationMs: parsed.durationMs,
         chapters,
         initialPositionMs: 0,
+        initialProgressOccurredAt: null,
         initialPlaybackRate: 1,
         completed: false,
       },
       file,
       parsed.artwork ? { data: parsed.artwork.data, mimeType: parsed.artwork.mimeType } : null,
+      canonicalBookmarks,
     );
   } catch (error) {
-    // Without local bytes a fresh registration is an empty shell — undo it.
-    // A pre-existing book keeps its progress and bookmarks and stays put.
-    if (createdNewBook) {
-      void fetch(`/api/books/${bookId}`, { method: "DELETE" }).catch(() => undefined);
-    }
-    throw error;
+    // Registration is already visible to other tabs and devices. Keep the
+    // recoverable metadata row rather than deleting a book another tab may
+    // have attached successfully; choosing the same MP3 repairs local media.
+    const reason = error instanceof Error ? error.message : "The audiobook could not be saved.";
+    throw new Error(`${reason} Choose the same MP3 again to finish saving it on this device.`);
   }
   onProgress(100, "Finishing");
 }

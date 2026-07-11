@@ -15,6 +15,7 @@ export type PlayerBook = {
   coverUrl: string | null;
   chapters: PlayerChapter[];
   initialPositionMs: number;
+  initialProgressOccurredAt: string | null;
   initialPlaybackRate: number;
   completed: boolean;
 };

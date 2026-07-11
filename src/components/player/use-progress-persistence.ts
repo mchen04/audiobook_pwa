@@ -3,8 +3,16 @@
 import { RefObject, useCallback, useEffect, useRef } from "react";
 
 import type { PlayerBook } from "@/domain/player";
-import { queueProgress, replayQueuedMutations, toProgressBody } from "@/lib/offline-sync";
-import { getDeviceId, nextSequence, saveLocalPosition } from "@/lib/playback-core";
+import {
+  queueProgress,
+  reconcileProgressConflict,
+  replayQueuedMutations,
+  shouldRetainMutation,
+  nextDeviceSequence,
+  toProgressBody,
+  withProgressMutationLock,
+} from "@/lib/offline-sync";
+import { getDeviceId, saveLocalPosition } from "@/lib/playback-core";
 
 const LOCAL_SAVE_INTERVAL_MS = 5_000;
 const SERVER_SAVE_INTERVAL_MS = 15_000;
@@ -22,38 +30,43 @@ export function useProgressPersistence(
 ) {
   const lastServerSaveRef = useRef(0);
   const lastLocalSaveRef = useRef(0);
+  const completionRef = useRef(new Map<string, boolean>());
 
   const persistProgress = useCallback(
-    async (positionMs: number, completed = false) => {
-      const activeBook = activeBookRef.current;
+    async (positionMs: number, completed?: boolean, bookOverride?: PlayerBook) => {
+      const activeBook = bookOverride || activeBookRef.current;
       if (!activeBook) return;
-      const event = {
-        bookId: activeBook.id,
-        deviceId: getDeviceId(),
-        deviceSequence: nextSequence(activeBook.id),
-        positionMs: Math.round(positionMs),
-        playbackRate: audioRef.current?.playbackRate || 1,
-        completed,
-        eventOccurredAt: new Date().toISOString(),
-      };
+      await withProgressMutationLock(activeBook.id, async () => {
+        if (completed !== undefined) completionRef.current.set(activeBook.id, completed);
+        const durableCompleted =
+          completed ?? completionRef.current.get(activeBook.id) ?? activeBook.completed;
+        saveLocalPosition(userId, activeBook.id, positionMs);
+        const event = {
+          bookId: activeBook.id,
+          deviceId: getDeviceId(),
+          deviceSequence: await nextDeviceSequence(activeBook.id),
+          positionMs: Math.round(positionMs),
+          playbackRate: audioRef.current?.playbackRate || 1,
+          completed: durableCompleted,
+          eventOccurredAt: new Date().toISOString(),
+        };
 
-      saveLocalPosition(userId, activeBook.id, positionMs);
-      try {
-        const response = await fetch(`/api/books/${activeBook.id}/progress`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: toProgressBody(event),
-          keepalive: true,
-        });
-        if (response.status === 409) {
-          const payload = (await response.json()) as { state?: { positionMs?: number } };
-          if (typeof payload.state?.positionMs === "number" && audioRef.current) {
-            audioRef.current.currentTime = payload.state.positionMs / 1000;
+        try {
+          const response = await fetch(`/api/books/${activeBook.id}/progress`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: toProgressBody(event),
+            keepalive: true,
+          });
+          if (response.status === 409) {
+            await reconcileProgressConflict({ userId, ...event }, response);
+          } else if (shouldRetainMutation(response.status)) {
+            await queueProgress({ userId, ...event });
           }
+        } catch {
+          await queueProgress({ userId, ...event });
         }
-      } catch {
-        queueProgress({ userId, ...event });
-      }
+      });
     },
     [activeBookRef, audioRef, userId],
   );
@@ -69,11 +82,17 @@ export function useProgressPersistence(
       }
       if (Date.now() - lastServerSaveRef.current > SERVER_SAVE_INTERVAL_MS) {
         lastServerSaveRef.current = Date.now();
-        void persistProgress(positionMs);
+        completionRef.current.set(activeBook.id, false);
+        void persistProgress(positionMs, false);
       }
     },
     [activeBookRef, persistProgress, userId],
   );
+
+  const markInProgress = useCallback(() => {
+    const activeBook = activeBookRef.current;
+    if (activeBook) completionRef.current.set(activeBook.id, false);
+  }, [activeBookRef]);
 
   useEffect(() => {
     const flush = () => {
@@ -91,5 +110,28 @@ export function useProgressPersistence(
     };
   }, [activeBookRef, audioRef, persistProgress, userId]);
 
-  return { persistProgress, onListeningTick };
+  useEffect(() => {
+    const reconcile = (event: Event) => {
+      const detail = (event as CustomEvent<ProgressConflictDetail>).detail;
+      const activeBook = activeBookRef.current;
+      if (detail.userId !== userId || activeBook?.id !== detail.bookId) return;
+      completionRef.current.set(detail.bookId, detail.completed);
+      if (audioRef.current) {
+        audioRef.current.currentTime = detail.positionMs / 1000;
+        audioRef.current.playbackRate = detail.playbackRate;
+      }
+    };
+    window.addEventListener("chapterline:progress-conflict", reconcile);
+    return () => window.removeEventListener("chapterline:progress-conflict", reconcile);
+  }, [activeBookRef, audioRef, userId]);
+
+  return { persistProgress, onListeningTick, markInProgress };
 }
+
+type ProgressConflictDetail = {
+  userId: string;
+  bookId: string;
+  positionMs: number;
+  completed: boolean;
+  playbackRate: number;
+};

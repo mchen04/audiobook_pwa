@@ -94,8 +94,8 @@
 .view-switch button,
 .upload-error button {
   display: grid;
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 2.75rem;
+  height: 2.75rem;
   flex: 0 0 auto;
   place-items: center;
   border: 0;
@@ -133,6 +133,7 @@
 
 .book-item {
   display: grid;
+  max-width: 18rem;
   min-width: 0;
   gap: 1rem;
 }
@@ -194,7 +195,9 @@
 }
 
 .book-title {
-  display: block;
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
   overflow: hidden;
   color: var(--text);
   font-size: 1.06rem;
@@ -257,6 +260,7 @@
 }
 
 .book-grid-list .book-item {
+  max-width: none;
   grid-template-columns: 4.5rem minmax(0, 1fr) auto;
   align-items: center;
   gap: 1rem;
@@ -311,9 +315,12 @@
 .upload-error {
   position: fixed;
   z-index: 30;
+  left: max(1rem, env(safe-area-inset-left));
   right: max(1rem, env(safe-area-inset-right));
   bottom: max(1rem, env(safe-area-inset-bottom));
-  width: min(calc(100% - 2rem), 28rem);
+  width: auto;
+  max-width: 28rem;
+  margin-left: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
@@ -441,8 +448,8 @@
 }
 
 .book-title {
-  padding-block: 0.55rem;
-  margin-block: -0.55rem;
+  padding-block: 0.65rem;
+  margin-block: -0.65rem;
 }
 
 .book-tags {
@@ -603,29 +610,24 @@
   }
 }
 
-.library-loading {
-  margin: 0.9rem 0 0;
+.library-more {
+  display: grid;
+  justify-items: start;
+  gap: 0.65rem;
+  margin-top: 2rem;
+}
+
+.library-more small {
   color: var(--text-muted);
   font-size: 0.82rem;
 }
 
-/* One swipeable row instead of stacked chip rows on phones; bleeds to the
-   screen edge so the scroll affordance is visible. */
 @media (max-width: 560px) {
   .library-filters {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    margin-inline: -1rem;
-    padding-inline: 1rem;
-    scrollbar-width: none;
-    mask-image: linear-gradient(to right, black calc(100% - 1.75rem), transparent);
-  }
-
-  .library-filters::-webkit-scrollbar {
-    display: none;
+    gap: 0.45rem;
   }
 
   .filter-chip {
-    flex: 0 0 auto;
+    flex: 1 1 auto;
   }
 }

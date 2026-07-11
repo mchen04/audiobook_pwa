@@ -61,12 +61,13 @@ export function interpretMp3Metadata(
   }
 
   const durationMs = Math.round(durationSeconds * 1000);
-  const title = cleanText(metadata.common.title || fallbackTitle, 300) || "Untitled audiobook";
+  const title =
+    firstCleanText([metadata.common.title, metadata.common.album, fallbackTitle], 300) ||
+    "Untitled audiobook";
   // Audiobooks frequently carry the author in TPE2 (album artist) instead of
   // TPE1, so both are honored before giving up.
   const author =
-    cleanText(metadata.common.artist || metadata.common.albumartist || "Unknown author", 240) ||
-    "Unknown author";
+    firstCleanText([metadata.common.artist, metadata.common.albumartist], 240) || "Unknown author";
   const composer = metadata.common.composer;
   const narrator =
     cleanText(Array.isArray(composer) ? composer[0] || "" : composer || "", 240) || null;
@@ -187,4 +188,13 @@ function cleanText(value: string, maxLength: number): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
+}
+
+function firstCleanText(values: Array<string | undefined>, maxLength: number): string {
+  for (const value of values) {
+    if (!value) continue;
+    const cleaned = cleanText(value, maxLength);
+    if (cleaned) return cleaned;
+  }
+  return "";
 }

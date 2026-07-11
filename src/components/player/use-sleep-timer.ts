@@ -3,7 +3,7 @@
 import { RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { PlayerChapter } from "@/domain/player";
-import { isChapterEnding, selectCurrentChapter } from "@/lib/playback-core";
+import { CHAPTER_END_EPSILON_MS, selectCurrentChapter } from "@/lib/playback-core";
 
 export type SleepMode = { kind: "time"; endsAt: number } | { kind: "chapter" } | null;
 
@@ -12,6 +12,7 @@ export function useSleepTimer(audioRef: RefObject<HTMLAudioElement | null>) {
   const [sleepMode, setSleepMode] = useState<SleepMode>(null);
   const sleepModeRef = useRef<SleepMode>(null);
   const timeoutRef = useRef<number | null>(null);
+  const chapterEndRef = useRef<number | null>(null);
 
   useEffect(() => {
     sleepModeRef.current = sleepMode;
@@ -20,6 +21,7 @@ export function useSleepTimer(audioRef: RefObject<HTMLAudioElement | null>) {
   const clearSleep = useCallback(() => {
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
     timeoutRef.current = null;
+    chapterEndRef.current = null;
     setSleepMode(null);
   }, []);
 
@@ -35,19 +37,24 @@ export function useSleepTimer(audioRef: RefObject<HTMLAudioElement | null>) {
     [audioRef, clearSleep],
   );
 
-  const setSleepAtChapterEnd = useCallback(() => {
-    clearSleep();
-    setSleepMode({ kind: "chapter" });
-  }, [clearSleep]);
+  const setSleepAtChapterEnd = useCallback(
+    (positionMs: number, chapters: PlayerChapter[]) => {
+      clearSleep();
+      chapterEndRef.current = selectCurrentChapter(chapters, positionMs)?.endMs || null;
+      if (chapterEndRef.current !== null) setSleepMode({ kind: "chapter" });
+    },
+    [clearSleep],
+  );
 
   /** Called from the audio timeupdate loop; pauses exactly once at the boundary. */
-  const onTimeUpdate = useCallback((audio: HTMLAudioElement, chapters: PlayerChapter[]) => {
+  const onTimeUpdate = useCallback((audio: HTMLAudioElement) => {
     if (sleepModeRef.current?.kind !== "chapter") return;
     const positionMs = audio.currentTime * 1000;
-    const chapter = selectCurrentChapter(chapters, positionMs);
-    if (chapter && isChapterEnding(chapter, positionMs)) {
+    const targetEndMs = chapterEndRef.current;
+    if (targetEndMs !== null && positionMs >= targetEndMs - CHAPTER_END_EPSILON_MS) {
       audio.pause();
-      audio.currentTime = chapter.endMs / 1000;
+      audio.currentTime = targetEndMs / 1000;
+      chapterEndRef.current = null;
       setSleepMode(null);
     }
   }, []);

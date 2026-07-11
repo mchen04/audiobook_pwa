@@ -1,6 +1,13 @@
 "use client";
 
-import { ArrowLeft, DownloadSimple, Play, Trash, WifiSlash } from "@phosphor-icons/react";
+import {
+  ArrowClockwise,
+  ArrowLeft,
+  DownloadSimple,
+  Play,
+  Trash,
+  WifiSlash,
+} from "@phosphor-icons/react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -15,11 +22,15 @@ import {
 } from "@/lib/offline-library";
 
 type LibraryState =
-  { kind: "loading" } | { kind: "signed-out" } | { kind: "ready"; books: OfflineBook[] };
+  | { kind: "loading" }
+  | { kind: "signed-out" }
+  | { kind: "unavailable" }
+  | { kind: "ready"; books: OfflineBook[] };
 
 export function OfflineLibrary() {
   const [state, setState] = useState<LibraryState>({ kind: "loading" });
   const [selected, setSelected] = useState<OfflineBook | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -34,10 +45,14 @@ export function OfflineLibrary() {
         if (active) setState({ kind: "signed-out" });
         return;
       }
-      const books = await listOfflineBooks(userId);
-      if (active) setState({ kind: "ready", books });
+      try {
+        const books = await listOfflineBooks(userId);
+        if (active) setState({ kind: "ready", books });
+      } catch {
+        if (active) setState({ kind: "unavailable" });
+      }
     }
-  }, []);
+  }, [loadAttempt]);
 
   if (selected) {
     return (
@@ -52,7 +67,7 @@ export function OfflineLibrary() {
           </header>
           <FullPlayer
             playerBook={asOfflinePlayerBook(selected)}
-            initialBookmarks={[]}
+            initialBookmarks={selected.bookmarks || []}
             offlineMode
             backHref="/offline"
             backLabel="Downloads"
@@ -87,6 +102,26 @@ export function OfflineLibrary() {
             <Link href="/login" className="secondary-button">
               Sign in when online
             </Link>
+          </div>
+        )}
+        {state.kind === "unavailable" && (
+          <div className="offline-empty">
+            <WifiSlash size={36} weight="duotone" aria-hidden="true" />
+            <h2>Downloads are temporarily unavailable</h2>
+            <p>
+              Chapterline could not open this device&apos;s saved audio. Your records are intact.
+            </p>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setState({ kind: "loading" });
+                setLoadAttempt((attempt) => attempt + 1);
+              }}
+            >
+              <ArrowClockwise size={18} aria-hidden="true" />
+              Try again
+            </button>
           </div>
         )}
         {state.kind === "ready" && state.books.length === 0 && (

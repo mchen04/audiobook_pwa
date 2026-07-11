@@ -24,6 +24,17 @@ export function withQuery<P = Record<string, never>>(
   };
 }
 
+export function withQueryParams<S extends z.ZodType>(
+  paramsSchema: S,
+  handler: (context: QueryContext<z.infer<S>>) => Promise<Response>,
+) {
+  return withQuery<unknown>(async (context) => {
+    const parsed = paramsSchema.safeParse(context.params);
+    if (!parsed.success) return Response.json({ error: "Not found" }, { status: 404 });
+    return handler({ ...context, params: parsed.data });
+  });
+}
+
 /**
  * Authenticated write handler with a JSON body: origin check (403), session
  * (401), and schema validation (400) happen in exactly one place.
@@ -40,6 +51,21 @@ export function withMutation<S extends z.ZodType, P = Record<string, never>>(
   });
 }
 
+export function withMutationParams<PS extends z.ZodType, BS extends z.ZodType>(
+  paramsSchema: PS,
+  bodySchema: BS,
+  invalidMessage: string,
+  handler: (context: MutationContext<z.infer<PS>, z.infer<BS>>) => Promise<Response>,
+) {
+  return withRawMutation<unknown>(async (context) => {
+    const params = paramsSchema.safeParse(context.params);
+    if (!params.success) return Response.json({ error: "Not found" }, { status: 404 });
+    const body = bodySchema.safeParse(await context.request.json().catch(() => null));
+    if (!body.success) return Response.json({ error: invalidMessage }, { status: 400 });
+    return handler({ ...context, params: params.data, data: body.data });
+  });
+}
+
 /** Authenticated write handler that manages its own body (uploads, deletes). */
 export function withRawMutation<P = Record<string, never>>(
   handler: (context: QueryContext<P>) => Promise<Response>,
@@ -53,4 +79,15 @@ export function withRawMutation<P = Record<string, never>>(
     const params = routeArgs ? await routeArgs.params : ({} as P);
     return handler({ request, session, params });
   };
+}
+
+export function withRawMutationParams<PS extends z.ZodType>(
+  paramsSchema: PS,
+  handler: (context: QueryContext<z.infer<PS>>) => Promise<Response>,
+) {
+  return withRawMutation<unknown>(async (context) => {
+    const parsed = paramsSchema.safeParse(context.params);
+    if (!parsed.success) return Response.json({ error: "Not found" }, { status: 404 });
+    return handler({ ...context, params: parsed.data });
+  });
 }

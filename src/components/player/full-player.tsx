@@ -15,6 +15,7 @@ import {
   Trash,
 } from "@phosphor-icons/react";
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -22,8 +23,11 @@ import { BookDetailsDialog, type BookDetails } from "@/components/book/book-deta
 import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
 import { formatClock } from "@/lib/format-time";
 
+import { CHAPTER_WINDOW_SIZE, chapterWindow, chapterWindowStart } from "./chapter-window";
 import { usePlayback } from "./playback-provider";
 import { isPendingBookmark, useBookmarks } from "./use-bookmarks";
+
+const BOOKMARK_WINDOW_SIZE = 50;
 
 export function FullPlayer({
   playerBook,
@@ -53,10 +57,24 @@ export function FullPlayer({
     initialBookmarks,
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [visibleBookmarkCount, setVisibleBookmarkCount] = useState(BOOKMARK_WINDOW_SIZE);
+  const [manualChapterStart, setManualChapterStart] = useState<number | null>(null);
   const mountedEndedAtRef = useRef(playback.lastEndedAt);
+  const autoplayConsumedForRef = useRef<string | null>(null);
+
+  const activeChapterIndex = useMemo(
+    () => playerBook.chapters.findIndex((chapter) => chapter.id === playback.currentChapter?.id),
+    [playback.currentChapter?.id, playerBook.chapters],
+  );
+  const chapterStart =
+    manualChapterStart ??
+    chapterWindowStart(Math.max(0, activeChapterIndex), playerBook.chapters.length);
+  const visibleChapters = chapterWindow(playerBook.chapters, chapterStart);
 
   useEffect(() => {
-    loadBook(playerBook, autoplay);
+    const shouldAutoplay = autoplay && autoplayConsumedForRef.current !== playerBook.id;
+    autoplayConsumedForRef.current = playerBook.id;
+    loadBook(playerBook, shouldAutoplay);
   }, [autoplay, loadBook, playerBook]);
 
   const autoplayNext = playback.preferences.autoplayNextInCollection;
@@ -115,7 +133,15 @@ export function FullPlayer({
         <section className="player-main" aria-labelledby="book-title">
           <div className="player-hero">
             {playerBook.coverUrl ? (
-              <img className="player-cover" src={playerBook.coverUrl} alt="" />
+              <Image
+                className="player-cover"
+                src={playerBook.coverUrl}
+                alt=""
+                width={320}
+                height={480}
+                unoptimized
+                priority
+              />
             ) : (
               <div className="player-cover" aria-hidden="true">
                 <span>{playerBook.title.slice(0, 2).toUpperCase()}</span>
@@ -220,15 +246,27 @@ export function FullPlayer({
           {details?.chapterDiagnostic && (
             <p className="chapter-diagnostic">{details.chapterDiagnostic}</p>
           )}
+          {chapterStart > 0 && (
+            <button
+              type="button"
+              className="secondary-button chapter-window-button"
+              onClick={() => setManualChapterStart(Math.max(0, chapterStart - CHAPTER_WINDOW_SIZE))}
+            >
+              Earlier chapters
+            </button>
+          )}
           <ol>
-            {playerBook.chapters.map((chapter) => {
+            {visibleChapters.map((chapter) => {
               const active = chapter.id === playback.currentChapter?.id;
               return (
                 <li key={chapter.id}>
                   <button
                     type="button"
                     aria-current={active ? "true" : undefined}
-                    onClick={() => playback.seek(chapter.startMs)}
+                    onClick={() => {
+                      setManualChapterStart(null);
+                      playback.seek(chapter.startMs);
+                    }}
                   >
                     <span>{chapter.position + 1}</span>
                     <span>
@@ -247,12 +285,28 @@ export function FullPlayer({
               );
             })}
           </ol>
+          {chapterStart + visibleChapters.length < playerBook.chapters.length && (
+            <button
+              type="button"
+              className="secondary-button chapter-window-button"
+              onClick={() =>
+                setManualChapterStart(
+                  Math.min(
+                    playerBook.chapters.length - CHAPTER_WINDOW_SIZE,
+                    chapterStart + CHAPTER_WINDOW_SIZE,
+                  ),
+                )
+              }
+            >
+              Later chapters
+            </button>
+          )}
 
           {bookmarks.length > 0 && (
             <div className="bookmark-list">
               <h2>Bookmarks</h2>
               <ul>
-                {bookmarks.map((bookmark) => (
+                {bookmarks.slice(0, visibleBookmarkCount).map((bookmark) => (
                   <BookmarkRow
                     key={bookmark.id}
                     bookmark={bookmark}
@@ -262,6 +316,15 @@ export function FullPlayer({
                   />
                 ))}
               </ul>
+              {bookmarks.length > visibleBookmarkCount && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setVisibleBookmarkCount((count) => count + BOOKMARK_WINDOW_SIZE)}
+                >
+                  Show more bookmarks
+                </button>
+              )}
             </div>
           )}
         </aside>

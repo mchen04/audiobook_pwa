@@ -57,15 +57,51 @@ export function isChapterEnding(chapter: PlayerChapter, positionMs: number): boo
 /* Per-user local playback state. Keys are user-scoped so account switches on
  * one device never leak positions between accounts. */
 
-export function saveLocalPosition(userId: string, bookId: string, positionMs: number): void {
-  localStorage.setItem(localPositionKey(userId, bookId), String(Math.round(positionMs)));
+export type LocalPosition = { positionMs: number; occurredAt: number };
+
+export function saveLocalPosition(
+  userId: string,
+  bookId: string,
+  positionMs: number,
+  occurredAt = Date.now(),
+): void {
+  localStorage.setItem(
+    localPositionKey(userId, bookId),
+    JSON.stringify({ positionMs: Math.round(positionMs), occurredAt }),
+  );
 }
 
 export function readLocalPosition(userId: string, bookId: string): number | null {
+  return readLocalProgress(userId, bookId)?.positionMs ?? null;
+}
+
+export function readLocalProgress(userId: string, bookId: string): LocalPosition | null {
   const value = localStorage.getItem(localPositionKey(userId, bookId));
   if (value === null) return null;
-  const position = Number(value);
-  return Number.isFinite(position) && position >= 0 ? position : null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (typeof parsed === "number") return validLocalPosition(parsed, 0);
+    if (parsed && typeof parsed === "object") {
+      const entry = parsed as Partial<LocalPosition>;
+      return validLocalPosition(entry.positionMs, entry.occurredAt);
+    }
+  } catch {
+    return validLocalPosition(Number(value), 0);
+  }
+  return null;
+}
+
+export function freshestPosition(input: {
+  local: LocalPosition | null;
+  serverPositionMs: number;
+  serverOccurredAt: string | null;
+}): number {
+  if (!input.local) return input.serverPositionMs;
+  if (!input.serverOccurredAt) return input.local.positionMs;
+  const serverTime = Date.parse(input.serverOccurredAt);
+  return Number.isFinite(serverTime) && serverTime > input.local.occurredAt
+    ? input.serverPositionMs
+    : input.local.positionMs;
 }
 
 export function readMsSinceLastPause(): number | null {
@@ -85,15 +121,20 @@ export function getDeviceId(): string {
   return created;
 }
 
-export function nextSequence(bookId: string): number {
-  const key = `chapterline:sequence:${bookId}`;
-  const next = Number(localStorage.getItem(key) || 0) + 1;
-  localStorage.setItem(key, String(next));
-  return next;
-}
-
 const LAST_PAUSED_KEY = "chapterline:last-paused-at";
 
 function localPositionKey(userId: string, bookId: string): string {
   return `chapterline:position:${userId}:${bookId}`;
+}
+
+function validLocalPosition(positionMs: unknown, occurredAt: unknown): LocalPosition | null {
+  return typeof positionMs === "number" && Number.isFinite(positionMs) && positionMs >= 0
+    ? {
+        positionMs,
+        occurredAt:
+          typeof occurredAt === "number" && Number.isFinite(occurredAt) && occurredAt >= 0
+            ? occurredAt
+            : 0,
+      }
+    : null;
 }

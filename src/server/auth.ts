@@ -6,7 +6,12 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "@/server/db/client";
 import { schema } from "@/server/db/schema";
 import { env } from "@/server/env";
-import { capturePasswordReset } from "@/server/mail/local-mailer";
+import {
+  assertPasswordResetDeliveryConfigured,
+  sendPasswordReset,
+} from "@/server/mail/password-reset";
+
+assertPasswordResetDeliveryConfigured();
 
 export const auth = betterAuth({
   appName: "Chapterline",
@@ -23,18 +28,12 @@ export const auth = betterAuth({
     revokeSessionsOnPasswordReset: true,
     resetPasswordTokenExpiresIn: 30 * 60,
     sendResetPassword: async ({ user, url }) => {
-      await capturePasswordReset(user.email, url);
+      await sendPasswordReset(user.email, url);
     },
   },
   session: {
     expiresIn: 60 * 60 * 24 * 30,
     updateAge: 60 * 60 * 24,
-    // Hot API routes validate the session from a short-lived signed cookie
-    // instead of a database round trip; revocation lands within five minutes.
-    cookieCache: {
-      enabled: true,
-      maxAge: 5 * 60,
-    },
   },
   rateLimit: {
     enabled: true,

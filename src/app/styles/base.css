@@ -365,6 +365,7 @@ img.player-cover {
 
   .icon-text-button {
     width: 2.9rem;
+    flex: 0 0 2.9rem;
     padding: 0;
   }
 }
