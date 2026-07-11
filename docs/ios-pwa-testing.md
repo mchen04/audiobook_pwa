@@ -42,6 +42,8 @@ Safari → Share → Add to Home Screen → enable **Open as Web App** → Add.
    the new Home Screen icon.
 3. Sign in, tap **Choose MP3**, choose the file from Downloads, and wait for the
    imported book to appear.
+   For this storage migration, an existing download may instead ask for the
+   original MP3 once so it can be rewritten into iPhone-safe chunks.
 4. Open it; play, pause, seek to the middle, change speed, lock the phone, and
    confirm audio continues and the lock-screen play/pause control works.
 5. Force-quit the web app, enable Airplane Mode, relaunch from the Home Screen,

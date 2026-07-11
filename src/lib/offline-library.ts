@@ -4,7 +4,8 @@ import type { Bookmark, PlayerBook } from "@/domain/player";
 import { clearQueuedMutationsForUser } from "@/lib/offline-sync";
 
 const DATABASE_NAME = "chapterline-offline-v1";
-const MEDIA_CACHE = "chapterline-media-v1";
+const MEDIA_CACHE = "chapterline-media-v2";
+const MEDIA_CHUNK_BYTES = 4 * 1024 * 1024;
 const activeMediaWrites = new Map<string, Promise<unknown>>();
 
 export type OfflineBook = {
@@ -111,7 +112,7 @@ async function reconcileOfflineRecord(
   if (record.offlineCoverUrl) {
     await deleteJournaledCacheEntry(db, cache, record.offlineCoverUrl).catch(() => false);
   }
-  await db.delete("cacheEntries", record.offlineMediaUrl);
+  await deleteJournaledMedia(db, cache, record.offlineMediaUrl).catch(() => false);
   await db.delete("downloads", record.key);
   return undefined;
 }
@@ -168,7 +169,7 @@ async function completeOfflineDeletion(
   const coverUrl = pending?.offlineCoverUrl || existing?.offlineCoverUrl;
   if (mediaUrl) {
     const cache = await caches.open(MEDIA_CACHE);
-    await deleteJournaledCacheEntry(db, cache, mediaUrl);
+    await deleteJournaledMedia(db, cache, mediaUrl);
     if (coverUrl) await deleteJournaledCacheEntry(db, cache, coverUrl);
   }
   await db.delete("downloads", key);
@@ -253,10 +254,9 @@ export async function projectOfflineProgress(
 }
 
 /**
- * Stores an imported MP3's bytes on this device: the file goes into the media
- * cache as-is (Blob-backed, so nothing is read into memory) and a downloads
- * record makes it playable. This is the only place audio ever lives — the
- * server holds metadata only.
+ * Stores an imported MP3 in bounded chunks. iOS WebKit has a much smaller
+ * memory budget than desktop browsers, so neither import nor a later Range
+ * request may materialize a whole audiobook-sized Blob.
  */
 export async function storeLocalBookMedia(
   userId: string,
@@ -290,30 +290,57 @@ async function storeLocalBookMediaUnlocked(
   const offlineMediaUrl = `/offline-media/${token}`;
   const key = offlineBookKey(userId, book.id);
   const db = await database();
-  try {
-    await db.put("cacheEntries", { url: offlineMediaUrl, userId, bookId: book.id });
-  } catch (error) {
-    throw offlineStorageError(error);
-  }
+  const chunkCount = Math.ceil(file.size / MEDIA_CHUNK_BYTES);
+  const chunkUrls = Array.from(
+    { length: chunkCount },
+    (_, index) => `${offlineMediaUrl}/chunk/${index}`,
+  );
+  const cleanupUrls: string[] = [];
   let cache: Cache | undefined;
   try {
     cache = await caches.open(MEDIA_CACHE);
+    for (let index = 0; index < chunkCount; index += 1) {
+      const url = chunkUrls[index]!;
+      await db.put("cacheEntries", { url, userId, bookId: book.id });
+      cleanupUrls.push(url);
+      await cache.put(
+        url,
+        new Response(
+          file.slice(
+            index * MEDIA_CHUNK_BYTES,
+            Math.min(file.size, (index + 1) * MEDIA_CHUNK_BYTES),
+          ),
+          { headers: { "Content-Type": "application/octet-stream" } },
+        ),
+      );
+    }
+    await db.put("cacheEntries", { url: offlineMediaUrl, userId, bookId: book.id });
+    cleanupUrls.push(offlineMediaUrl);
     await cache.put(
       offlineMediaUrl,
-      new Response(file, {
-        status: 200,
-        statusText: "OK",
-        headers: {
-          "Content-Type": "audio/mpeg",
-          "Content-Length": String(file.size),
-          "Content-Disposition": "inline",
-          "Accept-Ranges": "bytes",
+      new Response(
+        JSON.stringify({
+          format: "chapterline-chunked-media-v1",
+          byteSize: file.size,
+          chunkSize: MEDIA_CHUNK_BYTES,
+          chunkCount,
+        }),
+        {
+          headers: {
+            "Content-Type": "application/vnd.chapterline.media+json",
+            "X-Chapterline-Media-Format": "chunked-v1",
+          },
         },
-      }),
+      ),
     );
   } catch (error) {
-    if (cache) await deleteJournaledCacheEntry(db, cache, offlineMediaUrl).catch(() => false);
-    else await db.delete("cacheEntries", offlineMediaUrl).catch(() => undefined);
+    if (cache) {
+      await Promise.allSettled(
+        cleanupUrls.map((url) => deleteJournaledCacheEntry(db, cache!, url)),
+      );
+    } else {
+      await Promise.allSettled(cleanupUrls.map((url) => db.delete("cacheEntries", url)));
+    }
     throw offlineStorageError(error);
   }
 
@@ -359,7 +386,7 @@ async function storeLocalBookMediaUnlocked(
       throw new Error("Offline media verification failed.");
     }
     if (existing) {
-      await deleteJournaledCacheEntry(db, cache, existing.offlineMediaUrl).catch(() => false);
+      await deleteJournaledMedia(db, cache, existing.offlineMediaUrl).catch(() => false);
       if (existing.offlineCoverUrl) {
         await deleteJournaledCacheEntry(db, cache, existing.offlineCoverUrl).catch(() => false);
       }
@@ -371,7 +398,7 @@ async function storeLocalBookMediaUnlocked(
       if (existing) await db.put("downloads", existing).catch(() => undefined);
       else await db.delete("downloads", key).catch(() => undefined);
     }
-    await deleteJournaledCacheEntry(db, cache, offlineMediaUrl).catch(() => false);
+    await deleteJournaledMedia(db, cache, offlineMediaUrl).catch(() => false);
     if (offlineCoverUrl) {
       await deleteJournaledCacheEntry(db, cache, offlineCoverUrl).catch(() => false);
     }
@@ -466,6 +493,23 @@ async function deleteJournaledCacheEntry(
   await db.delete("cacheEntries", url);
 }
 
+async function deleteJournaledMedia(
+  db: Awaited<ReturnType<typeof database>>,
+  cache: Cache,
+  mediaUrl: string,
+): Promise<void> {
+  const entries = await db.getAll("cacheEntries");
+  const urls = entries
+    .map((entry) => entry.url)
+    .filter((url) => url === mediaUrl || url.startsWith(`${mediaUrl}/chunk/`));
+  if (!urls.includes(mediaUrl)) urls.push(mediaUrl);
+  const results = await Promise.allSettled(
+    urls.map((url) => deleteJournaledCacheEntry(db, cache, url)),
+  );
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
+}
+
 async function reconcileOrphanedCacheEntries(
   db: Awaited<ReturnType<typeof database>>,
 ): Promise<void> {
@@ -474,7 +518,11 @@ async function reconcileOrphanedCacheEntries(
     entries.map((entry) =>
       withMediaWriteLock(offlineBookKey(entry.userId, entry.bookId), async () => {
         const record = await db.get("downloads", offlineBookKey(entry.userId, entry.bookId));
-        if (record?.offlineMediaUrl === entry.url || record?.offlineCoverUrl === entry.url) {
+        if (
+          record?.offlineMediaUrl === entry.url ||
+          entry.url.startsWith(`${record?.offlineMediaUrl}/chunk/`) ||
+          record?.offlineCoverUrl === entry.url
+        ) {
           return;
         }
         const cache = await caches.open(MEDIA_CACHE);

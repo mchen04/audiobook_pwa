@@ -129,8 +129,39 @@ describe("offline media recovery", () => {
 
     expect(reloaded).toEqual(saved);
     expect(
-      await (await caches.open("chapterline-media-v1")).match(saved.offlineMediaUrl),
+      await (await caches.open("chapterline-media-v2")).match(saved.offlineMediaUrl),
     ).toBeDefined();
+  });
+
+  it("stores audiobook-sized media as bounded chunks instead of one large response", async () => {
+    const media = new Map<string, Response>();
+    vi.stubGlobal("caches", {
+      open: vi.fn(async () => ({
+        put: vi.fn(async (url: string, response: Response) => media.set(url, response)),
+        match: vi.fn(async (url: string) => media.get(url)?.clone()),
+        delete: vi.fn(async (url: string) => media.delete(url)),
+      })),
+    });
+    vi.stubGlobal("navigator", { storage: {} });
+    const book = offlineBook("chunked", new Date().toISOString()).book;
+    const file = new File([new Uint8Array(4 * 1024 * 1024 + 7)], "large.mp3", {
+      type: "audio/mpeg",
+    });
+
+    const saved = await storeLocalBookMedia("user", book, file, null);
+    const manifest = await media.get(saved.offlineMediaUrl)!.clone().json();
+
+    expect(manifest).toMatchObject({
+      format: "chapterline-chunked-media-v1",
+      byteSize: file.size,
+      chunkSize: 4 * 1024 * 1024,
+      chunkCount: 2,
+    });
+    expect(media.get(`${saved.offlineMediaUrl}/chunk/0`)).toBeDefined();
+    expect(media.get(`${saved.offlineMediaUrl}/chunk/1`)).toBeDefined();
+    expect((await media.get(`${saved.offlineMediaUrl}/chunk/0`)!.clone().blob()).size).toBe(
+      4 * 1024 * 1024,
+    );
   });
 
   it("keeps the original storage failure when best-effort cache cleanup also fails", async () => {

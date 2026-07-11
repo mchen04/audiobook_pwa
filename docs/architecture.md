@@ -72,9 +72,10 @@ Neon Postgres
    owner/fingerprint pair makes concurrent duplicate imports atomic; a match
    answers 409 with the existing book id for device reattachment.
 3. The audio bytes go into this device's Cache Storage under an
-   `/offline-media/<uuid>` URL (Blob-backed, nothing buffered in memory) with
+   `/offline-media/<uuid>` URL backed by independently cached 4 MiB chunks, with
    a per-user IndexedDB record; embedded cover art is stored beside it. If
-   storing fails, the registration is rolled back by deleting the book.
+   storing fails, the metadata remains recoverable and choosing the MP3 again
+   completes the device attachment.
 4. Playback always serves from the device store through the service worker,
    which answers HTTP Range requests (206/416 parity-tested against the
    canonical parser). There is no server media route.
@@ -85,8 +86,8 @@ Neon Postgres
 ## Offline model
 
 - Service worker: versioned shell cache, install-time precache of the offline
-  page and its chunks, offline navigation fallback, Range-capable serving of
-  downloaded media, no automatic MP3 caching.
+  page and its chunks, offline navigation fallback, chunk-streamed Range
+  serving of downloaded media, no automatic MP3 caching.
 - Cache Storage holds the imported MP3 bytes (and covers); IndexedDB holds the
   per-user library records; localStorage holds user-scoped positions,
   preferences cache, and the offline progress/bookmark queues. Reads reconcile

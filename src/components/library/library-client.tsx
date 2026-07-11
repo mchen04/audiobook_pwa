@@ -168,7 +168,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
 
           {continueBook && (
             <Link
-              href={`/books/${continueBook.id}?autoplay=1`}
+              href={`/books/${continueBook.id}`}
               className="continue-card"
               aria-label={`Continue listening ${continueBook.title}`}
             >
@@ -435,7 +435,7 @@ function BookItem({
       </div>
       {compact && (
         <Link
-          href={`/books/${book.id}?autoplay=1`}
+          href={`/books/${book.id}`}
           className="book-play-button"
           aria-label={`Play ${book.title}`}
         >
