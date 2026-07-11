@@ -58,6 +58,7 @@ and no practical file-size limit beyond the device's free space, so a single
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                   |
 | `pnpm test`                          | Vitest suites (MP3 parsing contract, range + service-worker parity, progress conflict policy, offline queues, playback). |
+| `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                  |
 | `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                              |
 | `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~100k rows onto an existing account for performance work.                                            |
 
@@ -69,3 +70,4 @@ phone, tablet, and desktop viewports.
 
 - `docs/architecture.md` — stack, boundaries, data rules, offline model.
 - `docs/operations.md` — deployment, backups, troubleshooting, limitations.
+- `docs/ios-pwa-testing.md` — automated WebKit and physical-iPhone release gates.

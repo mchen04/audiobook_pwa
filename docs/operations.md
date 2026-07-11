@@ -48,7 +48,9 @@
 
 - iOS Safari installs PWAs via Share → Add to Home Screen; there is no install
   prompt event, and background audio controls are more limited than Chromium's
-  Media Session surface. Playback and offline behavior otherwise work.
+  Media Session surface. Run the automated WebKit gate and the physical-device
+  release checklist in `docs/ios-pwa-testing.md` before shipping changes to
+  authentication, imports, storage, service workers, or playback.
 - Media Session action support varies by browser; unsupported actions are
   feature-detected and skipped without affecting playback.
 - Browsers may evict Cache Storage under storage pressure; the app requests
