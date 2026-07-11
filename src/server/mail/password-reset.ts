@@ -5,11 +5,8 @@ import { env } from "@/server/env";
 import { capturePasswordReset } from "./local-mailer";
 
 export function assertPasswordResetDeliveryConfigured(): void {
-  const configured = !!env.RESEND_API_KEY && !!env.MAIL_FROM;
-  const localCaptureAllowed =
-    process.env.NODE_ENV !== "production" || env.ALLOW_LOCAL_MAIL_CAPTURE === "true";
-  if (!configured && !localCaptureAllowed && process.env.NEXT_PHASE !== "phase-production-build") {
-    throw new Error("Production password reset requires RESEND_API_KEY and MAIL_FROM.");
+  if (!!env.RESEND_API_KEY !== !!env.MAIL_FROM) {
+    throw new Error("Password reset email requires both RESEND_API_KEY and MAIL_FROM.");
   }
 }
 

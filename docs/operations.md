@@ -17,10 +17,10 @@
 - Postgres: run `pnpm db:migrate` before starting a new build. Migrations are
   ordered, idempotent, and verified to apply from an empty database. The app
   never mutates schema at runtime.
-- Email: production startup requires `RESEND_API_KEY` and `MAIL_FROM`; reset
-  links are delivered through Resend. Development captures expire after one
-  hour in `.data/mail/`. Reset tokens are single-use, expire in 30 minutes,
-  and revoke other sessions on success.
+- Email: set both `RESEND_API_KEY` and `MAIL_FROM` to enable password resets in
+  production; reset requests fail closed when delivery is not configured.
+  Development captures expire after one hour in `.data/mail/`. Reset tokens
+  are single-use, expire in 30 minutes, and revoke other sessions on success.
 - Rotate the development Neon credential before any public deployment.
 
 ## Backup and restore
