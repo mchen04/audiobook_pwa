@@ -14,9 +14,10 @@
   ~2 extra database round trips per auth request).
 - Session validation is authoritative against Postgres so password resets and
   explicit revocations take effect immediately on every API route.
-- Postgres: run `pnpm db:migrate` before starting a new build. Migrations are
-  ordered, idempotent, and verified to apply from an empty database. The app
-  never mutates schema at runtime.
+- Postgres: Vercel runs `pnpm db:migrate` before its production build. On other
+  hosts, run it before starting a new build. Migrations are ordered, idempotent,
+  and verified to apply from an empty database. The app never mutates schema at
+  runtime.
 - Email: set both `RESEND_API_KEY` and `MAIL_FROM` to enable password resets in
   production; reset requests fail closed when delivery is not configured.
   Development captures expire after one hour in `.data/mail/`. Reset tokens
