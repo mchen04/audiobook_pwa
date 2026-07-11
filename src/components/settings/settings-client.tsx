@@ -20,6 +20,7 @@ export function SettingsClient({ email }: { email: string }) {
     event.preventDefault();
     setDeleteError(null);
     const confirmEmail = String(new FormData(event.currentTarget).get("confirmEmail") || "");
+    const currentPassword = String(new FormData(event.currentTarget).get("currentPassword") || "");
     if (confirmEmail.trim().toLowerCase() !== email.toLowerCase()) {
       setDeleteError("Type your account email exactly to confirm.");
       return;
@@ -28,14 +29,22 @@ export function SettingsClient({ email }: { email: string }) {
     const response = await fetch("/api/account/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirmEmail }),
+      body: JSON.stringify({ confirmEmail, currentPassword }),
     }).catch(() => null);
     if (!response?.ok) {
       setDeleting(false);
       setDeleteError("The account could not be deleted. Check your connection and try again.");
       return;
     }
-    await clearLocalDataForUser(userId).catch(() => undefined);
+    try {
+      await clearLocalDataForUser(userId);
+    } catch {
+      setDeleting(false);
+      setDeleteError(
+        "Your account was deleted, but this browser could not clear every local audio file. Clear Chapterline's website data in browser settings.",
+      );
+      return;
+    }
     router.replace("/register");
     router.refresh();
   }
@@ -134,6 +143,15 @@ export function SettingsClient({ email }: { email: string }) {
           <label>
             <span>Type your email to confirm</span>
             <input name="confirmEmail" type="email" autoComplete="off" placeholder={email} />
+          </label>
+          <label>
+            <span>Current password</span>
+            <input
+              name="currentPassword"
+              type="password"
+              autoComplete="current-password"
+              required
+            />
           </label>
           <button type="submit" className="danger-button" disabled={deleting}>
             <Trash size={17} aria-hidden="true" />

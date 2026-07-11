@@ -11,19 +11,21 @@ import {
   X,
 } from "@phosphor-icons/react";
 import Link from "next/link";
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 
 import type { LibraryBook } from "@/domain/library";
 import { formatDurationRounded } from "@/lib/format-time";
 import { importLocalMp3 } from "@/lib/local-import";
 import { listOfflineBooks } from "@/lib/offline-library";
+import type { LibraryPage } from "@/lib/wire";
 
+import { type SortOrder, type StatusFilter } from "./library-view";
 import { useLibraryBooks } from "./use-library-books";
 
 type LibraryClientProps = {
   userId: string;
-  initialBooks: LibraryBook[];
-  initialCursor: string | null;
+  initialPage: LibraryPage;
 };
 
 type UploadState = {
@@ -31,9 +33,6 @@ type UploadState = {
   percent: number;
   stage: string;
 };
-
-type StatusFilter = "all" | "in-progress" | "not-started" | "finished" | "archived";
-type SortOrder = "activity" | "added" | "title" | "author";
 
 const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
   { id: "all", label: "All" },
@@ -43,9 +42,8 @@ const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
   { id: "archived", label: "Archived" },
 ];
 
-export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryClientProps) {
+export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const { books, loadingMore, reload } = useLibraryBooks(initialBooks, initialCursor);
 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -55,6 +53,13 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
   const [upload, setUpload] = useState<UploadState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [localCovers, setLocalCovers] = useState<Record<string, string>>({});
+  const { page, reload, loadMore, loading } = useLibraryBooks(initialPage, {
+    query,
+    status,
+    tag: activeTag,
+    sort,
+  });
+  const books = page.books;
 
   useEffect(() => {
     let active = true;
@@ -73,36 +78,8 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
     };
   }, [userId, books]);
 
-  const allTags = useMemo(
-    () => [...new Set(books.flatMap((book) => book.tags))].sort((a, b) => a.localeCompare(b)),
-    [books],
-  );
-
-  const continueBook = useMemo(() => {
-    return books
-      .filter(
-        (book) =>
-          !book.archivedAt &&
-          !book.completed &&
-          (book.positionMs || 0) > 0 &&
-          book.progressUpdatedAt,
-      )
-      .sort((a, b) => (b.progressUpdatedAt || "").localeCompare(a.progressUpdatedAt || ""))[0];
-  }, [books]);
-
-  const visibleBooks = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    let list = books.filter((book) => matchesStatus(book, status));
-    if (activeTag) list = list.filter((book) => book.tags.includes(activeTag));
-    if (normalized) {
-      list = list.filter((book) =>
-        [book.title, book.author, book.narrator, book.series, ...book.tags].some((value) =>
-          value?.toLowerCase().includes(normalized),
-        ),
-      );
-    }
-    return [...list].sort(bookComparator(sort));
-  }, [activeTag, books, query, sort, status]);
+  const allTags = page.tags;
+  const continueBook = page.continueBook;
 
   function chooseFile() {
     setError(null);
@@ -144,8 +121,13 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
         aria-label="Choose an MP3 file to import"
       />
 
-      {books.length === 0 ? (
-        <section className="empty-library" aria-labelledby="library-title">
+      {page.libraryTotal === 0 ? (
+        <section
+          className="empty-library"
+          aria-labelledby="library-title"
+          aria-busy={!!upload}
+          inert={upload ? true : undefined}
+        >
           <div className="empty-library-art" aria-hidden="true">
             <BookOpenText size={54} weight="duotone" />
           </div>
@@ -162,7 +144,12 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
           <small>MP3 only. Your library is visible only to you.</small>
         </section>
       ) : (
-        <section className="library-content" aria-labelledby="library-title">
+        <section
+          className="library-content"
+          aria-labelledby="library-title"
+          aria-busy={!!upload}
+          inert={upload ? true : undefined}
+        >
           <div className="library-heading">
             <div>
               <p className="library-kicker">Your private library</p>
@@ -208,18 +195,31 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
               <input
                 type="search"
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                }}
                 placeholder="Search title, author, or tag"
               />
               {query && (
-                <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery("");
+                  }}
+                  aria-label="Clear search"
+                >
                   <X size={17} aria-hidden="true" />
                 </button>
               )}
             </label>
             <label className="sort-field">
               <span className="visually-hidden">Sort books</span>
-              <select value={sort} onChange={(event) => setSort(event.target.value as SortOrder)}>
+              <select
+                value={sort}
+                onChange={(event) => {
+                  setSort(event.target.value as SortOrder);
+                }}
+              >
                 <option value="activity">Recent activity</option>
                 <option value="added">Recently added</option>
                 <option value="title">Title A–Z</option>
@@ -253,7 +253,9 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
                 type="button"
                 className="filter-chip"
                 aria-pressed={status === filter.id}
-                onClick={() => setStatus(filter.id)}
+                onClick={() => {
+                  setStatus(filter.id);
+                }}
               >
                 {filter.label}
               </button>
@@ -264,22 +266,18 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
                 type="button"
                 className="filter-chip filter-chip-tag"
                 aria-pressed={activeTag === tag}
-                onClick={() => setActiveTag((current) => (current === tag ? null : tag))}
+                onClick={() => {
+                  setActiveTag((current) => (current === tag ? null : tag));
+                }}
               >
                 #{tag}
               </button>
             ))}
           </div>
 
-          {loadingMore && (
-            <p className="library-loading" role="status">
-              Loading the rest of your library…
-            </p>
-          )}
-
-          {visibleBooks.length ? (
+          {books.length ? (
             <div className={`book-grid ${view === "list" ? "book-grid-list" : ""}`}>
-              {visibleBooks.map((book) => (
+              {books.map((book) => (
                 <BookItem
                   book={book}
                   key={book.id}
@@ -304,6 +302,21 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
               >
                 Clear filters
               </button>
+            </div>
+          )}
+          {page.nextCursor && (
+            <div className="library-more">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void loadMore()}
+                disabled={loading}
+              >
+                {loading ? "Loading" : "Load more books"}
+              </button>
+              <small>
+                Showing {books.length} of {page.total} matching books.
+              </small>
             </div>
           )}
         </section>
@@ -334,23 +347,6 @@ export function LibraryClient({ userId, initialBooks, initialCursor }: LibraryCl
   );
 }
 
-function matchesStatus(book: LibraryBook, status: StatusFilter): boolean {
-  if (status === "archived") return !!book.archivedAt;
-  if (book.archivedAt) return false;
-  if (status === "all") return true;
-  if (status === "finished") return !!book.completed;
-  if (status === "in-progress") return !book.completed && (book.positionMs || 0) > 0;
-  return !book.completed && !(book.positionMs || 0);
-}
-
-function bookComparator(sort: SortOrder): (a: LibraryBook, b: LibraryBook) => number {
-  if (sort === "title") return (a, b) => a.title.localeCompare(b.title);
-  if (sort === "author") return (a, b) => a.author.localeCompare(b.author);
-  if (sort === "added") return (a, b) => b.createdAt.localeCompare(a.createdAt);
-  return (a, b) =>
-    (b.progressUpdatedAt || b.updatedAt).localeCompare(a.progressUpdatedAt || a.updatedAt);
-}
-
 function progressPercent(book: LibraryBook): number {
   if (!book.durationMs || !book.positionMs) return 0;
   return Math.min(100, Math.max(0, Math.round((book.positionMs / book.durationMs) * 100)));
@@ -365,7 +361,16 @@ function remainingLabel(book: LibraryBook): string {
 
 function BookCover({ book, coverUrl }: { book: LibraryBook; coverUrl?: string }) {
   if (coverUrl) {
-    return <img className="book-cover-art" src={coverUrl} alt="" />;
+    return (
+      <Image
+        className="book-cover-art"
+        src={coverUrl}
+        alt=""
+        width={160}
+        height={240}
+        unoptimized
+      />
+    );
   }
   const initials = book.title
     .split(/\s+/)

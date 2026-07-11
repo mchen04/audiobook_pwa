@@ -1,9 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { isValidChapterSequence } from "@/domain/mp3";
 import { withMutation } from "@/server/api/route-handler";
-import { expectRow } from "@/server/books/queries";
+import { expectRow, getBookForUser, listBookmarksForBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { books, chapters, mediaAssets } from "@/server/db/schema";
 import { validateUploadMetadata } from "@/server/media/filename";
@@ -30,6 +30,7 @@ const registerSchema = z.object({
   byteSize: z.number().int().positive().max(MAX_BYTE_SIZE),
   durationMs: z.number().int().positive().max(MAX_DURATION_MS),
   fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  fingerprintKind: z.literal("sha256-v1"),
   title: z.string().trim().min(1).max(300),
   author: z.string().trim().min(1).max(240),
   narrator: z.string().trim().min(1).max(240).nullable(),
@@ -56,26 +57,7 @@ export const POST = withMutation(
       return Response.json({ error: "The chapter list is inconsistent." }, { status: 422 });
     }
 
-    const [duplicate] = await db
-      .select({ id: books.id })
-      .from(mediaAssets)
-      .innerJoin(books, eq(books.id, mediaAssets.bookId))
-      .where(
-        and(
-          eq(mediaAssets.sha256, data.fingerprint),
-          eq(books.ownerId, session.user.id),
-          eq(books.status, "ready"),
-        ),
-      )
-      .limit(1);
-    if (duplicate) {
-      return Response.json(
-        { error: "This MP3 is already in your library.", existingBookId: duplicate.id },
-        { status: 409 },
-      );
-    }
-
-    const bookId = await db.transaction(async (transaction) => {
+    const registration = await db.transaction(async (transaction) => {
       const created = expectRow(
         await transaction
           .insert(books)
@@ -85,18 +67,42 @@ export const POST = withMutation(
             author: data.author,
             narrator: data.narrator,
             chapterDiagnostic: data.chapterDiagnostic,
-            status: "ready",
           })
           .returning({ id: books.id }),
       );
-      await transaction.insert(mediaAssets).values({
-        bookId: created.id,
-        originalFilename: filename,
-        mimeType: "audio/mpeg",
-        byteSize: data.byteSize,
-        sha256: data.fingerprint,
-        durationMs: data.durationMs,
-      });
+      const [registeredMedia] = await transaction
+        .insert(mediaAssets)
+        .values({
+          ownerId: session.user.id,
+          bookId: created.id,
+          originalFilename: filename,
+          mimeType: "audio/mpeg",
+          byteSize: data.byteSize,
+          fingerprint: data.fingerprint,
+          fingerprintKind: data.fingerprintKind,
+          durationMs: data.durationMs,
+        })
+        .onConflictDoNothing({
+          target: [mediaAssets.ownerId, mediaAssets.fingerprintKind, mediaAssets.fingerprint],
+          where: sql`${mediaAssets.fingerprintKind} = 'sha256-v1'`,
+        })
+        .returning({ bookId: mediaAssets.bookId });
+      if (!registeredMedia) {
+        await transaction.delete(books).where(eq(books.id, created.id));
+        const [duplicate] = await transaction
+          .select({ bookId: mediaAssets.bookId })
+          .from(mediaAssets)
+          .where(
+            and(
+              eq(mediaAssets.ownerId, session.user.id),
+              eq(mediaAssets.fingerprintKind, data.fingerprintKind),
+              eq(mediaAssets.fingerprint, data.fingerprint),
+            ),
+          )
+          .limit(1);
+        if (!duplicate) throw new Error("Duplicate media registration could not be resolved.");
+        return { bookId: duplicate.bookId, created: false };
+      }
       for (let start = 0; start < data.chapters.length; start += CHAPTER_INSERT_BATCH) {
         await transaction.insert(chapters).values(
           data.chapters.slice(start, start + CHAPTER_INSERT_BATCH).map((chapter) => ({
@@ -105,9 +111,44 @@ export const POST = withMutation(
           })),
         );
       }
-      return created.id;
+      return { bookId: created.id, created: true };
     });
 
-    return Response.json({ bookId }, { status: 201 });
+    if (!registration.created) {
+      const [book, bookmarkRows] = await Promise.all([
+        getBookForUser(session.user.id, registration.bookId),
+        listBookmarksForBook(session.user.id, registration.bookId),
+      ]);
+      if (!book?.durationMs) throw new Error("Existing book could not be loaded.");
+      return Response.json(
+        {
+          error: "This MP3 is already in your library.",
+          existingBookId: registration.bookId,
+          playerBook: {
+            id: book.id,
+            title: book.title,
+            author: book.author,
+            durationMs: book.durationMs,
+            chapters: book.chapters.map((chapter) => ({
+              id: chapter.id,
+              position: chapter.position,
+              title: chapter.title,
+              startMs: chapter.startMs,
+              endMs: chapter.endMs,
+            })),
+            initialPositionMs: book.positionMs || 0,
+            initialProgressOccurredAt: book.progressOccurredAt?.toISOString() || null,
+            initialPlaybackRate: Number(book.playbackRate || 1),
+            completed: book.completed || false,
+          },
+          bookmarks: bookmarkRows.map((bookmark) => ({
+            ...bookmark,
+            createdAt: bookmark.createdAt.toISOString(),
+          })),
+        },
+        { status: 409 },
+      );
+    }
+    return Response.json({ bookId: registration.bookId }, { status: 201 });
   },
 );

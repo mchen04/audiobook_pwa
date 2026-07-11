@@ -1,14 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 
-import { withMutation, withRawMutation } from "@/server/api/route-handler";
+import { withMutationParams, withRawMutationParams } from "@/server/api/route-handler";
 import { toBookmarkDto } from "@/server/books/dto";
 import { db } from "@/server/db/client";
 import { bookmarks } from "@/server/db/schema";
 
 export const runtime = "nodejs";
 
-type Params = { bookId: string; bookmarkId: string };
+const paramsSchema = z.object({ bookId: z.uuid(), bookmarkId: z.uuid() });
 
 const noteSchema = z.object({
   note: z
@@ -19,7 +19,8 @@ const noteSchema = z.object({
     .nullable(),
 });
 
-export const PATCH = withMutation<typeof noteSchema, Params>(
+export const PATCH = withMutationParams(
+  paramsSchema,
   noteSchema,
   "Invalid note.",
   async ({ session, params, data }) => {
@@ -39,7 +40,7 @@ export const PATCH = withMutation<typeof noteSchema, Params>(
   },
 );
 
-export const DELETE = withRawMutation<Params>(async ({ session, params }) => {
+export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
   const deleted = await db
     .delete(bookmarks)
     .where(

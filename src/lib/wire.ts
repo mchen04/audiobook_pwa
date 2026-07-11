@@ -14,7 +14,14 @@ export async function readJson<T>(
   return guard(data) ? data : null;
 }
 
-export type LibraryPage = { books: LibraryBook[]; nextCursor: string | null };
+export type LibraryPage = {
+  books: LibraryBook[];
+  nextCursor: string | null;
+  total: number;
+  libraryTotal: number;
+  tags: string[];
+  continueBook: LibraryBook | null;
+};
 
 export function isLibraryPage(value: unknown): value is LibraryPage {
   const page = value as LibraryPage | null;
@@ -22,7 +29,11 @@ export function isLibraryPage(value: unknown): value is LibraryPage {
     !!page &&
     Array.isArray(page.books) &&
     page.books.every(isLibraryBook) &&
-    (page.nextCursor === null || typeof page.nextCursor === "string")
+    (page.nextCursor === null || typeof page.nextCursor === "string") &&
+    typeof page.total === "number" &&
+    typeof page.libraryTotal === "number" &&
+    Array.isArray(page.tags) &&
+    (page.continueBook === null || isLibraryBook(page.continueBook))
   );
 }
 
@@ -40,7 +51,7 @@ export function isBookmarkPayload(value: unknown): value is BookmarkPayload {
   );
 }
 
-export type CollectionSummary = { id: string; name: string; bookIds: string[] };
+export type CollectionSummary = { id: string; name: string; includesBook: boolean };
 
 export function isCollectionList(value: unknown): value is { collections: CollectionSummary[] } {
   const payload = value as { collections?: unknown } | null;
@@ -52,14 +63,19 @@ export function isCollectionList(value: unknown): value is { collections: Collec
         entry &&
         typeof entry.id === "string" &&
         typeof entry.name === "string" &&
-        Array.isArray(entry.bookIds),
+        typeof entry.includesBook === "boolean",
     )
   );
 }
 
 export function isCollectionPayload(value: unknown): value is { collection: CollectionSummary } {
   const payload = value as { collection?: CollectionSummary } | null;
-  return !!payload?.collection && typeof payload.collection.id === "string";
+  return (
+    !!payload?.collection &&
+    typeof payload.collection.id === "string" &&
+    typeof payload.collection.name === "string" &&
+    typeof payload.collection.includesBook === "boolean"
+  );
 }
 
 function isLibraryBook(value: unknown): value is LibraryBook {

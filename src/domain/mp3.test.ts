@@ -108,6 +108,61 @@ describe("interpretMp3Metadata", () => {
     expect(parsed.author).toBe("Band Artist Only");
   });
 
+  it("falls back to the album name when the title tag is absent", async () => {
+    const root = `.data/tests/albumtitle-${crypto.randomUUID()}`;
+    testRoots.push(root);
+    await mkdir(root, { recursive: true });
+    const source = `${root}/source.mp3`;
+    const generated = spawnSync(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=2",
+        "-metadata",
+        "album=Book Name From Album",
+        "-c:a",
+        "libmp3lame",
+        "-q:a",
+        "5",
+        "-id3v2_version",
+        "3",
+        source,
+      ],
+      { encoding: "utf8" },
+    );
+    if (generated.status !== 0) throw new Error(generated.stderr);
+
+    const parsed = await parseFixture(source, "source");
+    expect(parsed.title).toBe("Book Name From Album");
+  });
+
+  it("skips blank title and artist tags when choosing metadata fallbacks", async () => {
+    const metadata = await parseFile(await fixture(false), { duration: true });
+    metadata.common.title = " \u0000 ";
+    metadata.common.album = "Book Name From Album";
+    metadata.common.artist = "\t";
+    metadata.common.albumartist = "Author From Album";
+
+    const parsed = interpretMp3Metadata(metadata, "Filename Fallback");
+
+    expect(parsed.title).toBe("Book Name From Album");
+    expect(parsed.author).toBe("Author From Album");
+  });
+
+  it("always supplies a nonempty title when every title source is blank", async () => {
+    const metadata = await parseFile(await fixture(false), { duration: true });
+    metadata.common.title = "\t";
+    metadata.common.album = " \u0000 ";
+
+    expect(interpretMp3Metadata(metadata, "").title).toBe("Untitled audiobook");
+  });
+
   it("falls back to one explicit chapter for a valid chapterless MP3", async () => {
     const parsed = await parseFixture(await fixture(false), "Plain Book");
 

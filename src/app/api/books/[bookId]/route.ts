@@ -1,16 +1,23 @@
 import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
-import { withMutation, withQuery, withRawMutation } from "@/server/api/route-handler";
+import {
+  withMutationParams,
+  withQueryParams,
+  withRawMutationParams,
+} from "@/server/api/route-handler";
 import { getBookForUser, getOwnedBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { books, bookTags, tags } from "@/server/db/schema";
 
 export const runtime = "nodejs";
 
-type Params = { bookId: string };
+const paramsSchema = z.object({ bookId: z.uuid() });
+const MAX_ACCOUNT_TAGS = 100;
 
-export const GET = withQuery<Params>(async ({ session, params }) => {
+class TagLimitError extends Error {}
+
+export const GET = withQueryParams(paramsSchema, async ({ session, params }) => {
   const book = await getBookForUser(session.user.id, params.bookId);
   if (!book) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json({ book });
@@ -37,7 +44,8 @@ const patchSchema = z
   })
   .partial();
 
-export const PATCH = withMutation<typeof patchSchema, Params>(
+export const PATCH = withMutationParams(
+  paramsSchema,
   patchSchema,
   "Invalid book update.",
   async ({ session, params, data }) => {
@@ -45,30 +53,40 @@ export const PATCH = withMutation<typeof patchSchema, Params>(
     const owned = await getOwnedBook(session.user.id, params.bookId);
     if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
 
-    await db.transaction(async (transaction) => {
-      await transaction
-        .update(books)
-        .set({
-          ...fields,
-          ...(seriesPosition !== undefined
-            ? { seriesPosition: seriesPosition === null ? null : seriesPosition.toFixed(2) }
-            : {}),
-          ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(books.id, params.bookId));
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction
+          .update(books)
+          .set({
+            ...fields,
+            ...(seriesPosition !== undefined
+              ? { seriesPosition: seriesPosition === null ? null : seriesPosition.toFixed(2) }
+              : {}),
+            ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(books.id, params.bookId));
 
-      if (nextTags !== undefined) {
-        await replaceBookTags(transaction, session.user.id, params.bookId, nextTags);
+        if (nextTags !== undefined) {
+          await replaceBookTags(transaction, session.user.id, params.bookId, nextTags);
+        }
+      });
+    } catch (error) {
+      if (error instanceof TagLimitError) {
+        return Response.json(
+          { error: `An account can have up to ${MAX_ACCOUNT_TAGS} tags.` },
+          { status: 409 },
+        );
       }
-    });
+      throw error;
+    }
 
     const book = await getBookForUser(session.user.id, params.bookId);
     return Response.json({ book });
   },
 );
 
-export const DELETE = withRawMutation<Params>(async ({ session, params }) => {
+export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
   const owned = await getOwnedBook(session.user.id, params.bookId);
   if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
 
@@ -89,8 +107,20 @@ async function replaceBookTags(
 ): Promise<void> {
   const unique = [...new Map(names.map((name) => [name.toLowerCase(), name])).values()];
 
+  await transaction.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`tags:${userId}`}, 0))`,
+  );
+
   await transaction.delete(bookTags).where(eq(bookTags.bookId, bookId));
+  await deleteUnusedTags(transaction, userId);
   if (unique.length) {
+    const existing = await transaction
+      .select({ name: tags.name })
+      .from(tags)
+      .where(eq(tags.userId, userId));
+    const existingNames = new Set(existing.map((tag) => tag.name.toLowerCase()));
+    const newTagCount = unique.filter((name) => !existingNames.has(name.toLowerCase())).length;
+    if (existing.length + newTagCount > MAX_ACCOUNT_TAGS) throw new TagLimitError();
     const rows = await transaction
       .insert(tags)
       .values(unique.map((name) => ({ userId, name })))
@@ -111,6 +141,10 @@ async function replaceBookTags(
   }
 
   // Tags with no remaining books are garbage-collected so filters stay honest.
+  await deleteUnusedTags(transaction, userId);
+}
+
+async function deleteUnusedTags(transaction: Transaction, userId: string): Promise<void> {
   await transaction
     .delete(tags)
     .where(

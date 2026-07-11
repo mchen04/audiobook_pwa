@@ -12,15 +12,15 @@
 - Auth rate limiting is in-memory and assumes a single instance. Multi-instance
   deployments need a shared store (Better Auth supports database storage at
   ~2 extra database round trips per auth request).
-- Session validation uses a five-minute signed cookie cache; a revoked session
-  can therefore remain usable for up to five minutes.
+- Session validation is authoritative against Postgres so password resets and
+  explicit revocations take effect immediately on every API route.
 - Postgres: run `pnpm db:migrate` before starting a new build. Migrations are
   ordered, idempotent, and verified to apply from an empty database. The app
   never mutates schema at runtime.
-- Email: password-reset delivery uses a local capture directory
-  (`.data/mail/`) until a real provider is wired into
-  `src/server/mail/local-mailer.ts`. Reset tokens are single-use, expire in 30
-  minutes, and revoke other sessions on success.
+- Email: production startup requires `RESEND_API_KEY` and `MAIL_FROM`; reset
+  links are delivered through Resend. Development captures expire after one
+  hour in `.data/mail/`. Reset tokens are single-use, expire in 30 minutes,
+  and revoke other sessions on success.
 - Rotate the development Neon credential before any public deployment.
 
 ## Backup and restore
@@ -37,7 +37,7 @@
 
 - Book deletion: the rows cascade server-side and the client removes the
   device-local bytes in the same flow.
-- Account deletion: requires the user to type their email; cascades every row,
+- Account deletion: requires the email and current password; cascades every row,
   expires the session cookie, and clears the device's local data for that user
   (local books, queues, positions, preferences).
 - Export: `GET /api/account/export` returns all metadata, chapters, progress,
@@ -52,8 +52,9 @@
 - Media Session action support varies by browser; unsupported actions are
   feature-detected and skipped without affecting playback.
 - Browsers may evict Cache Storage under storage pressure; the app requests
-  persistent storage when downloading and surfaces missing downloads honestly
-  instead of pretending they are available.
+  persistent storage when importing, clears stale download metadata when the
+  matching media entry is gone, and surfaces an original-file reattach flow
+  instead of pretending the book is playable.
 - Listening history is recorded only while online by design; it is a nicety,
   not queued state.
 

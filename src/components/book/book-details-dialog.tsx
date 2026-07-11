@@ -53,7 +53,9 @@ export function BookDetailsDialog({
     if (open && !dialog.open) {
       dialog.showModal();
       setError(null);
-      void fetch("/api/collections", { cache: "no-store" })
+      void fetch(`/api/collections?bookId=${encodeURIComponent(details.id)}`, {
+        cache: "no-store",
+      })
         .then((response) => readJson(response, isCollectionList))
         .then((payload) => {
           if (payload) setCollections(payload.collections);
@@ -61,7 +63,7 @@ export function BookDetailsDialog({
         .catch(() => setCollections(null));
     }
     if (!open && dialog.open) dialog.close();
-  }, [open]);
+  }, [details.id, open]);
 
   async function saveDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -133,25 +135,26 @@ export function BookDetailsDialog({
       setError("The book could not be deleted. Check your connection and try again.");
       return;
     }
-    await removeOfflineBook(playback.userId, details.id).catch(() => undefined);
+    playback.unloadBook();
+    await removeOfflineBook(playback.userId, details.id).catch(() => {
+      setError("The book was deleted, but device cleanup will retry automatically.");
+    });
     router.push("/library");
     router.refresh();
   }
 
   async function toggleCollection(collection: CollectionSummary, include: boolean) {
-    const bookIds = include
-      ? [...collection.bookIds, details.id]
-      : collection.bookIds.filter((id) => id !== details.id);
     const response = await fetch(`/api/collections/${collection.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookIds }),
+      body: JSON.stringify({ bookId: details.id, include }),
     }).catch(() => null);
     if (response?.ok) {
       setCollections(
         (current) =>
-          current?.map((entry) => (entry.id === collection.id ? { ...entry, bookIds } : entry)) ??
-          null,
+          current?.map((entry) =>
+            entry.id === collection.id ? { ...entry, includesBook: include } : entry,
+          ) ?? null,
       );
     }
   }
@@ -266,7 +269,7 @@ export function BookDetailsDialog({
             {!!collections?.length && (
               <ul className="collection-list">
                 {collections.map((collection) => {
-                  const included = collection.bookIds.includes(details.id);
+                  const included = collection.includesBook;
                   return (
                     <li key={collection.id}>
                       <label>

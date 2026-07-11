@@ -373,7 +373,7 @@
 .sleep-custom input {
   width: 100%;
   min-width: 0;
-  min-height: 2.6rem;
+  min-height: 2.75rem;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--surface);
@@ -387,7 +387,7 @@
 }
 
 .sleep-menu > div button {
-  min-height: 2.6rem;
+  min-height: 2.75rem;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -546,7 +546,8 @@
 }
 
 .bookmark-list li button {
-  min-height: 2.5rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -573,7 +574,8 @@
   bottom: max(1rem, env(safe-area-inset-bottom));
   left: max(1rem, env(safe-area-inset-left));
   display: grid;
-  width: min(calc(100% - 2rem), 48rem);
+  width: auto;
+  max-width: 48rem;
   min-height: 4.7rem;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -653,8 +655,8 @@
 .mini-controls button {
   position: relative;
   display: grid;
-  width: 2.7rem;
-  height: 2.7rem;
+  width: 2.75rem;
+  height: 2.75rem;
   place-items: center;
   border: 0;
   border-radius: 999px;
@@ -740,7 +742,7 @@
     bottom: max(0.55rem, env(safe-area-inset-bottom));
     left: max(0.55rem, env(safe-area-inset-left));
     right: max(0.55rem, env(safe-area-inset-right));
-    width: calc(100% - 1.1rem);
+    width: auto;
   }
 
   .mini-controls button:first-child,
@@ -870,7 +872,7 @@
 .bookmark-note-form input {
   width: 100%;
   min-width: 0;
-  min-height: 2.6rem;
+  min-height: 2.75rem;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--surface);

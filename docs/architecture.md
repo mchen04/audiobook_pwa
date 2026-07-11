@@ -53,8 +53,9 @@ Neon Postgres
 - Every private row is owned directly or transitively by one user.
 - Queries scope by authenticated user and resource ID at the same boundary.
 - Audio bytes and cover blobs never leave the user's devices; Postgres holds
-  metadata only (including a size + head/tail content fingerprint used for
-  duplicate detection and cross-device file verification).
+  metadata only, including a versioned content fingerprint for duplicate
+  detection and cross-device file verification. New imports use whole-file
+  SHA-256; legacy sample fingerprints remain readable for existing books.
 - Book deletion removes rows server-side and the local bytes client-side;
   account deletion cascades every row and wipes this device's local data.
 - Progress uses device/session IDs and monotonic per-device sequence numbers. The server rejects duplicate/stale events while allowing an explicit user rewind.
@@ -63,12 +64,13 @@ Neon Postgres
 
 1. Import happens in the browser: `music-metadata` parses the chosen file
    (shared pure interpreter in `src/domain/mp3.ts` — format validation,
-   chapter normalization, artwork sniffing), and a fingerprint (SHA-256 over
-   size + first/last megabyte) identifies the file cheaply at any size.
+   chapter normalization, artwork sniffing), and a streaming whole-file
+   SHA-256 identifies the exact bytes without buffering the book in memory.
 2. `POST /api/books/local` registers metadata only — validated title/author,
    duration, byte size, fingerprint, and the full chapter list (revalidated
-   server-side, batch-inserted, capped at 10,000 chapters) — creating the
-   book directly as `ready`. A same-fingerprint ready book answers 409.
+   server-side, batch-inserted, capped at 10,000 chapters). A database-unique
+   owner/fingerprint pair makes concurrent duplicate imports atomic; a match
+   answers 409 with the existing book id for device reattachment.
 3. The audio bytes go into this device's Cache Storage under an
    `/offline-media/<uuid>` URL (Blob-backed, nothing buffered in memory) with
    a per-user IndexedDB record; embedded cover art is stored beside it. If
@@ -87,7 +89,9 @@ Neon Postgres
   downloaded media, no automatic MP3 caching.
 - Cache Storage holds the imported MP3 bytes (and covers); IndexedDB holds the
   per-user library records; localStorage holds user-scoped positions,
-  preferences cache, and the offline progress/bookmark queues.
+  preferences cache, and the offline progress/bookmark queues. Reads reconcile
+  IndexedDB against Cache Storage so an OS-evicted media entry becomes an
+  honest reattach flow instead of a broken player.
 - Account deletion clears that user's local books, queues, positions, and
   preferences on the device; sign-out clears the active-user marker.
 - Reconnect: queued mutations replay idempotently (device sequences for

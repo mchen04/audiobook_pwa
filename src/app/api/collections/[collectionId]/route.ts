@@ -1,71 +1,88 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
-import { withMutation, withRawMutation } from "@/server/api/route-handler";
+import { withMutationParams, withRawMutationParams } from "@/server/api/route-handler";
 import { db } from "@/server/db/client";
 import { books, collectionBooks, collections } from "@/server/db/schema";
 
 export const runtime = "nodejs";
 
-type Params = { collectionId: string };
+const paramsSchema = z.object({ collectionId: z.uuid() });
 
 const patchSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
-    bookIds: z.array(z.uuid()).max(500),
+    bookId: z.uuid(),
+    include: z.boolean(),
   })
-  .partial();
+  .partial()
+  .refine((value) => value.name !== undefined || value.bookId !== undefined)
+  .refine((value) => (value.bookId === undefined) === (value.include === undefined));
 
-export const PATCH = withMutation<typeof patchSchema, Params>(
+export const PATCH = withMutationParams(
+  paramsSchema,
   patchSchema,
   "Invalid collection update.",
   async ({ session, params, data }) => {
-    const [owned] = await db
-      .select({ id: collections.id })
-      .from(collections)
-      .where(and(eq(collections.id, params.collectionId), eq(collections.userId, session.user.id)))
-      .limit(1);
-    if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
+    const { name, bookId, include } = data;
+    const updated = await db.transaction(async (transaction) => {
+      const [owned] = await transaction
+        .select({ id: collections.id })
+        .from(collections)
+        .where(
+          and(eq(collections.id, params.collectionId), eq(collections.userId, session.user.id)),
+        )
+        .for("update")
+        .limit(1);
+      if (!owned) return "missing" as const;
 
-    const { name, bookIds } = data;
-    await db.transaction(async (transaction) => {
+      if (bookId !== undefined) {
+        const [ownedBook] = await transaction
+          .select({ id: books.id })
+          .from(books)
+          .where(and(eq(books.id, bookId), eq(books.ownerId, session.user.id)))
+          .limit(1);
+        if (!ownedBook) return "unavailable" as const;
+      }
+
       if (name !== undefined) {
         await transaction
           .update(collections)
           .set({ name, updatedAt: new Date() })
           .where(eq(collections.id, params.collectionId));
       }
-      if (bookIds !== undefined) {
-        // Membership only ever references the caller's own books.
-        const ownedBooks = bookIds.length
-          ? await transaction
-              .select({ id: books.id })
-              .from(books)
-              .where(and(inArray(books.id, bookIds), eq(books.ownerId, session.user.id)))
-          : [];
-        const allowed = new Set(ownedBooks.map((book) => book.id));
-        const ordered = bookIds.filter((bookId) => allowed.has(bookId));
-
+      if (bookId !== undefined && include === false) {
         await transaction
           .delete(collectionBooks)
-          .where(eq(collectionBooks.collectionId, params.collectionId));
-        if (ordered.length) {
-          await transaction.insert(collectionBooks).values(
-            ordered.map((bookId, position) => ({
-              collectionId: params.collectionId,
-              bookId,
-              position,
-            })),
+          .where(
+            and(
+              eq(collectionBooks.collectionId, params.collectionId),
+              eq(collectionBooks.bookId, bookId),
+            ),
           );
-        }
+      } else if (bookId !== undefined && include === true) {
+        await transaction
+          .insert(collectionBooks)
+          .values({
+            collectionId: params.collectionId,
+            bookId,
+            position: sql`coalesce((select max(existing.position) + 1 from ${collectionBooks} existing where existing.collection_id = ${params.collectionId}), 0)`,
+          })
+          .onConflictDoNothing();
       }
+      return "updated" as const;
     });
+
+    if (updated === "missing") return Response.json({ error: "Not found" }, { status: 404 });
+    if (updated === "unavailable") {
+      return Response.json({ error: "Collection contains an unavailable book." }, { status: 400 });
+    }
 
     return Response.json({ updated: true });
   },
 );
 
-export const DELETE = withRawMutation<Params>(async ({ session, params }) => {
+export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
   const deleted = await db
     .delete(collections)
     .where(and(eq(collections.id, params.collectionId), eq(collections.userId, session.user.id)))

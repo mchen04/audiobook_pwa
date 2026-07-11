@@ -6,7 +6,6 @@ import {
   index,
   integer,
   numeric,
-  pgEnum,
   pgTable,
   primaryKey,
   text,
@@ -101,14 +100,6 @@ export const rateLimit = pgTable(
   (table) => [check("rate_limit_count_nonnegative", sql`${table.count} >= 0`)],
 );
 
-export const bookStatus = pgEnum("book_status", [
-  "uploading",
-  "processing",
-  "ready",
-  "failed",
-  "deleting",
-]);
-
 export const books = pgTable(
   "books",
   {
@@ -122,14 +113,19 @@ export const books = pgTable(
     description: text("description"),
     series: varchar("series", { length: 240 }),
     seriesPosition: numeric("series_position", { precision: 8, scale: 2 }),
-    status: bookStatus("status").default("ready").notNull(),
     chapterDiagnostic: text("chapter_diagnostic"),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     ...timestamps,
   },
   (table) => [
-    index("books_owner_updated_idx").on(table.ownerId, table.updatedAt),
-    index("books_owner_status_idx").on(table.ownerId, table.status),
+    index("books_owner_updated_idx").on(table.ownerId, table.updatedAt, table.id),
+    index("books_owner_created_id_idx").on(table.ownerId, table.createdAt, table.id),
+    index("books_owner_title_id_idx").on(table.ownerId, sql`lower(${table.title})`, table.id),
+    index("books_owner_author_id_idx").on(table.ownerId, sql`lower(${table.author})`, table.id),
+    index("books_search_trgm_idx").using(
+      "gin",
+      sql`(lower(coalesce(${table.title}, '') || ' ' || coalesce(${table.author}, '') || ' ' || coalesce(${table.narrator}, '') || ' ' || coalesce(${table.series}, ''))) gin_trgm_ops`,
+    ),
     check("books_title_not_blank", sql`length(trim(${table.title})) > 0`),
   ],
 );
@@ -138,19 +134,30 @@ export const mediaAssets = pgTable(
   "media_assets",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
     bookId: uuid("book_id")
       .notNull()
       .references(() => books.id, { onDelete: "cascade" }),
     originalFilename: varchar("original_filename", { length: 512 }).notNull(),
     mimeType: varchar("mime_type", { length: 100 }).notNull(),
     byteSize: bigint("byte_size", { mode: "number" }).notNull(),
-    sha256: varchar("sha256", { length: 64 }).notNull(),
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    fingerprintKind: varchar("fingerprint_kind", {
+      length: 20,
+      enum: ["sample-v1", "sha256-v1"],
+    })
+      .default("sample-v1")
+      .notNull(),
     durationMs: bigint("duration_ms", { mode: "number" }).notNull(),
     ...timestamps,
   },
   (table) => [
     uniqueIndex("media_assets_book_unique").on(table.bookId),
-    index("media_assets_sha_owner_lookup_idx").on(table.sha256),
+    uniqueIndex("media_assets_owner_sha256_unique")
+      .on(table.ownerId, table.fingerprintKind, table.fingerprint)
+      .where(sql`${table.fingerprintKind} = 'sha256-v1'`),
     check("media_assets_byte_size_positive", sql`${table.byteSize} > 0`),
     check("media_assets_duration_positive", sql`${table.durationMs} > 0`),
   ],
@@ -245,6 +252,7 @@ export const bookmarks = pgTable(
   },
   (table) => [
     index("bookmarks_user_book_position_idx").on(table.userId, table.bookId, table.positionMs),
+    index("bookmarks_user_id_idx").on(table.userId, table.id),
     uniqueIndex("bookmarks_user_client_unique").on(table.userId, table.clientId),
     check("bookmarks_position_nonnegative", sql`${table.positionMs} >= 0`),
   ],
@@ -262,6 +270,7 @@ export const collections = pgTable(
   },
   (table) => [
     uniqueIndex("collections_user_name_unique").on(table.userId, sql`lower(${table.name})`),
+    index("collections_user_id_idx").on(table.userId, table.id),
     check("collections_name_not_blank", sql`length(trim(${table.name})) > 0`),
   ],
 );
@@ -280,7 +289,8 @@ export const collectionBooks = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.collectionId, table.bookId] }),
-    index("collection_books_order_idx").on(table.collectionId, table.position),
+    index("collection_books_order_idx").on(table.collectionId, table.position, table.bookId),
+    index("collection_books_book_collection_idx").on(table.bookId, table.collectionId),
     check("collection_books_position_nonnegative", sql`${table.position} >= 0`),
   ],
 );
@@ -296,6 +306,8 @@ export const tags = pgTable(
   },
   (table) => [
     uniqueIndex("tags_user_name_unique").on(table.userId, sql`lower(${table.name})`),
+    index("tags_user_id_idx").on(table.userId, table.id),
+    index("tags_name_trgm_idx").using("gin", sql`lower(${table.name}) gin_trgm_ops`),
     check("tags_name_not_blank", sql`length(trim(${table.name})) > 0`),
   ],
 );
@@ -331,6 +343,7 @@ export const listeningSessions = pgTable(
   },
   (table) => [
     index("listening_sessions_user_started_idx").on(table.userId, table.startedAt),
+    index("listening_sessions_user_id_idx").on(table.userId, table.id),
     index("listening_sessions_book_started_idx").on(table.bookId, table.startedAt),
     check("listening_sessions_times_valid", sql`${table.endedAt} >= ${table.startedAt}`),
     check(

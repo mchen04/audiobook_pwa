@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlayerChapter } from "@/domain/player";
 
 import {
+  freshestPosition,
   isChapterEnding,
-  nextSequence,
   readLocalPosition,
   resolveStartPosition,
   rewindForAbsence,
@@ -115,16 +115,35 @@ describe("local playback state", () => {
   });
 
   it("round-trips positions per user and rejects junk", () => {
-    saveLocalPosition("user-a", "book-1", 1234.6);
+    saveLocalPosition("user-a", "book-1", 1234.6, 2_000);
     expect(readLocalPosition("user-a", "book-1")).toBe(1235);
     expect(readLocalPosition("user-b", "book-1")).toBeNull();
     localStorage.setItem("chapterline:position:user-a:book-1", "not-a-number");
     expect(readLocalPosition("user-a", "book-1")).toBeNull();
   });
 
-  it("increments device sequences monotonically per book", () => {
-    expect(nextSequence("book-1")).toBe(1);
-    expect(nextSequence("book-1")).toBe(2);
-    expect(nextSequence("book-2")).toBe(1);
+  it("uses the freshest timestamped position and treats legacy local values as oldest", () => {
+    expect(
+      freshestPosition({
+        local: { positionMs: 1_000, occurredAt: 2_000 },
+        serverPositionMs: 8_000,
+        serverOccurredAt: new Date(3_000).toISOString(),
+      }),
+    ).toBe(8_000);
+    expect(
+      freshestPosition({
+        local: { positionMs: 9_000, occurredAt: 4_000 },
+        serverPositionMs: 8_000,
+        serverOccurredAt: new Date(3_000).toISOString(),
+      }),
+    ).toBe(9_000);
+    localStorage.setItem("chapterline:position:user-a:book-1", "7000");
+    expect(
+      freshestPosition({
+        local: { positionMs: readLocalPosition("user-a", "book-1")!, occurredAt: 0 },
+        serverPositionMs: 8_000,
+        serverOccurredAt: new Date(3_000).toISOString(),
+      }),
+    ).toBe(8_000);
   });
 });

@@ -8,7 +8,10 @@ import { withMutation } from "@/server/api/route-handler";
 
 export const runtime = "nodejs";
 
-const deleteSchema = z.object({ confirmEmail: z.string().trim().min(3).max(320) });
+const deleteSchema = z.object({
+  confirmEmail: z.string().trim().min(3).max(320),
+  currentPassword: z.string().min(12).max(128),
+});
 
 /**
  * Deletes the whole account: every table row cascades from the user record.
@@ -24,6 +27,14 @@ export const POST = withMutation(
         { error: "Type your account email exactly to confirm deletion." },
         { status: 400 },
       );
+    }
+    try {
+      await auth.api.verifyPassword({
+        headers: request.headers,
+        body: { password: data.currentPassword },
+      });
+    } catch {
+      return Response.json({ error: "The current password is incorrect." }, { status: 403 });
     }
 
     await db.delete(user).where(eq(user.id, session.user.id));

@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 
-import { withMutation } from "@/server/api/route-handler";
+import { withMutationParams, withRawMutationParams } from "@/server/api/route-handler";
 import { getOwnedBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { bookmarks } from "@/server/db/schema";
@@ -15,8 +15,10 @@ const bookmarkSchema = z.object({
   // Client-generated id makes offline queue replay idempotent.
   clientId: z.uuid().optional(),
 });
+const paramsSchema = z.object({ bookId: z.uuid() });
 
-export const POST = withMutation<typeof bookmarkSchema, { bookId: string }>(
+export const POST = withMutationParams(
+  paramsSchema,
   bookmarkSchema,
   "Invalid bookmark.",
   async ({ session, params, data }) => {
@@ -32,18 +34,36 @@ export const POST = withMutation<typeof bookmarkSchema, { bookId: string }>(
         note: data.note || null,
         clientId: data.clientId || null,
       })
-      .onConflictDoNothing({ target: [bookmarks.userId, bookmarks.clientId] })
+      .onConflictDoUpdate({
+        target: [bookmarks.userId, bookmarks.clientId],
+        set: { note: data.note || null, updatedAt: new Date() },
+        setWhere: eq(bookmarks.bookId, params.bookId),
+      })
       .returning();
-    if (created) return Response.json({ bookmark: toBookmarkDto(created) }, { status: 201 });
-
-    // Only a replayed clientId can conflict; answer with the bookmark it created.
-    const { clientId } = data;
-    if (!clientId) return Response.json({ error: "Bookmark could not be saved." }, { status: 500 });
-    const [existing] = await db
-      .select()
-      .from(bookmarks)
-      .where(and(eq(bookmarks.userId, session.user.id), eq(bookmarks.clientId, clientId)))
-      .limit(1);
-    return Response.json({ bookmark: existing ? toBookmarkDto(existing) : null }, { status: 200 });
+    if (!created) {
+      return Response.json(
+        { error: "Bookmark identity belongs to another book." },
+        { status: 409 },
+      );
+    }
+    return Response.json({ bookmark: toBookmarkDto(created) }, { status: 201 });
   },
 );
+
+export const DELETE = withRawMutationParams(paramsSchema, async ({ request, session, params }) => {
+  const clientId = new URL(request.url).searchParams.get("clientId");
+  if (!z.uuid().safeParse(clientId).success) {
+    return Response.json({ error: "Invalid bookmark identity." }, { status: 400 });
+  }
+  const [deleted] = await db
+    .delete(bookmarks)
+    .where(
+      and(
+        eq(bookmarks.userId, session.user.id),
+        eq(bookmarks.bookId, params.bookId),
+        eq(bookmarks.clientId, clientId!),
+      ),
+    )
+    .returning({ id: bookmarks.id });
+  return Response.json({ bookmarkId: deleted?.id ?? null });
+});
