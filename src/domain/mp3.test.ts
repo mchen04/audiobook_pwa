@@ -74,6 +74,40 @@ describe("interpretMp3Metadata", () => {
     ]);
   });
 
+  it("falls back to the album artist when the artist tag is absent", async () => {
+    const root = `.data/tests/albumartist-${crypto.randomUUID()}`;
+    testRoots.push(root);
+    await mkdir(root, { recursive: true });
+    const source = `${root}/source.mp3`;
+    const generated = spawnSync(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=2",
+        "-metadata",
+        "album_artist=Band Artist Only",
+        "-c:a",
+        "libmp3lame",
+        "-q:a",
+        "5",
+        "-id3v2_version",
+        "3",
+        source,
+      ],
+      { encoding: "utf8" },
+    );
+    if (generated.status !== 0) throw new Error(generated.stderr);
+
+    const parsed = await parseFixture(source, "source");
+    expect(parsed.author).toBe("Band Artist Only");
+  });
+
   it("falls back to one explicit chapter for a valid chapterless MP3", async () => {
     const parsed = await parseFixture(await fixture(false), "Plain Book");
 

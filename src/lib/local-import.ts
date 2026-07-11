@@ -108,11 +108,25 @@ export async function importLocalMp3(
   }).catch(() => {
     throw new Error("The book could not be registered. Check your connection.");
   });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "The MP3 could not be imported.");
+  let bookId: string;
+  let createdNewBook = true;
+  if (response.ok) {
+    ({ bookId } = (await response.json()) as { bookId: string });
+  } else {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+      existingBookId?: string;
+    } | null;
+    // A fingerprint match means this exact file already has a book — most
+    // often one whose audio is missing on this device. Reattach the bytes to
+    // that book instead of dead-ending on "already in your library".
+    if (response.status === 409 && payload?.existingBookId) {
+      bookId = payload.existingBookId;
+      createdNewBook = false;
+    } else {
+      throw new Error(payload?.error || "The MP3 could not be imported.");
+    }
   }
-  const { bookId } = (await response.json()) as { bookId: string };
   // Copying a multi-gigabyte file into device storage is the long tail of the
   // import; the stage label keeps the wait legible while the percent holds.
   onProgress(70, "Saving to this device");
@@ -138,8 +152,11 @@ export async function importLocalMp3(
       parsed.artwork ? { data: parsed.artwork.data, mimeType: parsed.artwork.mimeType } : null,
     );
   } catch (error) {
-    // Without local bytes the registration is an empty shell — undo it.
-    void fetch(`/api/books/${bookId}`, { method: "DELETE" }).catch(() => undefined);
+    // Without local bytes a fresh registration is an empty shell — undo it.
+    // A pre-existing book keeps its progress and bookmarks and stays put.
+    if (createdNewBook) {
+      void fetch(`/api/books/${bookId}`, { method: "DELETE" }).catch(() => undefined);
+    }
     throw error;
   }
   onProgress(100, "Finishing");

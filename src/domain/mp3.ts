@@ -62,7 +62,11 @@ export function interpretMp3Metadata(
 
   const durationMs = Math.round(durationSeconds * 1000);
   const title = cleanText(metadata.common.title || fallbackTitle, 300) || "Untitled audiobook";
-  const author = cleanText(metadata.common.artist || "Unknown author", 240) || "Unknown author";
+  // Audiobooks frequently carry the author in TPE2 (album artist) instead of
+  // TPE1, so both are honored before giving up.
+  const author =
+    cleanText(metadata.common.artist || metadata.common.albumartist || "Unknown author", 240) ||
+    "Unknown author";
   const composer = metadata.common.composer;
   const narrator =
     cleanText(Array.isArray(composer) ? composer[0] || "" : composer || "", 240) || null;
