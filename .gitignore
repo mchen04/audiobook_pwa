@@ -9,6 +9,7 @@
 /.data/
 /uploads/
 *.mp3
+!tests/fixtures/Downloads/Chapterline-iPhone-Test.mp3
 
 # environment and secrets
 .env
