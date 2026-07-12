@@ -61,7 +61,7 @@
 
 .auth-principles li {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: var(--tap);
   align-items: center;
   gap: 0.55rem;
 }
@@ -109,7 +109,7 @@
 .auth-switch {
   margin: 0.25rem 0 0;
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: var(--text-md);
   text-align: center;
 }
 

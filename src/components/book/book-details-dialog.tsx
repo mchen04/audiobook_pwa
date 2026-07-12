@@ -185,6 +185,19 @@ export function BookDetailsDialog({
       aria-labelledby="book-details-title"
       onClose={onClose}
       onCancel={onClose}
+      onClick={(event) => {
+        // A click on the ::backdrop targets the dialog element itself, but so
+        // does one on the dialog's own padding — check the geometry.
+        const dialog = dialogRef.current;
+        if (!dialog || event.target !== dialog) return;
+        const rect = dialog.getBoundingClientRect();
+        const inside =
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom;
+        if (!inside) onClose();
+      }}
     >
       <div className="dialog-head">
         <h2 id="book-details-title">Book details</h2>

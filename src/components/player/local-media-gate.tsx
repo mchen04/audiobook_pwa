@@ -188,8 +188,8 @@ export function LocalMediaGate({
         {state.phase === "unavailable" && (
           <>
             <p>
-              Chapterline could not access this device&apos;s saved audio. This can be temporary;
-              retry before attaching the MP3 again.
+              Hark could not access this device&apos;s saved audio. This can be temporary; retry
+              before attaching the MP3 again.
             </p>
             <button
               type="button"

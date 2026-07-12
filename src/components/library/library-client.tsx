@@ -134,8 +134,8 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
           <p className="library-kicker">Your private library</p>
           <h1 id="library-title">Bring your first audiobook.</h1>
           <p>
-            Choose the chaptered MP3 from Epub Listener. Chapterline will keep its chapters and
-            remember your place.
+            Choose the chaptered MP3 from Epub Listener. Hark keeps its chapters and remembers your
+            place.
           </p>
           <button type="button" className="primary-button" onClick={chooseFile} disabled={!!upload}>
             <UploadSimple size={20} weight="bold" aria-hidden="true" />
@@ -151,10 +151,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
           inert={upload ? true : undefined}
         >
           <div className="library-heading">
-            <div>
-              <p className="library-kicker">Your private library</p>
-              <h1 id="library-title">Library</h1>
-            </div>
+            <h1 id="library-title">Library</h1>
             <button
               type="button"
               className="primary-button"
@@ -198,7 +195,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
                 onChange={(event) => {
                   setQuery(event.target.value);
                 }}
-                placeholder="Search title, author, or tag"
+                placeholder="Search library"
               />
               {query && (
                 <button
@@ -418,9 +415,9 @@ function BookItem({
         {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}
         <div className="book-progress-copy">
           <span>
-            {book.completed ? "Finished" : percent ? `${percent}% complete` : "Not started"}
+            {book.durationMs ? `${formatDurationRounded(book.durationMs)} • ` : ""}
+            {book.completed ? "Finished" : percent ? `${percent}%` : "Not started"}
           </span>
-          {book.durationMs && <span>{formatDurationRounded(book.durationMs)}</span>}
         </div>
         <div
           className="book-progress"

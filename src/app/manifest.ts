@@ -3,8 +3,8 @@ import type { MetadataRoute } from "next";
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
-    name: "Chapterline Audiobook Player",
-    short_name: "Chapterline",
+    name: "Hark Audiobook Player",
+    short_name: "Hark",
     description: "A private, offline-ready MP3 audiobook player.",
     start_url: "/library?source=pwa",
     scope: "/",

@@ -19,10 +19,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  applicationName: "Chapterline",
+  applicationName: "Hark",
   title: {
-    default: "Chapterline",
-    template: "%s | Chapterline",
+    default: "Hark",
+    template: "%s | Hark",
   },
   description: "A private, offline-ready MP3 audiobook player.",
   manifest: "/manifest.webmanifest",
@@ -33,7 +33,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Chapterline",
+    title: "Hark",
   },
   formatDetection: {
     telephone: false,
