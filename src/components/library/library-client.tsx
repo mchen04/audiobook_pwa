@@ -243,7 +243,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
             </div>
           </div>
 
-          <div className="library-filters" role="group" aria-label="Filter by status">
+          <div className="library-filters" role="group" aria-label="Filter your library">
             {STATUS_FILTERS.map((filter) => (
               <button
                 key={filter.id}

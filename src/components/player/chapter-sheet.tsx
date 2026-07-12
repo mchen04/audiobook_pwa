@@ -1,7 +1,7 @@
 "use client";
 
 import { X } from "@phosphor-icons/react";
-import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 
 import type { PlayerChapter } from "@/domain/player";
 import { formatClock, formatDurationRounded } from "@/lib/format-time";
@@ -36,7 +36,12 @@ export function ChapterSheet({
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
   const [manualStart, setManualStart] = useState<number | null>(null);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   const activeIndex = chapters.findIndex((chapter) => chapter.id === activeChapterId);
   const windowStart = manualStart ?? chapterWindowStart(Math.max(0, activeIndex), chapters.length);
@@ -51,60 +56,62 @@ export function ChapterSheet({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Center the active chapter when the sheet opens.
+  // Center the active chapter and move focus in when the sheet opens;
+  // restore focus to the opener when it closes.
   useEffect(() => {
     if (!open) return;
+    const opener = document.activeElement as HTMLElement | null;
     scrollRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "center" });
+    sheetRef.current?.focus();
+    return () => opener?.focus();
   }, [open]);
 
   // Drag-down to dismiss. Native listeners: React's synthetic touch events
   // are passive, and the drag must preventDefault to stop list scrolling.
-  const attachDrag = useCallback(
-    (node: HTMLDivElement | null) => {
-      sheetRef.current = node;
-      if (!node) return;
-      const sheet = node;
-      let startY = 0;
-      let delta = 0;
-      let dragging = false;
+  useEffect(() => {
+    const sheet = sheetRef.current;
+    if (!open || !sheet) return;
+    let startY = 0;
+    let delta = 0;
+    let dragging = false;
 
-      function onTouchStart(event: TouchEvent) {
-        startY = event.touches[0]!.clientY;
-        delta = 0;
-        dragging = false;
-      }
+    function onTouchStart(event: TouchEvent) {
+      startY = event.touches[0]!.clientY;
+      delta = 0;
+      dragging = false;
+    }
 
-      function onTouchMove(event: TouchEvent) {
-        const y = event.touches[0]!.clientY;
-        const scroller = scrollRef.current;
-        const atTop = !scroller || scroller.scrollTop <= 0;
-        const withinScroller = scroller?.contains(event.target as Node) ?? false;
-        delta = y - startY;
-        if (!dragging && delta > 6 && (atTop || !withinScroller)) dragging = true;
-        if (!dragging) return;
-        event.preventDefault();
-        sheet.style.transform = `translateY(${Math.max(0, delta)}px)`;
-        sheet.style.transition = "none";
-      }
+    function onTouchMove(event: TouchEvent) {
+      const y = event.touches[0]!.clientY;
+      const scroller = scrollRef.current;
+      const atTop = !scroller || scroller.scrollTop <= 0;
+      const withinScroller = scroller?.contains(event.target as Node) ?? false;
+      delta = y - startY;
+      if (!dragging && delta > 6 && (atTop || !withinScroller)) dragging = true;
+      if (!dragging) return;
+      event.preventDefault();
+      sheet!.style.transform = `translateY(${Math.max(0, delta)}px)`;
+      sheet!.style.transition = "none";
+    }
 
-      function onTouchEnd() {
-        if (!dragging) return;
-        sheet.style.transition = "";
-        if (delta > DISMISS_DRAG_PX) {
-          onClose();
-          sheet.style.transform = "";
-        } else {
-          sheet.style.transform = "";
-        }
-      }
+    function onTouchEnd() {
+      if (!dragging) return;
+      sheet!.style.transition = "";
+      sheet!.style.transform = "";
+      if (delta > DISMISS_DRAG_PX) onCloseRef.current();
+    }
 
-      sheet.addEventListener("touchstart", onTouchStart, { passive: true });
-      sheet.addEventListener("touchmove", onTouchMove, { passive: false });
-      sheet.addEventListener("touchend", onTouchEnd);
-      sheet.addEventListener("touchcancel", onTouchEnd);
-    },
-    [onClose],
-  );
+    sheet.addEventListener("touchstart", onTouchStart, { passive: true });
+    sheet.addEventListener("touchmove", onTouchMove, { passive: false });
+    sheet.addEventListener("touchend", onTouchEnd);
+    sheet.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      sheet.removeEventListener("touchstart", onTouchStart);
+      sheet.removeEventListener("touchmove", onTouchMove);
+      sheet.removeEventListener("touchend", onTouchEnd);
+      sheet.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -116,7 +123,7 @@ export function ChapterSheet({
         onClick={onClose}
         aria-label="Close chapters"
       />
-      <div className="sheet-panel" ref={attachDrag}>
+      <div className="sheet-panel" ref={sheetRef} tabIndex={-1}>
         <div className="sheet-grabber" aria-hidden="true" />
         <div className="sheet-head">
           <h2>Chapters</h2>

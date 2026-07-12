@@ -92,7 +92,7 @@ export function FullPlayer({
 
   return (
     <div className="player-page">
-      <div className="player-topbar">
+      <div className="player-topbar" inert={chaptersOpen ? true : undefined}>
         <Link href={backHref} className="icon-text-button">
           <ArrowLeft size={19} aria-hidden="true" />
           <span>{backLabel}</span>

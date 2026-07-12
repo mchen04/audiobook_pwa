@@ -58,7 +58,9 @@ export function OfflineLibrary() {
     return (
       <PlaybackProvider userId={selected.userId}>
         <main className="app-page offline-player-shell">
-          <header className="app-header">
+          {/* Collapses on phones like the online player's header, so the
+              one-screen player height math holds. */}
+          <header className="app-header app-header-collapsible">
             <BrandMark />
             <span className="offline-badge">
               <WifiSlash size={17} aria-hidden="true" />
