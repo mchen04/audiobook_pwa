@@ -32,6 +32,10 @@
   original file and verifies it by size and fingerprint before attaching.
 - Browser storage can be evicted by the OS under pressure; the original files
   remain the durable copy. The app requests persistent storage at import.
+- The v2 media store splits audiobooks into 4 MiB cache entries so iPhone
+  playback never has to materialize a whole audiobook in one WebKit process.
+  Downloads made by the older whole-file store require attaching the original
+  MP3 once after this upgrade; server metadata, position, and bookmarks remain.
 
 ## Data lifecycle
 

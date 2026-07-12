@@ -1,5 +1,6 @@
-const CACHE_VERSION = "chapterline-shell-v3";
-const MEDIA_CACHE = "chapterline-media-v1";
+const CACHE_VERSION = "chapterline-shell-v4";
+const MEDIA_CACHE = "chapterline-media-v2";
+const LEGACY_MEDIA_CACHE = "chapterline-media-v1";
 const OFFLINE_URL = "/offline";
 const PRECACHE = [OFFLINE_URL, "/icons/icon-192.png"];
 
@@ -31,6 +32,7 @@ self.addEventListener("activate", (event) => {
               .map((key) => caches.delete(key)),
           ),
         ),
+      caches.delete(LEGACY_MEDIA_CACHE),
       self.clients.claim(),
     ]),
   );
@@ -71,32 +73,84 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
-// Serves a downloaded MP3 with real Range support so offline seeking anywhere in
-// the book works. Blob slices are disk-backed, so large books stay memory-safe.
+// Streams ranges from independently cached chunks. This avoids turning a
+// multi-gigabyte audiobook into one Blob in the memory-constrained iOS process.
 async function serveOfflineMedia(request, pathname) {
   const cache = await caches.open(MEDIA_CACHE);
-  const cached = await cache.match(pathname);
-  if (!cached) return new Response("Download unavailable", { status: 404 });
-
+  const manifestResponse = await cache.match(pathname);
+  if (!manifestResponse) return new Response("Download unavailable", { status: 404 });
+  if (manifestResponse.headers.get("X-Chapterline-Media-Format") !== "chunked-v1") {
+    return new Response("Unsupported saved media format", { status: 410 });
+  }
+  const manifest = await manifestResponse.json();
   const rangeHeader = request.headers.get("range");
-  if (!rangeHeader) return cached;
+  if (!rangeHeader) return streamWholeMedia(cache, pathname, manifest);
 
-  const blob = await cached.blob();
-  const range = parseRange(rangeHeader, blob.size);
+  const range = parseRange(rangeHeader, manifest.byteSize);
   if (!range) {
     return new Response(null, {
       status: 416,
-      headers: { "Content-Range": `bytes */${blob.size}` },
+      headers: { "Content-Range": `bytes */${manifest.byteSize}` },
     });
   }
-
-  const slice = blob.slice(range.start, range.end + 1);
-  return new Response(slice, {
+  return new Response(streamMediaRange(cache, pathname, manifest, range.start, range.end), {
     status: 206,
     headers: {
       "Content-Type": "audio/mpeg",
-      "Content-Length": String(slice.size),
-      "Content-Range": `bytes ${range.start}-${range.end}/${blob.size}`,
+      "Content-Length": String(range.end - range.start + 1),
+      "Content-Range": `bytes ${range.start}-${range.end}/${manifest.byteSize}`,
+      "Accept-Ranges": "bytes",
+    },
+  });
+}
+
+function streamMediaRange(cache, pathname, manifest, start, end) {
+  let index = Math.floor(start / manifest.chunkSize);
+  const last = Math.floor(end / manifest.chunkSize);
+  return new ReadableStream({
+    async pull(controller) {
+      if (index > last) {
+        controller.close();
+        return;
+      }
+      const response = await cache.match(`${pathname}/chunk/${index}`);
+      if (!response) {
+        controller.error(new Error("Download unavailable"));
+        return;
+      }
+      const blob = await response.blob();
+      const chunkStart = index * manifest.chunkSize;
+      const slice = blob.slice(
+        Math.max(0, start - chunkStart),
+        Math.min(blob.size, end - chunkStart + 1),
+      );
+      controller.enqueue(new Uint8Array(await slice.arrayBuffer()));
+      index += 1;
+    },
+  });
+}
+
+function streamWholeMedia(cache, pathname, manifest) {
+  let index = 0;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (index >= manifest.chunkCount) {
+        controller.close();
+        return;
+      }
+      const response = await cache.match(`${pathname}/chunk/${index}`);
+      if (!response) {
+        controller.error(new Error("Download unavailable"));
+        return;
+      }
+      controller.enqueue(new Uint8Array(await response.arrayBuffer()));
+      index += 1;
+    },
+  });
+  return new Response(body, {
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Content-Length": String(manifest.byteSize),
       "Accept-Ranges": "bytes",
     },
   });

@@ -1,16 +1,32 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const fixture = path.join(process.cwd(), "tests/fixtures/Downloads/Chapterline-iPhone-Test.mp3");
+const multiChunkFixture = Buffer.concat([
+  readFileSync(fixture),
+  // ID3/MPEG decoders ignore trailing padding. Crossing the 4 MiB boundary
+  // makes this flow exercise the same multi-entry storage path as an audiobook
+  // without checking a large binary fixture into the repository.
+  Buffer.alloc(4 * 1024 * 1024),
+]);
 
 test("imports from iPhone Downloads, plays, seeks, relaunches, and works offline", async ({
   context,
   page,
 }) => {
   const runtimeErrors: string[] = [];
+  const offlineMediaResponses: Array<{ status: number; range: string | null }> = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") runtimeErrors.push(message.text());
+  });
+  page.on("response", (response) => {
+    if (!new URL(response.url()).pathname.startsWith("/offline-media/")) return;
+    offlineMediaResponses.push({
+      status: response.status(),
+      range: response.headers()["content-range"] || null,
+    });
   });
 
   // iOS exposes this flag only when Safari launches the site from its Home
@@ -37,7 +53,13 @@ test("imports from iPhone Downloads, plays, seeks, relaunches, and works offline
 
   const chooser = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "Choose MP3" }).click();
-  await (await chooser).setFiles(fixture);
+  await (
+    await chooser
+  ).setFiles({
+    name: path.basename(fixture),
+    mimeType: "audio/mpeg",
+    buffer: multiChunkFixture,
+  });
   await expect(page.getByRole("link", { name: "iPhone Downloads Test" })).toBeVisible({
     timeout: 30_000,
   });
@@ -69,4 +91,12 @@ test("imports from iPhone Downloads, plays, seeks, relaunches, and works offline
   await page.getByRole("button", { name: "Open iPhone Downloads Test" }).click();
   await page.getByRole("button", { name: "Play" }).click();
   await expect(page.getByRole("button", { name: "Pause" })).toBeVisible();
+  await expect
+    .poll(() => offlineMediaResponses.some((response) => response.status === 206))
+    .toBe(true);
+  expect(
+    offlineMediaResponses.some(
+      (response) => response.status === 206 && response.range?.startsWith("bytes "),
+    ),
+  ).toBe(true);
 });
