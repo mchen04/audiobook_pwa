@@ -66,6 +66,20 @@ Browser-level verification uses `agent-browser` against the production build,
 exercising the core flows (register, import, play, offline, resume) across
 phone, tablet, and desktop viewports.
 
+## Repository layout
+
+All application code lives in `src/` (~14k lines): `app/` (routes and API),
+`components/` (UI), `lib/` (offline sync, storage, playback history), `server/`
+(DB schema and queries), and `domain/` (pure logic). Migrations are in
+`drizzle/`, tests in `tests/`, and the hand-written service worker is
+`public/sw.js`.
+
+Everything else on disk is generated and git-ignored — `.next/` (the Next.js
+build, ~500MB and hundreds of thousands of lines of compiled JS),
+`node_modules/`, `tsconfig.tsbuildinfo`, `test-results/`, and `.vercel/`. A
+line count that includes those directories will look ~50x larger than the
+actual source; count `src/` (plus `drizzle/` and `tests/`) for a real figure.
+
 ## Documentation
 
 - `docs/architecture.md` — stack, boundaries, data rules, offline model.
