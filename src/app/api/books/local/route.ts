@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { isValidChapterSequence } from "@/domain/mp3";
 import { withMutation } from "@/server/api/route-handler";
-import { expectRow, getBookForUser, listBookmarksForBook } from "@/server/books/queries";
+import { expectRow, getBookForUser } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { books, chapters, mediaAssets } from "@/server/db/schema";
 import { validateUploadMetadata } from "@/server/media/filename";
@@ -115,10 +115,7 @@ export const POST = withMutation(
     });
 
     if (!registration.created) {
-      const [book, bookmarkRows] = await Promise.all([
-        getBookForUser(session.user.id, registration.bookId),
-        listBookmarksForBook(session.user.id, registration.bookId),
-      ]);
+      const book = await getBookForUser(session.user.id, registration.bookId);
       if (!book?.durationMs) throw new Error("Existing book could not be loaded.");
       return Response.json(
         {
@@ -141,10 +138,6 @@ export const POST = withMutation(
             initialPlaybackRate: Number(book.playbackRate || 1),
             completed: book.completed || false,
           },
-          bookmarks: bookmarkRows.map((bookmark) => ({
-            ...bookmark,
-            createdAt: bookmark.createdAt.toISOString(),
-          })),
         },
         { status: 409 },
       );

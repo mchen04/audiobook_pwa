@@ -15,6 +15,8 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
+import { PLAYBACK_ACTIONS } from "@/domain/playback-history";
+
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -234,8 +236,75 @@ export const playbackDeviceSequences = pgTable(
   ],
 );
 
-export const bookmarks = pgTable(
-  "bookmarks",
+export const playbackActions = pgTable(
+  "playback_actions",
+  {
+    id: uuid("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    bookId: uuid("book_id")
+      .notNull()
+      .references(() => books.id, { onDelete: "cascade" }),
+    action: varchar("action", {
+      length: 32,
+      enum: PLAYBACK_ACTIONS,
+    }).notNull(),
+    positionMs: bigint("position_ms", { mode: "number" }).notNull(),
+    previousPositionMs: bigint("previous_position_ms", { mode: "number" }),
+    playbackRate: numeric("playback_rate", { precision: 4, scale: 2 }).notNull(),
+    description: varchar("description", { length: 160 }),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    index("playback_actions_user_book_time_idx").on(
+      table.userId,
+      table.bookId,
+      table.recordedAt,
+      table.id,
+    ),
+    check("playback_actions_position_nonnegative", sql`${table.positionMs} >= 0`),
+    check(
+      "playback_actions_previous_position_nonnegative",
+      sql`${table.previousPositionMs} is null OR ${table.previousPositionMs} >= 0`,
+    ),
+    check(
+      "playback_actions_rate_valid",
+      sql`${table.playbackRate} >= 0.5 AND ${table.playbackRate} <= 3.0`,
+    ),
+  ],
+);
+
+// Durable idempotency ledger kept independently of the capped history projection.
+export const playbackActionReceipts = pgTable(
+  "playback_action_receipts",
+  {
+    id: uuid("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    bookId: uuid("book_id")
+      .notNull()
+      .references(() => books.id, { onDelete: "cascade" }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    index("playback_action_receipts_user_book_idx").on(
+      table.userId,
+      table.bookId,
+      table.recordedAt,
+    ),
+  ],
+);
+
+// Export-only preservation for bookmarks created before playback history replaced the feature.
+export const legacyBookmarks = pgTable(
+  "legacy_bookmarks",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     userId: text("user_id")
@@ -246,15 +315,12 @@ export const bookmarks = pgTable(
       .references(() => books.id, { onDelete: "cascade" }),
     positionMs: bigint("position_ms", { mode: "number" }).notNull(),
     note: varchar("note", { length: 2000 }),
-    // Client-generated id so replaying a queued offline bookmark cannot duplicate it.
     clientId: uuid("client_id"),
     ...timestamps,
   },
   (table) => [
-    index("bookmarks_user_book_position_idx").on(table.userId, table.bookId, table.positionMs),
-    index("bookmarks_user_id_idx").on(table.userId, table.id),
-    uniqueIndex("bookmarks_user_client_unique").on(table.userId, table.clientId),
-    check("bookmarks_position_nonnegative", sql`${table.positionMs} >= 0`),
+    index("legacy_bookmarks_user_id_idx").on(table.userId, table.id),
+    check("legacy_bookmarks_position_nonnegative", sql`${table.positionMs} >= 0`),
   ],
 );
 
@@ -397,7 +463,7 @@ export const booksRelations = relations(books, ({ one, many }) => ({
   owner: one(user, { fields: [books.ownerId], references: [user.id] }),
   mediaAssets: many(mediaAssets),
   chapters: many(chapters),
-  bookmarks: many(bookmarks),
+  playbackActions: many(playbackActions),
 }));
 
 export const schema = {
@@ -411,7 +477,8 @@ export const schema = {
   chapters,
   playbackStates,
   playbackDeviceSequences,
-  bookmarks,
+  playbackActions,
+  legacyBookmarks,
   collections,
   collectionBooks,
   tags,

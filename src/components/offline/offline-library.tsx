@@ -69,7 +69,6 @@ export function OfflineLibrary() {
           </header>
           <FullPlayer
             playerBook={asOfflinePlayerBook(selected)}
-            initialBookmarks={selected.bookmarks || []}
             offlineMode
             backHref="/offline"
             backLabel="Downloads"

@@ -1,12 +1,19 @@
 "use client";
 
-import { X } from "@phosphor-icons/react";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ClockCounterClockwise, ListBullets, X } from "@phosphor-icons/react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 
-import type { PlayerChapter } from "@/domain/player";
+import type { PlaybackHistoryEntry, PlayerChapter } from "@/domain/player";
 import { formatClock, formatDurationRounded } from "@/lib/format-time";
 
 import { CHAPTER_WINDOW_SIZE, chapterWindow, chapterWindowStart } from "./chapter-window";
+import { HistoryList } from "./history-list";
 
 const DISMISS_DRAG_PX = 90;
 
@@ -15,29 +22,43 @@ const DISMISS_DRAG_PX = 90;
  * scrim above it, dragging it down (when its list is scrolled to the top),
  * or pressing Escape. The list itself scrolls natively inside.
  */
-export function ChapterSheet({
+export type PlayerSheetView = "chapters" | "history";
+
+export function PlayerSheet({
   open,
+  view,
+  onViewChange,
   onClose,
   chapters,
+  history,
+  historyNotice,
   activeChapterId,
   isPlaying,
-  onSeek,
+  onChapterSelect,
+  onHistoryRestore,
   diagnostic,
-  footer,
 }: {
   open: boolean;
+  view: PlayerSheetView;
+  onViewChange: (view: PlayerSheetView) => void;
   onClose: () => void;
   chapters: PlayerChapter[];
+  history: PlaybackHistoryEntry[];
+  historyNotice?: string | null;
   activeChapterId: string | null;
   isPlaying: boolean;
-  onSeek: (positionMs: number) => void;
+  onChapterSelect: (positionMs: number) => void;
+  onHistoryRestore: (positionMs: number) => void;
   diagnostic?: string | null;
-  footer?: ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const [manualStart, setManualStart] = useState<number | null>(null);
+  const sheetId = useId();
+  const chapterTabId = `${sheetId}-chapters-tab`;
+  const historyTabId = `${sheetId}-history-tab`;
+  const panelId = `${sheetId}-panel`;
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -115,26 +136,95 @@ export function ChapterSheet({
 
   if (!open) return null;
 
+  function handleTabKey(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const views: PlayerSheetView[] = ["chapters", "history"];
+    const current = views.indexOf(view);
+    const target =
+      event.key === "Home"
+        ? views[0]
+        : event.key === "End"
+          ? views[1]
+          : event.key === "ArrowLeft"
+            ? views[(current - 1 + views.length) % views.length]
+            : event.key === "ArrowRight"
+              ? views[(current + 1) % views.length]
+              : null;
+    if (!target) return;
+    event.preventDefault();
+    onViewChange(target);
+    sheetRef.current?.querySelector<HTMLElement>(`[data-sheet-tab="${target}"]`)?.focus();
+  }
+
   return (
-    <div className="sheet-root" role="dialog" aria-modal="true" aria-label="Chapters">
+    <div
+      className="sheet-root"
+      role="dialog"
+      aria-modal="true"
+      aria-label={view === "chapters" ? "Chapters" : "Playback history"}
+    >
       <button
         type="button"
         className="sheet-backdrop"
         onClick={onClose}
-        aria-label="Close chapters"
+        aria-label="Close player details"
       />
       <div className="sheet-panel" ref={sheetRef} tabIndex={-1}>
         <div className="sheet-grabber" aria-hidden="true" />
         <div className="sheet-head">
-          <h2>Chapters</h2>
-          <span>{chapters.length}</span>
-          <button type="button" onClick={onClose} aria-label="Close chapters">
+          <div
+            className="sheet-tabs"
+            role="tablist"
+            aria-label="Player details"
+            onKeyDown={handleTabKey}
+          >
+            <button
+              type="button"
+              role="tab"
+              id={chapterTabId}
+              data-sheet-tab="chapters"
+              aria-controls={panelId}
+              aria-selected={view === "chapters"}
+              aria-label="Chapters"
+              tabIndex={view === "chapters" ? 0 : -1}
+              onClick={() => onViewChange("chapters")}
+            >
+              <ListBullets size={19} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id={historyTabId}
+              data-sheet-tab="history"
+              aria-controls={panelId}
+              aria-selected={view === "history"}
+              aria-label="History"
+              tabIndex={view === "history" ? 0 : -1}
+              onClick={() => onViewChange("history")}
+            >
+              <ClockCounterClockwise size={19} aria-hidden="true" />
+            </button>
+          </div>
+          <h2>{view === "chapters" ? "Chapters" : "History"}</h2>
+          <span>{view === "chapters" ? chapters.length : history.length}</span>
+          <button type="button" onClick={onClose} aria-label="Close player details">
             <X size={18} />
           </button>
         </div>
-        <div className="sheet-scroll" ref={scrollRef}>
-          {diagnostic && <p className="chapter-diagnostic">{diagnostic}</p>}
-          {windowStart > 0 && (
+        <div
+          className="sheet-scroll"
+          ref={scrollRef}
+          id={panelId}
+          role="tabpanel"
+          aria-labelledby={view === "chapters" ? chapterTabId : historyTabId}
+          tabIndex={0}
+        >
+          {view === "chapters" && diagnostic && <p className="chapter-diagnostic">{diagnostic}</p>}
+          {view === "history" && historyNotice && (
+            <p className="history-notice" role="status">
+              {historyNotice}
+            </p>
+          )}
+          {view === "chapters" && windowStart > 0 && (
             <button
               type="button"
               className="secondary-button chapter-window-button"
@@ -143,42 +233,53 @@ export function ChapterSheet({
               Earlier chapters
             </button>
           )}
-          <ol className="sheet-chapters">
-            {visibleChapters.map((chapter) => {
-              const active = chapter.id === activeChapterId;
-              const lengthMs = chapter.endMs - chapter.startMs;
-              return (
-                <li key={chapter.id}>
-                  <button
-                    type="button"
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => {
-                      setManualStart(null);
-                      onSeek(chapter.startMs);
-                      onClose();
-                    }}
-                  >
-                    <span>{chapter.position + 1}</span>
-                    <span>
-                      <strong>{chapter.title}</strong>
-                      <small>
-                        {formatDurationRounded(lengthMs)} · {formatClock(chapter.startMs)} –{" "}
-                        {formatClock(chapter.endMs)}
-                      </small>
-                    </span>
-                    {active && isPlaying && (
-                      <span className="playing-bars" aria-label="Playing">
-                        <i />
-                        <i />
-                        <i />
+          {view === "chapters" ? (
+            <ol className="sheet-chapters">
+              {visibleChapters.map((chapter) => {
+                const active = chapter.id === activeChapterId;
+                const lengthMs = chapter.endMs - chapter.startMs;
+                return (
+                  <li key={chapter.id}>
+                    <button
+                      type="button"
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => {
+                        setManualStart(null);
+                        onChapterSelect(chapter.startMs);
+                        onClose();
+                      }}
+                    >
+                      <span>{chapter.position + 1}</span>
+                      <span>
+                        <strong>{chapter.title}</strong>
+                        <small>
+                          {formatDurationRounded(lengthMs)} · {formatClock(chapter.startMs)} –{" "}
+                          {formatClock(chapter.endMs)}
+                        </small>
                       </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-          {windowStart + visibleChapters.length < chapters.length && (
+                      {active && isPlaying && (
+                        <span className="playing-bars" aria-label="Playing">
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <HistoryList
+              history={history}
+              chapters={chapters}
+              onSelect={(positionMs) => {
+                onHistoryRestore(positionMs);
+                onClose();
+              }}
+            />
+          )}
+          {view === "chapters" && windowStart + visibleChapters.length < chapters.length && (
             <button
               type="button"
               className="secondary-button chapter-window-button"
@@ -194,7 +295,6 @@ export function ChapterSheet({
               Later chapters
             </button>
           )}
-          {footer}
         </div>
       </div>
     </div>

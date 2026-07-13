@@ -1,8 +1,8 @@
 import { and, asc, count, desc, eq, sql, type SQL } from "drizzle-orm";
 
+import { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
 import { db } from "@/server/db/client";
 import {
-  bookmarks,
   books,
   bookTags,
   chapters,
@@ -11,8 +11,10 @@ import {
   listeningSessions,
   mediaAssets,
   playbackStates,
+  playbackActions,
   tags,
 } from "@/server/db/schema";
+import { playbackHistoryLockKey } from "@/server/playback/lock-key";
 
 import {
   decodeLibraryCursor,
@@ -327,15 +329,33 @@ export async function getOwnedBook(userId: string, bookId: string) {
   return owned || null;
 }
 
-export async function listBookmarksForBook(userId: string, bookId: string) {
-  return db
-    .select({
-      id: bookmarks.id,
-      positionMs: bookmarks.positionMs,
-      note: bookmarks.note,
-      createdAt: bookmarks.createdAt,
-    })
-    .from(bookmarks)
-    .where(and(eq(bookmarks.userId, userId), eq(bookmarks.bookId, bookId)))
-    .orderBy(bookmarks.positionMs);
+export async function getPlaybackHistorySnapshotForBook(
+  userId: string,
+  bookId: string,
+  limit = PLAYBACK_HISTORY_LIMIT,
+) {
+  return db.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${playbackHistoryLockKey(userId, bookId)}, 0))`,
+    );
+    const rows = await transaction
+      .select({
+        id: playbackActions.id,
+        action: playbackActions.action,
+        positionMs: playbackActions.positionMs,
+        previousPositionMs: playbackActions.previousPositionMs,
+        playbackRate: playbackActions.playbackRate,
+        description: playbackActions.description,
+        occurredAt: playbackActions.occurredAt,
+        recordedAt: playbackActions.recordedAt,
+      })
+      .from(playbackActions)
+      .where(and(eq(playbackActions.userId, userId), eq(playbackActions.bookId, bookId)))
+      .orderBy(desc(playbackActions.recordedAt), desc(playbackActions.id))
+      .limit(Math.min(PLAYBACK_HISTORY_LIMIT, Math.max(1, limit)));
+    const [boundary] = await transaction.execute<{ capturedAt: string }>(
+      sql`select clock_timestamp() as "capturedAt"`,
+    );
+    return { rows, capturedAt: boundary!.capturedAt };
+  });
 }

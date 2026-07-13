@@ -1,0 +1,2 @@
+ALTER TABLE "playback_action_receipts" ALTER COLUMN "recorded_at" SET DEFAULT clock_timestamp();--> statement-breakpoint
+ALTER TABLE "playback_actions" ALTER COLUMN "recorded_at" SET DEFAULT clock_timestamp();

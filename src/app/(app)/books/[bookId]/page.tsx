@@ -6,10 +6,11 @@ import type { BookDetails } from "@/components/book/book-details-dialog";
 import { LocalMediaGate } from "@/components/player/local-media-gate";
 import type { PlayerBook } from "@/domain/player";
 import { requireSession } from "@/server/auth-session";
+import { toPlaybackHistoryDto } from "@/server/books/dto";
 import {
   getBookForUser,
+  getPlaybackHistorySnapshotForBook,
   getNextBookInCollection,
-  listBookmarksForBook,
   listRecentSessionsForBook,
 } from "@/server/books/queries";
 
@@ -26,9 +27,9 @@ export default async function BookPage({
   const { bookId } = await params;
   if (!z.uuid().safeParse(bookId).success) notFound();
   const { autoplay } = await searchParams;
-  const [book, bookmarkRows, nextInCollection, recentSessions] = await Promise.all([
+  const [book, history, nextInCollection, recentSessions] = await Promise.all([
     getBookForUser(session.user.id, bookId),
-    listBookmarksForBook(session.user.id, bookId),
+    getPlaybackHistorySnapshotForBook(session.user.id, bookId),
     getNextBookInCollection(session.user.id, bookId),
     listRecentSessionsForBook(session.user.id, bookId),
   ]);
@@ -74,10 +75,10 @@ export default async function BookPage({
     })),
   };
 
-  const initialBookmarks = bookmarkRows.map((bookmark) => ({
-    ...bookmark,
-    createdAt: bookmark.createdAt.toISOString(),
-  }));
+  const historySnapshot = {
+    entries: history.rows.map(toPlaybackHistoryDto),
+    capturedAt: new Date(history.capturedAt).toISOString(),
+  };
 
   return (
     <LocalMediaGate
@@ -86,7 +87,7 @@ export default async function BookPage({
       mediaFingerprint={book.mediaFingerprint}
       mediaFingerprintKind={book.mediaFingerprintKind}
       byteSize={book.byteSize}
-      initialBookmarks={initialBookmarks}
+      historySnapshot={historySnapshot}
       autoplay={autoplay === "1"}
       details={details}
       nextInCollection={nextInCollection}

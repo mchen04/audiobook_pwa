@@ -306,8 +306,7 @@
 }
 
 .player-options > label,
-.sleep-menu > summary,
-.chapters-button {
+.sleep-menu > summary {
   display: flex;
   min-height: var(--control);
   align-items: center;
@@ -334,16 +333,43 @@
 }
 
 .player-options > label:focus-within,
-.sleep-menu > summary:focus-visible,
-.chapters-button:focus-visible {
+.sleep-menu > summary:focus-visible {
   border-color: var(--accent);
   outline: 3px solid color-mix(in srgb, var(--accent) 65%, transparent);
   outline-offset: 2px;
 }
 
-.chapters-button:hover,
 .sleep-menu > summary:hover {
   background: var(--surface-muted);
+}
+
+.player-sheet-tabs {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+}
+
+.player-sheet-tabs button {
+  display: grid;
+  width: var(--control);
+  min-height: var(--control);
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.player-sheet-tabs button + button {
+  border-left: 1px solid var(--border);
+}
+
+.player-sheet-tabs button:hover,
+.player-sheet-tabs button[aria-expanded="true"] {
+  background: var(--surface-muted);
+  color: var(--accent);
 }
 
 .sleep-menu {
@@ -493,6 +519,27 @@
   cursor: pointer;
 }
 
+.sheet-tabs {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.sheet-tabs button {
+  border-radius: 0;
+  background: transparent;
+}
+
+.sheet-tabs button + button {
+  border-left: 1px solid var(--border);
+}
+
+.sheet-tabs button[aria-selected="true"] {
+  background: var(--surface-muted);
+  color: var(--accent);
+}
+
 .sheet-scroll {
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -544,6 +591,37 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.history-list .history-rate {
+  color: var(--text-muted);
+  font-family: var(--font-mono), monospace;
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-empty {
+  display: grid;
+  min-height: 12rem;
+  place-items: center;
+  align-content: center;
+  gap: 0.7rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.history-empty p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.history-notice {
+  margin: 0.35rem 0.25rem;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--danger);
+  padding: 0.6rem 0.75rem;
+  font-size: var(--text-xs);
 }
 
 .sheet-chapters li strong {
@@ -602,52 +680,6 @@
 
 .spin {
   animation: spin 0.9s linear infinite;
-}
-
-.bookmark-list {
-  margin-top: 0.5rem;
-  border-top: 1px solid var(--border);
-  padding: 0.75rem 0.15rem 0;
-}
-
-.bookmark-list h2 {
-  margin: 0;
-  padding: 0 0.55rem 0.45rem;
-  font-size: var(--text-md);
-}
-
-.bookmark-list ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.bookmark-list li {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.25rem;
-}
-
-.bookmark-list li button {
-  min-width: var(--control);
-  min-height: var(--control);
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  padding: 0.4rem 0.6rem;
-  text-align: left;
-}
-
-.bookmark-list li button:hover {
-  background: var(--surface-muted);
-}
-
-.bookmark-list li button small {
-  display: block;
-  color: var(--text-muted);
-  font-size: var(--text-2xs);
 }
 
 .mini-player {
@@ -956,15 +988,6 @@
   gap: 0.25rem;
 }
 
-.player-notice {
-  min-height: 1.1rem;
-  margin-top: 0.3rem;
-  color: var(--accent);
-  font-size: var(--text-sm);
-  font-weight: 650;
-  text-align: center;
-}
-
 .up-next {
   margin: 0.75rem 0 0;
   color: var(--text-muted);
@@ -984,35 +1007,4 @@
   font-size: var(--text-xs);
   line-height: 1.5;
   padding: 0.6rem 0.7rem 0.75rem;
-}
-
-.bookmark-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 0.25rem;
-  align-items: center;
-}
-
-.bookmark-row button:nth-child(2) {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
-.bookmark-note-form {
-  display: flex;
-  gap: 0.4rem;
-  padding: 0.15rem 0.6rem 0.6rem;
-}
-
-.bookmark-note-form input {
-  width: 100%;
-  min-width: 0;
-  min-height: var(--control);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface);
-  color: var(--text);
-  padding: 0.4rem 0.6rem;
-  font-size: var(--text-base);
 }

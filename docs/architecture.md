@@ -44,7 +44,7 @@ Neon Postgres
   -> users/sessions
   -> books/media metadata/chapters
   -> progress revisions/listening sessions
-  -> bookmarks, collections, tags
+  -> playback actions, collections, tags
   -> rate-limit state
 ```
 
@@ -81,7 +81,7 @@ Neon Postgres
    canonical parser). There is no server media route.
 5. On a device that lacks the bytes, the player's media gate asks for the
    original MP3 and verifies byte size and fingerprint before attaching it —
-   positions and bookmarks were already synced through Postgres.
+   positions and playback history were already synced through Postgres.
 
 ## Offline model
 
@@ -90,14 +90,15 @@ Neon Postgres
   serving of downloaded media, no automatic MP3 caching.
 - Cache Storage holds the imported MP3 bytes (and covers); IndexedDB holds the
   per-user library records; localStorage holds user-scoped positions,
-  preferences cache, and the offline progress/bookmark queues. Reads reconcile
+  preferences cache, the offline progress queue, and the capped playback-history
+  ledger. Reads reconcile
   IndexedDB against Cache Storage so an OS-evicted media entry becomes an
   honest reattach flow instead of a broken player.
 - Account deletion clears that user's local books, queues, positions, and
   preferences on the device; sign-out clears the active-user marker.
 - Reconnect: queued mutations replay idempotently (device sequences for
-  progress, client ids for bookmarks); the server resolves conflicts
-  deterministically and stale events never move fresh positions.
+  progress, client-generated UUIDs for playback actions); the server resolves
+  conflicts deterministically and stale events never move fresh positions.
 
 ## Design system
 
@@ -118,7 +119,7 @@ Neon Postgres
   smart rewind, start-position resolution, local device state), unit-tested.
 - `src/components/player/`: the provider wires one audio element to focused
   hooks — progress persistence, sleep timer, Media Session, tab arbitration,
-  bookmarks — with rendering kept in `full-player.tsx`/`mini-player.tsx`.
+  playback history — with rendering kept in `full-player.tsx`/`mini-player.tsx`.
 - `src/lib/offline-library.ts` + `local-import.ts`: the device-local media
   store and the in-browser import pipeline; `offline-sync.ts`: mutation queues.
 - `src/lib/wire.ts`: runtime guards at every client fetch boundary.

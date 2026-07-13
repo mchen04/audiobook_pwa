@@ -4,15 +4,16 @@ import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/server/db/client";
 import {
-  bookmarks,
   books,
   bookTags,
   chapters,
   collectionBooks,
   collections,
   listeningSessions,
+  legacyBookmarks,
   mediaAssets,
   playbackStates,
+  playbackActions,
   tags,
   userPreferences,
 } from "@/server/db/schema";
@@ -70,7 +71,7 @@ async function* generateAccountSnapshot(account: ExportAccount, database: Export
     .where(eq(userPreferences.userId, account.id))
     .limit(1);
   yield encode(
-    `{"format":"chapterline-export","version":2,"exportedAt":${JSON.stringify(new Date().toISOString())},"account":${JSON.stringify({ email: account.email, name: account.name })},"preferences":${JSON.stringify(preferences || null)},"books":`,
+    `{"format":"chapterline-export","version":3,"exportedAt":${JSON.stringify(new Date().toISOString())},"account":${JSON.stringify({ email: account.email, name: account.name })},"preferences":${JSON.stringify(preferences || null)},"books":`,
   );
   yield* jsonArray((cursor: BookCursor | null) => loadBookBatch(database, account.id, cursor));
 
@@ -89,13 +90,33 @@ async function* generateAccountSnapshot(account: ExportAccount, database: Export
       .limit(ROW_BATCH_SIZE);
     return keysetPage(rows, (row) => row.bookId);
   });
-  yield encode(',"bookmarks":');
+  yield encode(',"playbackHistory":');
   yield* jsonArray(async (cursor: string | null) => {
     const rows = await database
       .select()
-      .from(bookmarks)
-      .where(and(eq(bookmarks.userId, account.id), ...(cursor ? [gt(bookmarks.id, cursor)] : [])))
-      .orderBy(asc(bookmarks.id))
+      .from(playbackActions)
+      .where(
+        and(
+          eq(playbackActions.userId, account.id),
+          ...(cursor ? [gt(playbackActions.id, cursor)] : []),
+        ),
+      )
+      .orderBy(asc(playbackActions.id))
+      .limit(ROW_BATCH_SIZE);
+    return keysetPage(rows, (row) => row.id);
+  });
+  yield encode(',"legacyBookmarks":');
+  yield* jsonArray(async (cursor: string | null) => {
+    const rows = await database
+      .select()
+      .from(legacyBookmarks)
+      .where(
+        and(
+          eq(legacyBookmarks.userId, account.id),
+          ...(cursor ? [gt(legacyBookmarks.id, cursor)] : []),
+        ),
+      )
+      .orderBy(asc(legacyBookmarks.id))
       .limit(ROW_BATCH_SIZE);
     return keysetPage(rows, (row) => row.id);
   });

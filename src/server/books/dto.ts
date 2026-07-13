@@ -1,20 +1,36 @@
 import "server-only";
 
 import type { LibraryBook } from "@/domain/library";
-import type { Bookmark } from "@/domain/player";
+import type { PlaybackHistoryEntry } from "@/domain/player";
 import type { listBooksForUser } from "@/server/books/queries";
-import type { bookmarks } from "@/server/db/schema";
+import type { playbackActions } from "@/server/db/schema";
 
 /**
  * Wire shapes the client consumes. Serializing here keeps the domain types the
  * single source of truth instead of ad-hoc casts on both sides.
  */
-export function toBookmarkDto(row: typeof bookmarks.$inferSelect): Bookmark {
+export function toPlaybackHistoryDto(
+  row: Pick<
+    typeof playbackActions.$inferSelect,
+    | "id"
+    | "action"
+    | "positionMs"
+    | "previousPositionMs"
+    | "playbackRate"
+    | "description"
+    | "occurredAt"
+    | "recordedAt"
+  >,
+): PlaybackHistoryEntry {
   return {
     id: row.id,
+    action: row.action,
     positionMs: row.positionMs,
-    note: row.note,
-    createdAt: row.createdAt.toISOString(),
+    previousPositionMs: row.previousPositionMs,
+    playbackRate: Number(row.playbackRate),
+    description: row.description,
+    occurredAt: row.occurredAt.toISOString(),
+    recordedAt: row.recordedAt.toISOString(),
   };
 }
 

@@ -48,7 +48,6 @@ describe("local MP3 import", () => {
       }),
       file,
       null,
-      [],
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -65,16 +64,12 @@ describe("local MP3 import", () => {
       initialPlaybackRate: 1.5,
       completed: false,
     };
-    const bookmarks = [
-      { id: "bookmark-1", positionMs: 4_000, note: "Remember", createdAt: "2026-07-10" },
-    ];
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       Response.json(
         {
           error: "This MP3 is already in your library.",
           existingBookId: canonical.id,
           playerBook: canonical,
-          bookmarks,
         },
         { status: 409 },
       ),
@@ -85,13 +80,7 @@ describe("local MP3 import", () => {
 
     await importLocalMp3("mobile-user", file, vi.fn());
 
-    expect(storeLocalBookMedia).toHaveBeenCalledWith(
-      "mobile-user",
-      canonical,
-      file,
-      null,
-      bookmarks,
-    );
+    expect(storeLocalBookMedia).toHaveBeenCalledWith("mobile-user", canonical, file, null);
   });
 
   it("keeps recoverable metadata when device storage fails", async () => {
