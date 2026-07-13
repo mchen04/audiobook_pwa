@@ -1,0 +1,5 @@
+# Machine-generated files: keep them tracked (Drizzle needs the snapshots to
+# diff migrations; the lockfile pins deps) but exclude them from GitHub's
+# language stats and collapse them by default in diffs.
+drizzle/meta/*.json linguist-generated=true
+pnpm-lock.yaml linguist-generated=true
