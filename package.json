@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "vercel-build": "pnpm db:migrate && pnpm build",
+    "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then pnpm db:migrate; else export DATABASE_URL=\"${DATABASE_URL:-postgresql://preview:preview@127.0.0.1:5432/preview}\" BETTER_AUTH_SECRET=\"${BETTER_AUTH_SECRET:-preview-build-only-secret-not-for-runtime}\"; fi; pnpm build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

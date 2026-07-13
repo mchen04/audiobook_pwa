@@ -1,6 +1,6 @@
 import { openDB, type DBSchema } from "idb";
 
-import type { Bookmark, PlayerBook } from "@/domain/player";
+import type { PlayerBook } from "@/domain/player";
 import { clearQueuedMutationsForUser } from "@/lib/offline-sync";
 
 const DATABASE_NAME = "chapterline-offline-v1";
@@ -16,7 +16,6 @@ export type OfflineBook = {
   offlineCoverUrl: string | null;
   byteSize: number;
   downloadedAt: string;
-  bookmarks?: Bookmark[];
 };
 
 export class OfflineStorageUnavailableError extends Error {
@@ -52,8 +51,8 @@ interface OfflineDatabase extends DBSchema {
 }
 
 function database() {
-  return openDB<OfflineDatabase>(DATABASE_NAME, 4, {
-    upgrade(db, oldVersion) {
+  return openDB<OfflineDatabase>(DATABASE_NAME, 5, {
+    upgrade(db, oldVersion, _newVersion, transaction) {
       if (oldVersion < 1) {
         const downloads = db.createObjectStore("downloads", { keyPath: "key" });
         downloads.createIndex("by-user", "userId");
@@ -65,6 +64,19 @@ function database() {
       if (oldVersion < 4) {
         const entries = db.createObjectStore("cacheEntries", { keyPath: "url" });
         entries.createIndex("by-user", "userId");
+      }
+      if (oldVersion >= 1 && oldVersion < 5) {
+        const downloads = transaction.objectStore("downloads");
+        void downloads.openCursor().then(async function removeLegacyBookmarks(cursor) {
+          if (!cursor) return;
+          const record = cursor.value as OfflineBook & { bookmarks?: unknown };
+          if ("bookmarks" in record) {
+            const { bookmarks, ...clean } = record;
+            void bookmarks;
+            await cursor.update(clean);
+          }
+          await removeLegacyBookmarks(await cursor.continue());
+        });
       }
     },
   });
@@ -183,47 +195,6 @@ async function completeOfflineDeletion(
   }
 }
 
-export async function storeOfflineBookmarks(
-  userId: string,
-  bookId: string,
-  bookmarks: Bookmark[],
-): Promise<void> {
-  const db = await database();
-  const key = offlineBookKey(userId, bookId);
-  const record = await db.get("downloads", key);
-  if (record) await db.put("downloads", { ...record, bookmarks });
-}
-
-export async function projectOfflineBookmark(
-  userId: string,
-  bookId: string,
-  mutation:
-    | { kind: "upsert"; bookmark: Bookmark }
-    | { kind: "delete"; bookmarkId: string }
-    | { kind: "note"; bookmarkId: string; note: string | null },
-): Promise<void> {
-  const db = await database();
-  const transaction = db.transaction("downloads", "readwrite");
-  const key = offlineBookKey(userId, bookId);
-  const record = await transaction.store.get(key);
-  if (record) {
-    const bookmarks = record.bookmarks || [];
-    const next =
-      mutation.kind === "delete"
-        ? bookmarks.filter((bookmark) => bookmark.id !== mutation.bookmarkId)
-        : mutation.kind === "note"
-          ? bookmarks.map((bookmark) =>
-              bookmark.id === mutation.bookmarkId ? { ...bookmark, note: mutation.note } : bookmark,
-            )
-          : [
-              ...bookmarks.filter((bookmark) => bookmark.id !== mutation.bookmark.id),
-              mutation.bookmark,
-            ].sort((left, right) => left.positionMs - right.positionMs);
-    await transaction.store.put({ ...record, bookmarks: next });
-  }
-  await transaction.done;
-}
-
 export async function projectOfflineProgress(
   userId: string,
   bookId: string,
@@ -263,7 +234,6 @@ export async function storeLocalBookMedia(
   book: Omit<PlayerBook, "mediaUrl" | "coverUrl">,
   file: File,
   artwork: { data: Uint8Array; mimeType: string } | null,
-  bookmarks: Bookmark[] = [],
 ): Promise<OfflineBook> {
   const key = offlineBookKey(userId, book.id);
   const startedAt = Date.now();
@@ -272,7 +242,7 @@ export async function storeLocalBookMedia(
     if (pending?.completedAt && pending.completedAt >= startedAt) {
       throw new Error("This download was removed while it was being saved.");
     }
-    return storeLocalBookMediaUnlocked(userId, book, file, artwork, bookmarks);
+    return storeLocalBookMediaUnlocked(userId, book, file, artwork);
   });
 }
 
@@ -281,7 +251,6 @@ async function storeLocalBookMediaUnlocked(
   book: Omit<PlayerBook, "mediaUrl" | "coverUrl">,
   file: File,
   artwork: { data: Uint8Array; mimeType: string } | null,
-  bookmarks: Bookmark[],
 ): Promise<OfflineBook> {
   await ensureStorageCapacity(file.size);
   if (navigator.storage?.persist) await navigator.storage.persist().catch(() => false);
@@ -371,7 +340,6 @@ async function storeLocalBookMediaUnlocked(
     offlineCoverUrl,
     byteSize: file.size,
     downloadedAt: new Date().toISOString(),
-    bookmarks,
   };
 
   let existing: OfflineBook | undefined;
@@ -476,6 +444,8 @@ export async function clearLocalDataForUser(userId: string): Promise<void> {
   keysToRemove.forEach((key) => localStorage.removeItem(key));
 
   await clearQueuedMutationsForUser(userId);
+  const { clearPlaybackHistoryForUser } = await import("@/lib/playback-history");
+  await clearPlaybackHistoryForUser(userId);
   if (localStorage.getItem("chapterline:active-user") === userId) {
     localStorage.removeItem("chapterline:active-user");
   }

@@ -4,15 +4,14 @@ import {
   ArrowCounterClockwise,
   ArrowClockwise,
   ArrowLeft,
-  BookmarkSimple,
   CaretLeft,
   CaretRight,
   Clock,
+  ClockCounterClockwise,
   DotsThreeCircle,
   ListBullets,
   Pause,
   Play,
-  Trash,
 } from "@phosphor-icons/react";
 import Link from "next/link";
 import Image from "next/image";
@@ -20,18 +19,15 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { BookDetailsDialog, type BookDetails } from "@/components/book/book-details-dialog";
-import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
+import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
 import { formatClock } from "@/lib/format-time";
 
-import { ChapterSheet } from "./chapter-sheet";
+import { PlayerSheet, type PlayerSheetView } from "./chapter-sheet";
 import { usePlayback } from "./playback-provider";
-import { isPendingBookmark, useBookmarks } from "./use-bookmarks";
-
-const BOOKMARK_WINDOW_SIZE = 50;
 
 export function FullPlayer({
   playerBook,
-  initialBookmarks,
+  historySnapshot,
   offlineMode = false,
   backHref = "/library",
   backLabel = "Library",
@@ -40,7 +36,7 @@ export function FullPlayer({
   nextInCollection = null,
 }: {
   playerBook: PlayerBook;
-  initialBookmarks: Bookmark[];
+  historySnapshot?: PlaybackHistorySnapshot;
   offlineMode?: boolean;
   backHref?: string;
   backLabel?: string;
@@ -50,23 +46,17 @@ export function FullPlayer({
 }) {
   const router = useRouter();
   const playback = usePlayback();
-  const { loadBook, userId } = playback;
-  const { bookmarks, notice, addBookmark, deleteBookmark, saveBookmarkNote } = useBookmarks(
-    userId,
-    playerBook.id,
-    initialBookmarks,
-  );
+  const { loadBook } = playback;
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [chaptersOpen, setChaptersOpen] = useState(false);
-  const [visibleBookmarkCount, setVisibleBookmarkCount] = useState(BOOKMARK_WINDOW_SIZE);
+  const [sheetView, setSheetView] = useState<PlayerSheetView | null>(null);
   const mountedEndedAtRef = useRef(playback.lastEndedAt);
   const autoplayConsumedForRef = useRef<string | null>(null);
 
   useEffect(() => {
     const shouldAutoplay = autoplay && autoplayConsumedForRef.current !== playerBook.id;
     autoplayConsumedForRef.current = playerBook.id;
-    loadBook(playerBook, shouldAutoplay);
-  }, [autoplay, loadBook, playerBook]);
+    loadBook(playerBook, shouldAutoplay, historySnapshot);
+  }, [autoplay, historySnapshot, loadBook, playerBook]);
 
   const autoplayNext = playback.preferences.autoplayNextInCollection;
   useEffect(() => {
@@ -84,7 +74,9 @@ export function FullPlayer({
 
   function moveChapter(delta: number) {
     const target = playerBook.chapters[chapterIndex + delta];
-    if (target) playback.seek(target.startMs);
+    if (target) {
+      playback.moveToChapter(target, delta < 0 ? "previous" : "next");
+    }
   }
 
   const skipBackSeconds = Math.round(playback.preferences.skipBackMs / 1000);
@@ -92,21 +84,13 @@ export function FullPlayer({
 
   return (
     <div className="player-page">
-      <div className="player-topbar" inert={chaptersOpen ? true : undefined}>
+      <div className="player-topbar" inert={sheetView ? true : undefined}>
         <Link href={backHref} className="icon-text-button">
           <ArrowLeft size={19} aria-hidden="true" />
           <span>{backLabel}</span>
         </Link>
         <span>{playback.currentChapter?.title || "Full audiobook"}</span>
         <div className="player-topbar-actions">
-          <button
-            type="button"
-            className="icon-text-button"
-            onClick={() => addBookmark(playback.currentTimeMs)}
-          >
-            <BookmarkSimple size={19} />
-            <span>Bookmark</span>
-          </button>
           {details && !offlineMode && (
             <button type="button" className="icon-text-button" onClick={() => setDetailsOpen(true)}>
               <DotsThreeCircle size={19} aria-hidden="true" />
@@ -116,15 +100,11 @@ export function FullPlayer({
         </div>
       </div>
 
-      <div role="status" aria-live="polite" className="player-notice">
-        {notice}
-      </div>
-
       <div className="player-layout">
         <section
           className="player-main"
           aria-labelledby="book-title"
-          inert={chaptersOpen ? true : undefined}
+          inert={sheetView ? true : undefined}
         >
           <div className="player-hero">
             {playerBook.coverUrl ? (
@@ -220,16 +200,26 @@ export function FullPlayer({
               </select>
             </label>
             <SleepMenu />
-            <button
-              type="button"
-              className="chapters-button"
-              onClick={() => setChaptersOpen(true)}
-              aria-haspopup="dialog"
-              aria-expanded={chaptersOpen}
-            >
-              <ListBullets size={18} aria-hidden="true" />
-              <span>Chapters</span>
-            </button>
+            <div className="player-sheet-tabs" aria-label="Player details">
+              <button
+                type="button"
+                onClick={() => setSheetView("chapters")}
+                aria-label="Chapters"
+                aria-haspopup="dialog"
+                aria-expanded={sheetView === "chapters"}
+              >
+                <ListBullets size={19} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setSheetView("history")}
+                aria-label="History"
+                aria-haspopup="dialog"
+                aria-expanded={sheetView === "history"}
+              >
+                <ClockCounterClockwise size={19} aria-hidden="true" />
+              </button>
+            </div>
           </div>
           {nextInCollection && !offlineMode && (
             <p className="up-next">
@@ -241,41 +231,19 @@ export function FullPlayer({
         </section>
       </div>
 
-      <ChapterSheet
-        open={chaptersOpen}
-        onClose={() => setChaptersOpen(false)}
+      <PlayerSheet
+        open={sheetView !== null}
+        view={sheetView || "chapters"}
+        onViewChange={setSheetView}
+        onClose={() => setSheetView(null)}
         chapters={playerBook.chapters}
+        history={playback.history}
+        historyNotice={playback.historyNotice}
         activeChapterId={playback.currentChapter?.id ?? null}
         isPlaying={playback.isPlaying}
-        onSeek={playback.seek}
+        onChapterSelect={playback.seek}
+        onHistoryRestore={playback.restoreHistoryPosition}
         diagnostic={details?.chapterDiagnostic}
-        footer={
-          bookmarks.length > 0 && (
-            <div className="bookmark-list">
-              <h2>Bookmarks</h2>
-              <ul>
-                {bookmarks.slice(0, visibleBookmarkCount).map((bookmark) => (
-                  <BookmarkRow
-                    key={bookmark.id}
-                    bookmark={bookmark}
-                    onSeek={() => playback.seek(bookmark.positionMs)}
-                    onDelete={() => deleteBookmark(bookmark)}
-                    onSaveNote={(note) => saveBookmarkNote(bookmark, note)}
-                  />
-                ))}
-              </ul>
-              {bookmarks.length > visibleBookmarkCount && (
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => setVisibleBookmarkCount((count) => count + BOOKMARK_WINDOW_SIZE)}
-                >
-                  Show more bookmarks
-                </button>
-              )}
-            </div>
-          )
-        }
       />
 
       {details && (
@@ -341,68 +309,6 @@ function Scrubber({
         <span>-{formatClock(Math.max(0, durationMs - shownMs))}</span>
       </div>
     </div>
-  );
-}
-
-function BookmarkRow({
-  bookmark,
-  onSeek,
-  onDelete,
-  onSaveNote,
-}: {
-  bookmark: Bookmark;
-  onSeek: () => void;
-  onDelete: () => void;
-  onSaveNote: (note: string | null) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-
-  function submitNote(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const note = String(new FormData(event.currentTarget).get("note") || "").trim();
-    onSaveNote(note || null);
-    setEditing(false);
-  }
-
-  return (
-    <li>
-      <div className="bookmark-row">
-        <button type="button" onClick={onSeek}>
-          {formatClock(bookmark.positionMs)}
-          {bookmark.note && <small>{bookmark.note}</small>}
-          {isPendingBookmark(bookmark) && <small>Waiting to sync</small>}
-        </button>
-        <button
-          type="button"
-          onClick={() => setEditing((current) => !current)}
-          aria-label={`${bookmark.note ? "Edit" : "Add"} note for bookmark at ${formatClock(bookmark.positionMs)}`}
-          aria-expanded={editing}
-        >
-          <span aria-hidden="true">{bookmark.note ? "Edit note" : "Note"}</span>
-        </button>
-        <button
-          type="button"
-          onClick={onDelete}
-          aria-label={`Delete bookmark at ${formatClock(bookmark.positionMs)}`}
-        >
-          <Trash size={16} />
-        </button>
-      </div>
-      {editing && (
-        <form className="bookmark-note-form" onSubmit={submitNote}>
-          <input
-            name="note"
-            defaultValue={bookmark.note || ""}
-            maxLength={2000}
-            placeholder="What happens here?"
-            aria-label="Bookmark note"
-          />
-          <button type="submit" className="secondary-button">
-            Save
-          </button>
-        </form>
-      )}
-    </li>
   );
 }
 

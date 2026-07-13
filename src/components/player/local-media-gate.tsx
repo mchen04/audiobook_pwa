@@ -7,15 +7,11 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import { FullPlayer } from "@/components/player/full-player";
-import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
+import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
 import { type MediaFingerprintKind, fingerprintMedia } from "@/lib/media-fingerprint";
 import { parseLocalMp3 } from "@/lib/local-import";
-import {
-  getOfflineBook,
-  removeOfflineBook,
-  storeLocalBookMedia,
-  storeOfflineBookmarks,
-} from "@/lib/offline-library";
+import { getOfflineBook, removeOfflineBook, storeLocalBookMedia } from "@/lib/offline-library";
+import { clearPlaybackHistoryForBook } from "@/lib/playback-history";
 
 type GateState =
   | { phase: "checking" }
@@ -36,7 +32,7 @@ export function LocalMediaGate({
   mediaFingerprint,
   mediaFingerprintKind,
   byteSize,
-  initialBookmarks,
+  historySnapshot,
   autoplay,
   details,
   nextInCollection,
@@ -46,7 +42,7 @@ export function LocalMediaGate({
   mediaFingerprint: string | null;
   mediaFingerprintKind: MediaFingerprintKind | null;
   byteSize: number | null;
-  initialBookmarks: Bookmark[];
+  historySnapshot: PlaybackHistorySnapshot;
   autoplay: boolean;
   details: BookDetails | null;
   nextInCollection: NextInCollection | null;
@@ -65,12 +61,6 @@ export function LocalMediaGate({
       readyMediaUrl ? { ...playerBook, mediaUrl: readyMediaUrl, coverUrl: readyCoverUrl } : null,
     [playerBook, readyCoverUrl, readyMediaUrl],
   );
-
-  useEffect(() => {
-    if (state.phase === "ready") {
-      void storeOfflineBookmarks(userId, playerBook.id, initialBookmarks).catch(() => undefined);
-    }
-  }, [initialBookmarks, playerBook.id, state.phase, userId]);
 
   useEffect(() => {
     let active = true;
@@ -159,6 +149,7 @@ export function LocalMediaGate({
       return;
     }
     window.dispatchEvent(new Event("chapterline:unload-player"));
+    await clearPlaybackHistoryForBook(userId, playerBook.id).catch(() => undefined);
     await removeOfflineBook(userId, playerBook.id).catch(() => {
       setError("The book was deleted, but device cleanup will retry automatically.");
     });
@@ -170,7 +161,7 @@ export function LocalMediaGate({
     return (
       <FullPlayer
         playerBook={resolvedPlayerBook}
-        initialBookmarks={initialBookmarks}
+        historySnapshot={historySnapshot}
         autoplay={autoplay}
         details={details}
         nextInCollection={nextInCollection}
@@ -214,7 +205,7 @@ export function LocalMediaGate({
               The audio for this book is stored on your devices, not in the cloud — and this device
               does not currently have it. Attach the original MP3
               {byteSize ? ` (${formatBytes(byteSize)})` : ""} to listen here. Your reading position
-              and bookmarks are already synced.
+              and playback history are already synced.
             </p>
             <input
               ref={inputRef}
@@ -252,7 +243,7 @@ export function LocalMediaGate({
                     : "Delete this book"}
               </button>
               <p className="details-hint">
-                Removes the book, its progress, and bookmarks from your library everywhere.
+                Removes the book, its progress, and playback history from your library everywhere.
               </p>
             </div>
           </>

@@ -1,5 +1,5 @@
 // Seeds a realistic large library for performance measurement (goal §7):
-// 1,000 books with chapters plus ~100,000 progress/bookmark/session rows for
+// 1,000 books with chapters plus ~60,000 progress/action/session rows for
 // ONE existing user. Storage objects are not created; media routes are not the
 // target of these measurements.
 //
@@ -26,7 +26,7 @@ const sql = postgres(env.DATABASE_URL, { max: 4 });
 
 const BOOKS = 1000;
 const CHAPTERS_PER_BOOK = 20;
-const BOOKMARKS_PER_BOOK = 90;
+const ACTIONS_PER_BOOK = 50;
 const SESSIONS_PER_BOOK = 9;
 
 const [user] = await sql`SELECT id FROM "user" WHERE lower(email) = ${email.toLowerCase()}`;
@@ -64,7 +64,7 @@ const nouns = [
 const authors = Array.from({ length: 60 }, (_, index) => `Perf Author ${index + 1}`);
 
 console.time("seed");
-let bookmarkTotal = 0;
+let actionTotal = 0;
 let sessionTotal = 0;
 
 for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
@@ -72,7 +72,7 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
   const media = [];
   const chapters = [];
   const states = [];
-  const bookmarks = [];
+  const actions = [];
   const sessions = [];
 
   for (let index = batchStart; index < Math.min(batchStart + 100, BOOKS); index += 1) {
@@ -121,12 +121,17 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
       device_sequence: index + 1,
       event_occurred_at: new Date(Date.now() - index * 60_000),
     });
-    for (let b = 0; b < BOOKMARKS_PER_BOOK; b += 1) {
-      bookmarks.push({
+    for (let action = 0; action < ACTIONS_PER_BOOK; action += 1) {
+      actions.push({
+        id: randomUUID(),
         user_id: userId,
         book_id: bookId,
-        position_ms: Math.floor((durationMs / BOOKMARKS_PER_BOOK) * b),
-        note: b % 7 === 0 ? `Note ${b} for ${title}` : null,
+        action: action % 2 === 0 ? "play" : "pause",
+        position_ms: Math.floor((durationMs / ACTIONS_PER_BOOK) * action),
+        previous_position_ms: null,
+        playback_rate: "1.25",
+        description: null,
+        occurred_at: new Date(Date.now() - (index * ACTIONS_PER_BOOK + action) * 60_000),
       });
     }
     for (let s = 0; s < SESSIONS_PER_BOOK; s += 1) {
@@ -141,7 +146,7 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
         listened_ms: 1_800_000,
       });
     }
-    bookmarkTotal += BOOKMARKS_PER_BOOK;
+    actionTotal += ACTIONS_PER_BOOK;
     sessionTotal += SESSIONS_PER_BOOK;
   }
 
@@ -149,8 +154,8 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
   await sql`INSERT INTO media_assets ${sql(media)}`;
   await sql`INSERT INTO chapters ${sql(chapters)}`;
   await sql`INSERT INTO playback_states ${sql(states)}`;
-  for (let offset = 0; offset < bookmarks.length; offset += 3000) {
-    await sql`INSERT INTO bookmarks ${sql(bookmarks.slice(offset, offset + 3000))}`;
+  for (let offset = 0; offset < actions.length; offset += 3000) {
+    await sql`INSERT INTO playback_actions ${sql(actions.slice(offset, offset + 3000))}`;
   }
   await sql`INSERT INTO listening_sessions ${sql(sessions)}`;
   console.log(`seeded books ${batchStart + 1}..${batchStart + books.length}`);
@@ -158,6 +163,6 @@ for (let batchStart = 0; batchStart < BOOKS; batchStart += 100) {
 
 console.timeEnd("seed");
 console.log(
-  `Totals: ${BOOKS} books, ${BOOKS * CHAPTERS_PER_BOOK} chapters, ${BOOKS} playback states, ${bookmarkTotal} bookmarks, ${sessionTotal} sessions`,
+  `Totals: ${BOOKS} books, ${BOOKS * CHAPTERS_PER_BOOK} chapters, ${BOOKS} playback states, ${actionTotal} actions, ${sessionTotal} sessions`,
 );
 await sql.end();

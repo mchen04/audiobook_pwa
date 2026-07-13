@@ -123,9 +123,9 @@ export function SettingsClient({ email }: { email: string }) {
       <section className="settings-group" aria-labelledby="settings-data-title">
         <h2 id="settings-data-title">Your data</h2>
         <p className="details-hint">
-          Download a JSON copy of your books&apos; metadata, chapters, progress, bookmarks,
-          collections, and listening history. Your MP3 files are your own originals and are not
-          included.
+          Download a JSON copy of your books&apos; metadata, chapters, progress, playback history,
+          legacy saved positions, collections, and listening sessions. Your MP3 files are your own
+          originals and are not included.
         </p>
         <a className="secondary-button" href="/api/account/export" download>
           <DownloadSimple size={17} aria-hidden="true" />
@@ -136,8 +136,8 @@ export function SettingsClient({ email }: { email: string }) {
       <section className="settings-group danger-zone" aria-labelledby="settings-delete-title">
         <h2 id="settings-delete-title">Delete account</h2>
         <p className="details-hint">
-          Permanently deletes your account, books, audio files, progress, bookmarks, and downloads
-          on this device. This cannot be undone.
+          Permanently deletes your account, books, audio files, progress, playback history, and
+          downloads on this device. This cannot be undone.
         </p>
         <form onSubmit={deleteAccount} className="delete-account-form">
           <label>

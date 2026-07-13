@@ -7,7 +7,7 @@ where you left off on any device.
 
 **Your audio never leaves your devices.** The MP3 is parsed in the browser and
 stored in this device's own storage; the server only ever sees metadata —
-titles, chapters, progress, bookmarks. There is no upload, no object storage,
+titles, chapters, progress, and playback history. There is no upload, no object storage,
 and no practical file-size limit beyond the device's free space, so a single
 600-hour audiobook imports the same way a two-hour one does.
 
@@ -19,15 +19,15 @@ and no practical file-size limit beyond the device's free space, so a single
   registers the metadata, and stores the audio bytes on this device only.
 - **Play**: persistent player with chapters, scrubbing, configurable skip
   intervals, 0.5x–3x speed, sleep timer (presets, custom minutes, end of
-  chapter), one-tap bookmarks with notes, finished/restart state, and
+  chapter), a 50-action playback history, finished/restart state, and
   lock-screen Media Session controls where the browser supports them.
-- **Resume anywhere**: positions, bookmarks, and library organization sync
+- **Resume anywhere**: positions, playback history, and library organization sync
   through the server with per-device monotonic sequences and deterministic
   conflict rules. On a device that doesn't hold the audio yet, the player asks
   for the original MP3 and verifies it by size and content fingerprint before
   attaching it.
 - **Offline**: every imported book is already local, served by the service
-  worker with full seeking; offline progress/bookmarks replay idempotently on
+  worker with full seeking; offline progress/history replay idempotently on
   reconnect.
 - **Organize**: search, status and tag filters, sort orders, grid/list views,
   collections with optional next-book autoplay, archive, and delete.

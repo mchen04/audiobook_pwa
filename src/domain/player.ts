@@ -26,9 +26,9 @@ export type NextInCollection = {
   collectionName: string;
 };
 
-export type Bookmark = {
-  id: string;
-  positionMs: number;
-  note: string | null;
-  createdAt: string;
-};
+export { PLAYBACK_ACTIONS, PLAYBACK_HISTORY_LIMIT } from "./playback-history";
+export type {
+  PlaybackAction,
+  PlaybackHistoryEntry,
+  PlaybackHistorySnapshot,
+} from "./playback-history";

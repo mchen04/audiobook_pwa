@@ -14,10 +14,11 @@
   ~2 extra database round trips per auth request).
 - Session validation is authoritative against Postgres so password resets and
   explicit revocations take effect immediately on every API route.
-- Postgres: Vercel runs `pnpm db:migrate` before its production build. On other
-  hosts, run it before starting a new build. Migrations are ordered, idempotent,
-  and verified to apply from an empty database. The app never mutates schema at
-  runtime.
+- Postgres: Vercel runs `pnpm db:migrate` before its production build. Preview
+  builds use inert validation-only environment placeholders and never connect to
+  or migrate the production database. On other hosts, run migrations before
+  starting a new build. Migrations are ordered, idempotent, and verified to apply
+  from an empty database. The app never mutates schema at runtime.
 - Email: set both `RESEND_API_KEY` and `MAIL_FROM` to enable password resets in
   production; reset requests fail closed when delivery is not configured.
   Development captures expire after one hour in `.data/mail/`. Reset tokens
@@ -36,7 +37,7 @@
 - The v2 media store splits audiobooks into 4 MiB cache entries so iPhone
   playback never has to materialize a whole audiobook in one WebKit process.
   Downloads made by the older whole-file store require attaching the original
-  MP3 once after this upgrade; server metadata, position, and bookmarks remain.
+  MP3 once after this upgrade; server metadata, position, and playback history remain.
 
 ## Data lifecycle
 
@@ -46,8 +47,8 @@
   expires the session cookie, and clears the device's local data for that user
   (local books, queues, positions, preferences).
 - Export: `GET /api/account/export` returns all metadata, chapters, progress,
-  bookmarks, collections, tags, sessions, and preferences as JSON. Audio bytes
-  are the user's own files and are not duplicated.
+  playback history, legacy saved positions, collections, tags, sessions, and preferences as JSON.
+  Audio bytes are the user's own files and are not duplicated.
 
 ## Known platform limitations
 
@@ -62,8 +63,8 @@
   persistent storage when importing, clears stale download metadata when the
   matching media entry is gone, and surfaces an original-file reattach flow
   instead of pretending the book is playable.
-- Listening history is recorded only while online by design; it is a nicety,
-  not queued state.
+- Playback actions are written to IndexedDB first and replayed after reconnect;
+  both local and server stores retain only the newest 50 actions per audiobook.
 
 ## Troubleshooting
 

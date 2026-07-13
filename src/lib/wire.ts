@@ -1,5 +1,4 @@
 import type { LibraryBook } from "@/domain/library";
-import type { Bookmark } from "@/domain/player";
 
 /**
  * Runtime guards for API responses, so a server shape change fails loudly at
@@ -34,20 +33,6 @@ export function isLibraryPage(value: unknown): value is LibraryPage {
     typeof page.libraryTotal === "number" &&
     Array.isArray(page.tags) &&
     (page.continueBook === null || isLibraryBook(page.continueBook))
-  );
-}
-
-export type BookmarkPayload = { bookmark: Bookmark };
-
-export function isBookmarkPayload(value: unknown): value is BookmarkPayload {
-  const payload = value as BookmarkPayload | null;
-  if (!payload || typeof payload.bookmark !== "object" || payload.bookmark === null) return false;
-  const bookmark = payload.bookmark;
-  return (
-    typeof bookmark.id === "string" &&
-    typeof bookmark.positionMs === "number" &&
-    (bookmark.note === null || typeof bookmark.note === "string") &&
-    typeof bookmark.createdAt === "string"
   );
 }
 

@@ -329,8 +329,8 @@ export function BookDetailsDialog({
           <section aria-labelledby="details-delete-title" className="danger-zone">
             <h3 id="details-delete-title">Delete book</h3>
             <p className="details-hint">
-              Deleting removes the MP3, chapters, progress, bookmarks, and any offline download on
-              this device. This cannot be undone.
+              Deleting removes the MP3, chapters, progress, playback history, and any offline
+              download on this device. This cannot be undone.
             </p>
             <button
               type="button"

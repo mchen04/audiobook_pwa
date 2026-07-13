@@ -1,5 +1,5 @@
 import { interpretMp3Metadata, InvalidMp3Error, type ParsedMp3 } from "@/domain/mp3";
-import type { Bookmark, PlayerBook, PlayerChapter } from "@/domain/player";
+import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import { fingerprintMedia } from "@/lib/media-fingerprint";
 import { storeLocalBookMedia } from "@/lib/offline-library";
 
@@ -96,7 +96,6 @@ export async function importLocalMp3(
   });
   let bookId: string;
   let canonicalBook: Omit<PlayerBook, "mediaUrl" | "coverUrl"> | null = null;
-  let canonicalBookmarks: Bookmark[] = [];
   if (response.ok) {
     ({ bookId } = (await response.json()) as { bookId: string });
   } else {
@@ -104,7 +103,6 @@ export async function importLocalMp3(
       error?: string;
       existingBookId?: string;
       playerBook?: Omit<PlayerBook, "mediaUrl" | "coverUrl">;
-      bookmarks?: Bookmark[];
     } | null;
     // A fingerprint match means this exact file already has a book — most
     // often one whose audio is missing on this device. Reattach the bytes to
@@ -112,7 +110,6 @@ export async function importLocalMp3(
     if (response.status === 409 && payload?.existingBookId) {
       bookId = payload.existingBookId;
       canonicalBook = payload.playerBook || null;
-      canonicalBookmarks = payload.bookmarks || [];
     } else {
       throw new Error(payload?.error || "The MP3 could not be imported.");
     }
@@ -141,7 +138,6 @@ export async function importLocalMp3(
       },
       file,
       parsed.artwork ? { data: parsed.artwork.data, mimeType: parsed.artwork.mimeType } : null,
-      canonicalBookmarks,
     );
   } catch (error) {
     // Registration is already visible to other tabs and devices. Keep the
