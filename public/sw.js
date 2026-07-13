@@ -1,4 +1,4 @@
-const CACHE_VERSION = "chapterline-shell-v4";
+const CACHE_VERSION = "chapterline-shell-v5";
 const MEDIA_CACHE = "chapterline-media-v2";
 const LEGACY_MEDIA_CACHE = "chapterline-media-v1";
 const OFFLINE_URL = "/offline";

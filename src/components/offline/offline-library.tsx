@@ -58,7 +58,9 @@ export function OfflineLibrary() {
     return (
       <PlaybackProvider userId={selected.userId}>
         <main className="app-page offline-player-shell">
-          <header className="app-header">
+          {/* Collapses on phones like the online player's header, so the
+              one-screen player height math holds. */}
+          <header className="app-header app-header-collapsible">
             <BrandMark />
             <span className="offline-badge">
               <WifiSlash size={17} aria-hidden="true" />
@@ -108,9 +110,7 @@ export function OfflineLibrary() {
           <div className="offline-empty">
             <WifiSlash size={36} weight="duotone" aria-hidden="true" />
             <h2>Downloads are temporarily unavailable</h2>
-            <p>
-              Chapterline could not open this device&apos;s saved audio. Your records are intact.
-            </p>
+            <p>Hark could not open this device&apos;s saved audio. Your records are intact.</p>
             <button
               type="button"
               className="secondary-button"

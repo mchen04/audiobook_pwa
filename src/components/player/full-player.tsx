@@ -23,7 +23,7 @@ import { BookDetailsDialog, type BookDetails } from "@/components/book/book-deta
 import type { Bookmark, NextInCollection, PlayerBook } from "@/domain/player";
 import { formatClock } from "@/lib/format-time";
 
-import { CHAPTER_WINDOW_SIZE, chapterWindow, chapterWindowStart } from "./chapter-window";
+import { ChapterSheet } from "./chapter-sheet";
 import { usePlayback } from "./playback-provider";
 import { isPendingBookmark, useBookmarks } from "./use-bookmarks";
 
@@ -57,19 +57,10 @@ export function FullPlayer({
     initialBookmarks,
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [chaptersOpen, setChaptersOpen] = useState(false);
   const [visibleBookmarkCount, setVisibleBookmarkCount] = useState(BOOKMARK_WINDOW_SIZE);
-  const [manualChapterStart, setManualChapterStart] = useState<number | null>(null);
   const mountedEndedAtRef = useRef(playback.lastEndedAt);
   const autoplayConsumedForRef = useRef<string | null>(null);
-
-  const activeChapterIndex = useMemo(
-    () => playerBook.chapters.findIndex((chapter) => chapter.id === playback.currentChapter?.id),
-    [playback.currentChapter?.id, playerBook.chapters],
-  );
-  const chapterStart =
-    manualChapterStart ??
-    chapterWindowStart(Math.max(0, activeChapterIndex), playerBook.chapters.length);
-  const visibleChapters = chapterWindow(playerBook.chapters, chapterStart);
 
   useEffect(() => {
     const shouldAutoplay = autoplay && autoplayConsumedForRef.current !== playerBook.id;
@@ -101,7 +92,7 @@ export function FullPlayer({
 
   return (
     <div className="player-page">
-      <div className="player-topbar">
+      <div className="player-topbar" inert={chaptersOpen ? true : undefined}>
         <Link href={backHref} className="icon-text-button">
           <ArrowLeft size={19} aria-hidden="true" />
           <span>{backLabel}</span>
@@ -130,7 +121,11 @@ export function FullPlayer({
       </div>
 
       <div className="player-layout">
-        <section className="player-main" aria-labelledby="book-title">
+        <section
+          className="player-main"
+          aria-labelledby="book-title"
+          inert={chaptersOpen ? true : undefined}
+        >
           <div className="player-hero">
             {playerBook.coverUrl ? (
               <Image
@@ -212,7 +207,7 @@ export function FullPlayer({
 
           <div className="player-options">
             <label>
-              <span>Speed</span>
+              <span className="visually-hidden">Playback speed</span>
               <select
                 value={playback.playbackRate}
                 onChange={(event) => playback.setPlaybackRate(Number(event.target.value))}
@@ -225,6 +220,16 @@ export function FullPlayer({
               </select>
             </label>
             <SleepMenu />
+            <button
+              type="button"
+              className="chapters-button"
+              onClick={() => setChaptersOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={chaptersOpen}
+            >
+              <ListBullets size={18} aria-hidden="true" />
+              <span>Chapters</span>
+            </button>
           </div>
           {nextInCollection && !offlineMode && (
             <p className="up-next">
@@ -234,75 +239,18 @@ export function FullPlayer({
             </p>
           )}
         </section>
+      </div>
 
-        <aside className="chapter-panel" aria-labelledby="chapters-title">
-          <div className="chapter-panel-heading">
-            <div>
-              <ListBullets size={20} aria-hidden="true" />
-              <h2 id="chapters-title">Chapters</h2>
-            </div>
-            <span>{playerBook.chapters.length}</span>
-          </div>
-          {details?.chapterDiagnostic && (
-            <p className="chapter-diagnostic">{details.chapterDiagnostic}</p>
-          )}
-          {chapterStart > 0 && (
-            <button
-              type="button"
-              className="secondary-button chapter-window-button"
-              onClick={() => setManualChapterStart(Math.max(0, chapterStart - CHAPTER_WINDOW_SIZE))}
-            >
-              Earlier chapters
-            </button>
-          )}
-          <ol>
-            {visibleChapters.map((chapter) => {
-              const active = chapter.id === playback.currentChapter?.id;
-              return (
-                <li key={chapter.id}>
-                  <button
-                    type="button"
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => {
-                      setManualChapterStart(null);
-                      playback.seek(chapter.startMs);
-                    }}
-                  >
-                    <span>{chapter.position + 1}</span>
-                    <span>
-                      <strong>{chapter.title}</strong>
-                      <small>{formatClock(chapter.endMs - chapter.startMs)}</small>
-                    </span>
-                    {active && playback.isPlaying && (
-                      <span className="playing-bars" aria-label="Playing">
-                        <i />
-                        <i />
-                        <i />
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-          {chapterStart + visibleChapters.length < playerBook.chapters.length && (
-            <button
-              type="button"
-              className="secondary-button chapter-window-button"
-              onClick={() =>
-                setManualChapterStart(
-                  Math.min(
-                    playerBook.chapters.length - CHAPTER_WINDOW_SIZE,
-                    chapterStart + CHAPTER_WINDOW_SIZE,
-                  ),
-                )
-              }
-            >
-              Later chapters
-            </button>
-          )}
-
-          {bookmarks.length > 0 && (
+      <ChapterSheet
+        open={chaptersOpen}
+        onClose={() => setChaptersOpen(false)}
+        chapters={playerBook.chapters}
+        activeChapterId={playback.currentChapter?.id ?? null}
+        isPlaying={playback.isPlaying}
+        onSeek={playback.seek}
+        diagnostic={details?.chapterDiagnostic}
+        footer={
+          bookmarks.length > 0 && (
             <div className="bookmark-list">
               <h2>Bookmarks</h2>
               <ul>
@@ -326,9 +274,9 @@ export function FullPlayer({
                 </button>
               )}
             </div>
-          )}
-        </aside>
-      </div>
+          )
+        }
+      />
 
       {details && (
         <BookDetailsDialog
@@ -461,6 +409,18 @@ function BookmarkRow({
 function SleepMenu() {
   const playback = usePlayback();
   const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  // Tapping anywhere outside the open menu dismisses it.
+  useEffect(() => {
+    function onPointerDown(event: PointerEvent) {
+      const details = detailsRef.current;
+      if (details?.open && !details.contains(event.target as Node)) {
+        details.removeAttribute("open");
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
 
   function choose(action: () => void) {
     action();

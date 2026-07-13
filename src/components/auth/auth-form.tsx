@@ -87,7 +87,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       </button>
 
       <p className="auth-switch">
-        {registering ? "Already have an account?" : "New to Chapterline?"}{" "}
+        {registering ? "Already have an account?" : "New to Hark?"}{" "}
         <Link href={registering ? "/login" : "/register"}>
           {registering ? "Sign in" : "Create account"}
         </Link>

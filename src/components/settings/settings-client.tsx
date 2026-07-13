@@ -41,7 +41,7 @@ export function SettingsClient({ email }: { email: string }) {
     } catch {
       setDeleting(false);
       setDeleteError(
-        "Your account was deleted, but this browser could not clear every local audio file. Clear Chapterline's website data in browser settings.",
+        "Your account was deleted, but this browser could not clear every local audio file. Clear Hark's website data in browser settings.",
       );
       return;
     }

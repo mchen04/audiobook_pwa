@@ -63,7 +63,7 @@ export function setMediaSessionMetadata(book: PlayerBook): void {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: book.title,
     artist: book.author,
-    album: "Chapterline",
+    album: "Hark",
     artwork: book.coverUrl
       ? [{ src: book.coverUrl }]
       : [

@@ -17,7 +17,7 @@ export const GET = withQuery(async ({ session }) => {
     {
       headers: {
         "Content-Type": "application/json",
-        "Content-Disposition": `attachment; filename="chapterline-export-${new Date().toISOString().slice(0, 10)}.json"`,
+        "Content-Disposition": `attachment; filename="hark-export-${new Date().toISOString().slice(0, 10)}.json"`,
         "Cache-Control": "no-store",
       },
     },

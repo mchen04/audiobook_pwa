@@ -21,8 +21,8 @@ export async function sendPasswordReset(email: string, url: string): Promise<voi
       body: JSON.stringify({
         from: env.MAIL_FROM,
         to: [email],
-        subject: "Reset your Chapterline password",
-        text: `Reset your Chapterline password:\n\n${url}\n\nThis link expires in 30 minutes.`,
+        subject: "Reset your Hark password",
+        text: `Reset your Hark password:\n\n${url}\n\nThis link expires in 30 minutes.`,
       }),
     });
     if (!response.ok) throw new Error("Password reset email delivery failed.");
