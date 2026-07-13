@@ -24,9 +24,13 @@
 /test-results/
 /playwright-report/
 
-# editor and OS files
+# editor, agent, and OS files
 .DS_Store
 *.log
+.vscode/
+.idea/
+.claude/
+scratchpad/
 
 # TypeScript
 *.tsbuildinfo
