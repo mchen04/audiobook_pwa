@@ -13,6 +13,8 @@ vi.mock("music-metadata", () => ({
       duration: 8,
     },
     common: { title: "Mobile PWA Fixture", artist: "Ada Mobile" },
+    native: {},
+    quality: { warnings: [] },
   }),
 }));
 
