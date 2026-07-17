@@ -1,7 +1,12 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
-import { isValidChapterSequence } from "@/domain/mp3";
+import {
+  isValidChapterSequence,
+  reconcileChapterSequenceDuration,
+  shouldReplaceChapterSequence,
+  type ParsedChapter,
+} from "@/domain/mp3";
 import { withMutation } from "@/server/api/route-handler";
 import { expectRow, getBookForUser } from "@/server/books/queries";
 import { db } from "@/server/db/client";
@@ -58,6 +63,17 @@ export const POST = withMutation(
     }
 
     const registration = await db.transaction(async (transaction) => {
+      async function insertChapterRows(bookId: string, chapterRows: ParsedChapter[]) {
+        for (let start = 0; start < chapterRows.length; start += CHAPTER_INSERT_BATCH) {
+          await transaction.insert(chapters).values(
+            chapterRows.slice(start, start + CHAPTER_INSERT_BATCH).map((chapter) => ({
+              bookId,
+              ...chapter,
+            })),
+          );
+        }
+      }
+
       const created = expectRow(
         await transaction
           .insert(books)
@@ -90,7 +106,7 @@ export const POST = withMutation(
       if (!registeredMedia) {
         await transaction.delete(books).where(eq(books.id, created.id));
         const [duplicate] = await transaction
-          .select({ bookId: mediaAssets.bookId })
+          .select({ bookId: mediaAssets.bookId, durationMs: mediaAssets.durationMs })
           .from(mediaAssets)
           .where(
             and(
@@ -101,26 +117,68 @@ export const POST = withMutation(
           )
           .limit(1);
         if (!duplicate) throw new Error("Duplicate media registration could not be resolved.");
-        return { bookId: duplicate.bookId, created: false };
-      }
-      for (let start = 0; start < data.chapters.length; start += CHAPTER_INSERT_BATCH) {
-        await transaction.insert(chapters).values(
-          data.chapters.slice(start, start + CHAPTER_INSERT_BATCH).map((chapter) => ({
-            bookId: created.id,
-            ...chapter,
-          })),
+
+        await transaction
+          .select({ id: books.id })
+          .from(books)
+          .where(eq(books.id, duplicate.bookId))
+          .for("update")
+          .limit(1);
+        const existingChapters = await transaction
+          .select({
+            position: chapters.position,
+            title: chapters.title,
+            startMs: chapters.startMs,
+            endMs: chapters.endMs,
+          })
+          .from(chapters)
+          .where(eq(chapters.bookId, duplicate.bookId))
+          .orderBy(chapters.position);
+        const repairCandidate = reconcileChapterSequenceDuration(
+          data.chapters,
+          data.durationMs,
+          duplicate.durationMs,
         );
+        const currentComplete = isValidChapterSequence(existingChapters, duplicate.durationMs);
+        if (!currentComplete && !repairCandidate) {
+          return {
+            bookId: duplicate.bookId,
+            created: false,
+            repaired: false,
+            repairBlocked: true,
+          };
+        }
+        const repaired = repairCandidate
+          ? shouldReplaceChapterSequence(existingChapters, repairCandidate, duplicate.durationMs)
+          : false;
+        if (repairCandidate && repaired) {
+          await transaction.delete(chapters).where(eq(chapters.bookId, duplicate.bookId));
+          await insertChapterRows(duplicate.bookId, repairCandidate);
+          await transaction
+            .update(books)
+            .set({ chapterDiagnostic: data.chapterDiagnostic, updatedAt: new Date() })
+            .where(eq(books.id, duplicate.bookId));
+        }
+        return { bookId: duplicate.bookId, created: false, repaired, repairBlocked: false };
       }
-      return { bookId: created.id, created: true };
+      await insertChapterRows(created.id, data.chapters);
+      return { bookId: created.id, created: true, repaired: false, repairBlocked: false };
     });
 
     if (!registration.created) {
+      if (registration.repairBlocked) {
+        return Response.json(
+          { error: "Chapter repair could not safely reconcile the audiobook duration." },
+          { status: 409 },
+        );
+      }
       const book = await getBookForUser(session.user.id, registration.bookId);
       if (!book?.durationMs) throw new Error("Existing book could not be loaded.");
       return Response.json(
         {
           error: "This MP3 is already in your library.",
           existingBookId: registration.bookId,
+          chaptersRepaired: registration.repaired,
           playerBook: {
             id: book.id,
             title: book.title,

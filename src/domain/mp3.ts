@@ -1,4 +1,4 @@
-import type { IAudioMetadata } from "music-metadata";
+import type { IAudioMetadata, IChapter } from "music-metadata";
 
 export type ParsedChapter = {
   position: number;
@@ -24,6 +24,13 @@ export type ParsedMp3 = {
 };
 
 const MAX_ARTWORK_BYTES = 5 * 1024 * 1024;
+const CHAPTER_BOUNDARY_TOLERANCE_MS = 1_500;
+
+type NativeChapterFrame = {
+  label: string;
+  info: { startTime: number; endTime: number };
+  frames: Map<string, unknown>;
+};
 
 export class InvalidMp3Error extends Error {
   constructor(message = "The selected file is not a valid MP3.") {
@@ -71,8 +78,16 @@ export function interpretMp3Metadata(
   const composer = metadata.common.composer;
   const narrator =
     cleanText(Array.isArray(composer) ? composer[0] || "" : composer || "", 240) || null;
-  const rawChapters = metadata.format.chapters || [];
-  const chapters = normalizeChapters(rawChapters, durationMs);
+  const formatChapters = metadata.format.chapters || [];
+  const nativeChapters = extractNativeId3Chapters(metadata);
+  const normalizedFormatChapters = normalizeChapters(formatChapters, durationMs);
+  const normalizedNativeChapters = normalizeChapters(nativeChapters, durationMs);
+  const chapters =
+    normalizedNativeChapters &&
+    normalizedNativeChapters.length > (normalizedFormatChapters?.length || 0)
+      ? normalizedNativeChapters
+      : normalizedFormatChapters;
+  const hasEmbeddedChapters = formatChapters.length > 0 || nativeChapters.length > 0;
   const artwork = extractArtwork(metadata.common.picture);
 
   if (!chapters) {
@@ -82,10 +97,9 @@ export function interpretMp3Metadata(
       narrator,
       durationMs,
       chapters: [{ position: 0, title: "Full audiobook", startMs: 0, endMs: durationMs }],
-      chapterDiagnostic:
-        rawChapters.length === 0
-          ? "No embedded chapters were found. The MP3 is available as one chapter."
-          : "Embedded chapter data was malformed. The MP3 is available as one chapter.",
+      chapterDiagnostic: !hasEmbeddedChapters
+        ? "No embedded chapters were found. The MP3 is available as one chapter."
+        : "Embedded chapter data was malformed. The MP3 is available as one chapter.",
       artwork,
     };
   }
@@ -144,7 +158,7 @@ function normalizeChapters(
       !Number.isFinite(chapter.endMs) ||
       chapter.startMs < 0 ||
       chapter.endMs <= chapter.startMs ||
-      chapter.endMs > durationMs + 1500 ||
+      chapter.endMs > durationMs + CHAPTER_BOUNDARY_TOLERANCE_MS ||
       (previous && chapter.startMs < previous.endMs)
     ) {
       return null;
@@ -153,7 +167,57 @@ function normalizeChapters(
     chapter.endMs = Math.min(chapter.endMs, durationMs);
   }
 
+  if (!chapterSequenceCoversDuration(normalized, durationMs)) return null;
+
   return normalized;
+}
+
+function extractNativeId3Chapters(metadata: IAudioMetadata): IChapter[] {
+  let largest: IChapter[] = [];
+
+  for (const [tagType, tags] of Object.entries(metadata.native)) {
+    if (!tagType.startsWith("ID3v2.")) continue;
+    const nativeChapters = tags.flatMap((tag) => {
+      if (tag.id !== "CHAP" || !isNativeChapterFrame(tag.value)) return [];
+      const title = tag.value.frames.get("TIT2");
+      return [
+        {
+          id: tag.value.label,
+          title: typeof title === "string" ? title : "",
+          start: tag.value.info.startTime / 1_000,
+          end: tag.value.info.endTime / 1_000,
+        },
+      ];
+    });
+    if (nativeChapters.length > largest.length) largest = nativeChapters;
+  }
+
+  return largest.sort((left, right) => left.start - right.start);
+}
+
+function isNativeChapterFrame(value: unknown): value is NativeChapterFrame {
+  if (!value || typeof value !== "object") return false;
+  const frame = value as Partial<NativeChapterFrame>;
+  return (
+    typeof frame.label === "string" &&
+    typeof frame.info?.startTime === "number" &&
+    typeof frame.info.endTime === "number" &&
+    frame.frames instanceof Map
+  );
+}
+
+function chapterSequenceCoversDuration(
+  chapterList: Array<Pick<ParsedChapter, "startMs" | "endMs">>,
+  durationMs: number,
+): boolean {
+  const first = chapterList[0];
+  const last = chapterList[chapterList.length - 1];
+  return Boolean(
+    first &&
+    last &&
+    first.startMs <= CHAPTER_BOUNDARY_TOLERANCE_MS &&
+    last.endMs >= durationMs - CHAPTER_BOUNDARY_TOLERANCE_MS,
+  );
 }
 
 /**
@@ -179,7 +243,35 @@ export function isValidChapterSequence(chapterList: ParsedChapter[], durationMs:
       return false;
     }
   }
-  return true;
+  return chapterSequenceCoversDuration(chapterList, durationMs);
+}
+
+export function shouldReplaceChapterSequence(
+  current: ParsedChapter[],
+  candidate: ParsedChapter[],
+  durationMs: number,
+): boolean {
+  return (
+    !isValidChapterSequence(current, durationMs) && isValidChapterSequence(candidate, durationMs)
+  );
+}
+
+export function reconcileChapterSequenceDuration(
+  candidate: ParsedChapter[],
+  candidateDurationMs: number,
+  canonicalDurationMs: number,
+): ParsedChapter[] | null {
+  if (
+    Math.abs(candidateDurationMs - canonicalDurationMs) > CHAPTER_BOUNDARY_TOLERANCE_MS ||
+    candidate.length === 0
+  ) {
+    return null;
+  }
+
+  const reconciled = candidate.map((chapter, index) =>
+    index === candidate.length - 1 ? { ...chapter, endMs: canonicalDurationMs } : chapter,
+  );
+  return isValidChapterSequence(reconciled, canonicalDurationMs) ? reconciled : null;
 }
 
 function cleanText(value: string, maxLength: number): string {
