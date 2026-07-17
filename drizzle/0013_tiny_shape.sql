@@ -1,0 +1,1 @@
+CREATE INDEX "listening_sessions_user_book_started_idx" ON "listening_sessions" USING btree ("user_id","book_id","started_at");

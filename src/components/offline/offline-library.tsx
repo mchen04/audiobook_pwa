@@ -8,18 +8,18 @@ import {
   Trash,
   WifiSlash,
 } from "@phosphor-icons/react";
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
+import { formatBytes } from "@/lib/format-bytes";
+import { ACTIVE_USER_KEY } from "@/lib/app-keys";
 import { FullPlayer } from "@/components/player/full-player";
 import { PlaybackProvider } from "@/components/player/playback-provider";
-import {
-  asOfflinePlayerBook,
-  listOfflineBooks,
-  type OfflineBook,
-  removeOfflineBook,
-} from "@/lib/offline-library";
+import { removeOfflineBook } from "@/lib/offline/deletion-journal";
+import { asOfflinePlayerBook, listOfflineBooks } from "@/lib/offline/library";
+import type { OfflineBook } from "@/lib/offline/db";
 
 type LibraryState =
   | { kind: "loading" }
@@ -31,6 +31,7 @@ export function OfflineLibrary() {
   const [state, setState] = useState<LibraryState>({ kind: "loading" });
   const [selected, setSelected] = useState<OfflineBook | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -40,7 +41,7 @@ export function OfflineLibrary() {
     };
 
     async function initialize() {
-      const userId = localStorage.getItem("chapterline:active-user");
+      const userId = localStorage.getItem(ACTIVE_USER_KEY);
       if (!userId) {
         if (active) setState({ kind: "signed-out" });
         return;
@@ -133,6 +134,11 @@ export function OfflineLibrary() {
             </Link>
           </div>
         )}
+        {removeError && (
+          <p role="alert" className="form-error">
+            {removeError}
+          </p>
+        )}
         {state.kind === "ready" && state.books.length > 0 && (
           <div className="offline-book-list">
             {state.books.map((record) => (
@@ -144,7 +150,17 @@ export function OfflineLibrary() {
                   aria-label={`Open ${record.book.title}`}
                 >
                   <span className="offline-cover">
-                    {record.book.title.slice(0, 2).toUpperCase()}
+                    {record.offlineCoverThumbUrl || record.offlineCoverUrl ? (
+                      <Image
+                        src={(record.offlineCoverThumbUrl || record.offlineCoverUrl)!}
+                        alt=""
+                        width={96}
+                        height={116}
+                        unoptimized
+                      />
+                    ) : (
+                      record.book.title.slice(0, 2).toUpperCase()
+                    )}
                   </span>
                   <span>
                     <strong>{record.book.title}</strong>
@@ -170,16 +186,19 @@ export function OfflineLibrary() {
   );
 
   async function removeDownload(record: OfflineBook) {
-    await removeOfflineBook(record.userId, record.book.id);
+    setRemoveError(null);
+    try {
+      await removeOfflineBook(record.userId, record.book.id);
+    } catch {
+      // The deletion is journaled before any bytes move, so it retries
+      // automatically on the next load.
+      setRemoveError("The download could not be removed right now. It will retry automatically.");
+      return;
+    }
     setState((current) =>
       current.kind === "ready"
         ? { ...current, books: current.books.filter((book) => book.key !== record.key) }
         : current,
     );
   }
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }

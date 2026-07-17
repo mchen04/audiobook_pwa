@@ -77,8 +77,19 @@ export function setMediaSessionPlaybackState(state: "playing" | "paused"): void 
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = state;
 }
 
-export function syncMediaSessionPosition(audio: HTMLAudioElement, durationMs: number): void {
+// OS media UIs sample position coarsely; syncing once per whole second (or
+// on rate/book change) avoids thousands of redundant calls per listening
+// hour. The dedup key lives in a provider-owned ref so it cannot leak across
+// provider remounts.
+export function syncMediaSessionPosition(
+  audio: HTMLAudioElement,
+  durationMs: number,
+  lastSyncKeyRef: { current: string },
+): void {
   if (!("mediaSession" in navigator)) return;
+  const syncKey = `${durationMs}:${Math.floor(audio.currentTime)}:${audio.playbackRate}`;
+  if (syncKey === lastSyncKeyRef.current) return;
+  lastSyncKeyRef.current = syncKey;
   try {
     const duration = audio.duration || durationMs / 1000;
     navigator.mediaSession.setPositionState({

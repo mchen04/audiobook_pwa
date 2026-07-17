@@ -1,4 +1,4 @@
-import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -91,8 +91,15 @@ export const DELETE = withRawMutationParams(paramsSchema, async ({ session, para
   if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
 
   // Audio bytes live only on the user's devices; the client removes its local
-  // copy alongside this row delete.
-  await db.delete(books).where(eq(books.id, params.bookId));
+  // copy alongside this row delete. Tags unique to this book are collected in
+  // the same transaction so no orphaned filter chips linger.
+  await db.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`tags:${session.user.id}`}, 0))`,
+    );
+    await transaction.delete(books).where(eq(books.id, params.bookId));
+    await deleteUnusedTags(transaction, session.user.id);
+  });
 
   return Response.json({ deleted: true });
 });
@@ -112,15 +119,7 @@ async function replaceBookTags(
   );
 
   await transaction.delete(bookTags).where(eq(bookTags.bookId, bookId));
-  await deleteUnusedTags(transaction, userId);
   if (unique.length) {
-    const existing = await transaction
-      .select({ name: tags.name })
-      .from(tags)
-      .where(eq(tags.userId, userId));
-    const existingNames = new Set(existing.map((tag) => tag.name.toLowerCase()));
-    const newTagCount = unique.filter((name) => !existingNames.has(name.toLowerCase())).length;
-    if (existing.length + newTagCount > MAX_ACCOUNT_TAGS) throw new TagLimitError();
     const rows = await transaction
       .insert(tags)
       .values(unique.map((name) => ({ userId, name })))
@@ -140,8 +139,15 @@ async function replaceBookTags(
       .onConflictDoNothing();
   }
 
-  // Tags with no remaining books are garbage-collected so filters stay honest.
+  // A single GC pass after the re-insert keeps ids stable for tags this book
+  // still uses and collects the ones nothing references; checking the limit
+  // against the final state stays exact because the transaction rolls back.
   await deleteUnusedTags(transaction, userId);
+  const [tagCount] = await transaction
+    .select({ value: count() })
+    .from(tags)
+    .where(eq(tags.userId, userId));
+  if ((tagCount?.value || 0) > MAX_ACCOUNT_TAGS) throw new TagLimitError();
 }
 
 async function deleteUnusedTags(transaction: Transaction, userId: string): Promise<void> {

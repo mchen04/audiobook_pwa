@@ -77,12 +77,21 @@ self.addEventListener("fetch", (event) => {
 // multi-gigabyte audiobook into one Blob in the memory-constrained iOS process.
 async function serveOfflineMedia(request, pathname) {
   const cache = await caches.open(MEDIA_CACHE);
-  const manifestResponse = await cache.match(pathname);
-  if (!manifestResponse) return new Response("Download unavailable", { status: 404 });
-  if (manifestResponse.headers.get("X-Chapterline-Media-Format") !== "chunked-v1") {
+  const cached = await cache.match(pathname);
+  if (!cached) return new Response("Download unavailable", { status: 404 });
+  const format = cached.headers.get("X-Chapterline-Media-Format");
+  // Entries without a format header are stored whole (cover art) and are
+  // served as-is; only chunked manifests need range assembly below.
+  if (!format) return cached;
+  if (format !== "chunked-v1") {
     return new Response("Unsupported saved media format", { status: 410 });
   }
-  const manifest = await manifestResponse.json();
+  const manifest = await cached.json();
+  // The body's format field and the header are written together at import;
+  // asserting both keeps the two representations from silently diverging.
+  if (manifest.format !== "chapterline-chunked-media-v1") {
+    return new Response("Unsupported saved media format", { status: 410 });
+  }
   const rangeHeader = request.headers.get("range");
   if (!rangeHeader) return streamWholeMedia(cache, pathname, manifest);
 

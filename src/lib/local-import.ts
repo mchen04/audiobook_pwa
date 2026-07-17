@@ -1,7 +1,7 @@
 import { interpretMp3Metadata, InvalidMp3Error, type ParsedMp3 } from "@/domain/mp3";
 import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import { fingerprintMedia } from "@/lib/media-fingerprint";
-import { storeLocalBookMedia } from "@/lib/offline-library";
+import { storeLocalBookMedia } from "@/lib/offline/media-store";
 
 /** Parses an MP3 entirely in the browser; the bytes never leave the device. */
 export async function parseLocalMp3(file: File): Promise<ParsedMp3> {

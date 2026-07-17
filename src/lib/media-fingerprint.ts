@@ -1,8 +1,7 @@
-import { createSHA256 } from "hash-wasm";
+import type { FingerprintWorkerResponse } from "./media-hash";
 
 export type MediaFingerprintKind = "sample-v1" | "sha256-v1";
 
-const HASH_CHUNK_BYTES = 4 * 1024 * 1024;
 const SAMPLE_BYTES = 1024 * 1024;
 
 export async function fingerprintMedia(
@@ -10,21 +9,31 @@ export async function fingerprintMedia(
   kind: MediaFingerprintKind,
   onProgress?: (fraction: number) => void,
 ): Promise<string> {
-  return kind === "sample-v1" ? sampleFingerprint(file) : fullSha256(file, onProgress);
+  if (kind === "sample-v1") return sampleFingerprint(file);
+  // Hashing a whole audiobook is heavy CPU; run it off the main thread so
+  // import and playback stay responsive. Worker-less environments (tests)
+  // hash inline via the same shared routine.
+  if (typeof Worker !== "undefined") return workerSha256(file, onProgress);
+  const { fullSha256 } = await import("./media-hash");
+  return fullSha256(file, onProgress);
 }
 
-async function fullSha256(file: File, onProgress?: (fraction: number) => void) {
-  const hasher = await createSHA256();
-  hasher.init();
-  for (let offset = 0; offset < file.size; offset += HASH_CHUNK_BYTES) {
-    const chunk = new Uint8Array(
-      await file.slice(offset, Math.min(file.size, offset + HASH_CHUNK_BYTES)).arrayBuffer(),
-    );
-    hasher.update(chunk);
-    onProgress?.(Math.min(1, (offset + chunk.byteLength) / file.size));
-  }
-  onProgress?.(1);
-  return hasher.digest();
+function workerSha256(file: File, onProgress?: (fraction: number) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./media-fingerprint.worker.ts", import.meta.url));
+    const settle = (complete: () => void) => {
+      worker.terminate();
+      complete();
+    };
+    worker.onmessage = (event: MessageEvent<FingerprintWorkerResponse>) => {
+      const response = event.data;
+      if (response.type === "progress") onProgress?.(response.fraction);
+      else if (response.type === "done") settle(() => resolve(response.digest));
+      else settle(() => reject(new Error(response.message)));
+    };
+    worker.onerror = () => settle(() => reject(new Error("The file could not be fingerprinted.")));
+    worker.postMessage(file);
+  });
 }
 
 async function sampleFingerprint(file: File) {

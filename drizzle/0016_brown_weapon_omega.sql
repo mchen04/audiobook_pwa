@@ -1,0 +1,1 @@
+DROP INDEX "chapters_book_start_idx";

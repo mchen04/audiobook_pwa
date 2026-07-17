@@ -2,7 +2,7 @@ import "server-only";
 
 import type { LibraryBook } from "@/domain/library";
 import type { PlaybackHistoryEntry } from "@/domain/player";
-import type { listBooksForUser } from "@/server/books/queries";
+import type { listBooksPage } from "@/server/books/queries";
 import type { playbackActions } from "@/server/db/schema";
 
 /**
@@ -34,7 +34,7 @@ export function toPlaybackHistoryDto(
   };
 }
 
-type LibraryRow = Awaited<ReturnType<typeof listBooksForUser>>["books"][number];
+type LibraryRow = Awaited<ReturnType<typeof listBooksPage>>["books"][number];
 
 export function toLibraryBookDto(row: LibraryRow): LibraryBook {
   return {

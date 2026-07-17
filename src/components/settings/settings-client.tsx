@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
 import { usePlayback } from "@/components/player/playback-provider";
-import { clearLocalDataForUser } from "@/lib/offline-library";
+import { clearLocalDataForUser } from "@/lib/offline/library";
 import { SKIP_CHOICES_MS } from "@/lib/preferences";
 
 export function SettingsClient({ email }: { email: string }) {

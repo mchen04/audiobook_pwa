@@ -120,8 +120,9 @@ Neon Postgres
 - `src/components/player/`: the provider wires one audio element to focused
   hooks — progress persistence, sleep timer, Media Session, tab arbitration,
   playback history — with rendering kept in `full-player.tsx`/`mini-player.tsx`.
-- `src/lib/offline-library.ts` + `local-import.ts`: the device-local media
-  store and the in-browser import pipeline; `offline-sync.ts`: mutation queues.
+- `src/lib/offline/` (`db`, `media-store`, `deletion-journal`, `library`) +
+  `local-import.ts`: the device-local media store and the in-browser import
+  pipeline; `offline-sync.ts`: mutation queues.
 - `src/lib/wire.ts`: runtime guards at every client fetch boundary.
 - `src/app/styles/`: the stylesheet split by surface, imported in cascade
   order from `globals.css`.

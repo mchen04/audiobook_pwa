@@ -3,29 +3,27 @@ import type { Metadata } from "next";
 import { LibraryClient } from "@/components/library/library-client";
 import { requireSession } from "@/server/auth-session";
 import { toLibraryBookDto } from "@/server/books/dto";
-import { listBooksForUser } from "@/server/books/queries";
+import { getLibraryOverview, listBooksPage } from "@/server/books/queries";
 
 export const metadata: Metadata = { title: "Library" };
 
 export default async function LibraryPage() {
   const session = await requireSession();
-  const page = await listBooksForUser(session.user.id, { includeMeta: true });
-  if (
-    page.total === undefined ||
-    page.libraryTotal === undefined ||
-    page.tags === undefined ||
-    page.continueBook === undefined
-  ) {
-    throw new Error("Library metadata was not loaded.");
-  }
+  const [page, overview] = await Promise.all([
+    listBooksPage(session.user.id),
+    getLibraryOverview(session.user.id),
+  ]);
 
   return (
     <LibraryClient
       userId={session.user.id}
       initialPage={{
         ...page,
+        ...overview,
+        // The uncursored first page always carries a computed total.
+        total: page.total ?? 0,
         books: page.books.map(toLibraryBookDto),
-        continueBook: page.continueBook ? toLibraryBookDto(page.continueBook) : null,
+        continueBook: overview.continueBook ? toLibraryBookDto(overview.continueBook) : null,
       }}
     />
   );

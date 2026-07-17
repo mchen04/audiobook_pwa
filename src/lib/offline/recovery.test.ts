@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { OfflineBook } from "./offline-library";
+import type { OfflineBook } from "./db";
 
 const store = vi.hoisted(() => new Map<string, OfflineBook>());
 const cacheEntries = vi.hoisted(
@@ -47,12 +47,9 @@ vi.mock("idb", () => ({
   openDB: vi.fn().mockResolvedValue(fakeDb),
 }));
 
-import {
-  getOfflineBook,
-  listOfflineBooks,
-  retryAllPendingOfflineDeletions,
-  storeLocalBookMedia,
-} from "./offline-library";
+import { retryAllPendingOfflineDeletions } from "./deletion-journal";
+import { getOfflineBook, listOfflineBooks } from "./library";
+import { storeLocalBookMedia } from "./media-store";
 
 describe("offline media recovery", () => {
   beforeEach(() => {

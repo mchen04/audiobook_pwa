@@ -2,20 +2,21 @@
 
 import { ArrowClockwise, Trash, UploadSimple } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
+import { useDeleteBook } from "@/components/book/use-delete-book";
 import { FullPlayer } from "@/components/player/full-player";
 import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
+import { formatBytes } from "@/lib/format-bytes";
 import { type MediaFingerprintKind, fingerprintMedia } from "@/lib/media-fingerprint";
 import { parseLocalMp3 } from "@/lib/local-import";
-import { getOfflineBook, removeOfflineBook, storeLocalBookMedia } from "@/lib/offline-library";
-import { clearPlaybackHistoryForBook } from "@/lib/playback-history";
+import { getOfflineBook } from "@/lib/offline/library";
+import { storeLocalBookMedia } from "@/lib/offline/media-store";
 
 type GateState =
   | { phase: "checking" }
-  | { phase: "ready"; mediaUrl: string; coverUrl: string | null }
+  | { phase: "ready"; mediaUrl: string; coverUrl: string | null; coverThumbUrl: string | null }
   | { phase: "missing" }
   | { phase: "unavailable" }
   | { phase: "attaching" };
@@ -47,19 +48,27 @@ export function LocalMediaGate({
   details: BookDetails | null;
   nextInCollection: NextInCollection | null;
 }) {
-  const router = useRouter();
   const [state, setState] = useState<GateState>({ phase: "checking" });
   const [error, setError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [checkAttempt, setCheckAttempt] = useState(0);
+  // The book must stay deletable even when this device lacks the audio,
+  // otherwise a book imported elsewhere could never be removed from here.
+  const { deleteBook, deleting, deleteLabel } = useDeleteBook(userId, playerBook.id, setError);
   const inputRef = useRef<HTMLInputElement>(null);
   const readyMediaUrl = state.phase === "ready" ? state.mediaUrl : null;
   const readyCoverUrl = state.phase === "ready" ? state.coverUrl : null;
+  const readyCoverThumbUrl = state.phase === "ready" ? state.coverThumbUrl : null;
   const resolvedPlayerBook = useMemo(
     () =>
-      readyMediaUrl ? { ...playerBook, mediaUrl: readyMediaUrl, coverUrl: readyCoverUrl } : null,
-    [playerBook, readyCoverUrl, readyMediaUrl],
+      readyMediaUrl
+        ? {
+            ...playerBook,
+            mediaUrl: readyMediaUrl,
+            coverUrl: readyCoverUrl,
+            coverThumbUrl: readyCoverThumbUrl,
+          }
+        : null,
+    [playerBook, readyCoverThumbUrl, readyCoverUrl, readyMediaUrl],
   );
 
   useEffect(() => {
@@ -72,6 +81,7 @@ export function LocalMediaGate({
             phase: "ready",
             mediaUrl: record.offlineMediaUrl,
             coverUrl: record.offlineCoverUrl,
+            coverThumbUrl: record.offlineCoverThumbUrl || record.offlineCoverUrl,
           });
         } else {
           setState({ phase: "missing" });
@@ -123,38 +133,12 @@ export function LocalMediaGate({
         phase: "ready",
         mediaUrl: record.offlineMediaUrl,
         coverUrl: record.offlineCoverUrl,
+        coverThumbUrl: record.offlineCoverThumbUrl || record.offlineCoverUrl,
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The file could not be attached.");
       setState({ phase: "missing" });
     }
-  }
-
-  // The book must stay deletable even when this device lacks the audio,
-  // otherwise a book imported elsewhere could never be removed from here.
-  async function deleteBook() {
-    if (!confirmingDelete) {
-      setConfirmingDelete(true);
-      return;
-    }
-    setDeleting(true);
-    setError(null);
-    const response = await fetch(`/api/books/${playerBook.id}`, { method: "DELETE" }).catch(
-      () => null,
-    );
-    if (!response?.ok) {
-      setDeleting(false);
-      setConfirmingDelete(false);
-      setError("The book could not be deleted. Check your connection and try again.");
-      return;
-    }
-    window.dispatchEvent(new Event("chapterline:unload-player"));
-    await clearPlaybackHistoryForBook(userId, playerBook.id).catch(() => undefined);
-    await removeOfflineBook(userId, playerBook.id).catch(() => {
-      setError("The book was deleted, but device cleanup will retry automatically.");
-    });
-    router.push("/library");
-    router.refresh();
   }
 
   if (resolvedPlayerBook) {
@@ -232,15 +216,11 @@ export function LocalMediaGate({
               <button
                 type="button"
                 className="danger-button"
-                onClick={deleteBook}
+                onClick={() => void deleteBook()}
                 disabled={deleting}
               >
                 <Trash size={17} aria-hidden="true" />
-                {deleting
-                  ? "Deleting"
-                  : confirmingDelete
-                    ? "Tap again to permanently delete"
-                    : "Delete this book"}
+                {deleteLabel}
               </button>
               <p className="details-hint">
                 Removes the book, its progress, and playback history from your library everywhere.
@@ -251,9 +231,4 @@ export function LocalMediaGate({
       </section>
     </main>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  return `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
 }

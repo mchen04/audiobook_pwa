@@ -6,15 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlayerBook } from "@/domain/player";
 
-const { playback } = vi.hoisted(() => ({
-  playback: {
-    userId: "user-1",
-    book: null,
+const { playback, timeState } = vi.hoisted(() => ({
+  timeState: {
     currentTimeMs: 5_000,
-    isPlaying: false,
-    playbackRate: 1,
-    history: [],
-    historyNotice: null,
     currentChapter: null as {
       id: string;
       position: number;
@@ -22,6 +16,14 @@ const { playback } = vi.hoisted(() => ({
       startMs: number;
       endMs: number;
     } | null,
+  },
+  playback: {
+    userId: "user-1",
+    book: null,
+    isPlaying: false,
+    playbackRate: 1,
+    history: [],
+    historyNotice: null,
     sleepMode: null,
     preferences: {
       skipBackMs: 15_000,
@@ -48,7 +50,12 @@ const { playback } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("./playback-provider", () => ({ usePlayback: () => playback }));
+vi.mock("./playback-provider", () => ({
+  usePlayback: () => playback,
+  usePlaybackTime: () => timeState.currentTimeMs,
+  usePlaybackDerived: <T,>(derive: () => T) => derive(),
+  useCurrentChapter: () => timeState.currentChapter,
+}));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 import { FullPlayer } from "./full-player";
@@ -76,7 +83,7 @@ describe("full player history wiring", () => {
     for (const value of Object.values(playback)) {
       if (typeof value === "function" && "mockClear" in value) value.mockClear();
     }
-    playback.currentChapter = playerBook.chapters[0]!;
+    timeState.currentChapter = playerBook.chapters[0]!;
     Element.prototype.scrollIntoView = vi.fn();
   });
 
@@ -102,7 +109,7 @@ describe("full player history wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next chapter" }));
     expect(playback.moveToChapter).toHaveBeenCalledWith(playerBook.chapters[1], "next");
 
-    playback.currentChapter = playerBook.chapters[1]!;
+    timeState.currentChapter = playerBook.chapters[1]!;
     rerender(<FullPlayer playerBook={playerBook} historySnapshot={emptyHistorySnapshot} />);
     fireEvent.click(screen.getByRole("button", { name: "Previous chapter" }));
     expect(playback.moveToChapter).toHaveBeenCalledWith(playerBook.chapters[0], "previous");

@@ -13,12 +13,27 @@ export function selectCurrentChapter(
   chapters: PlayerChapter[],
   currentTimeMs: number,
 ): PlayerChapter | null {
-  const within = chapters.find(
-    (chapter) => currentTimeMs >= chapter.startMs && currentTimeMs < chapter.endMs,
-  );
-  if (within) return within;
   const last = chapters[chapters.length - 1];
-  return last && currentTimeMs >= last.startMs ? last : null;
+  if (!last) return null;
+  if (currentTimeMs >= last.startMs) return last;
+  // Chapters are sorted and non-overlapping, so binary-search the last one
+  // starting at or before the position — this runs per timeupdate tick and
+  // books can carry 10k+ chapters.
+  let low = 0;
+  let high = chapters.length - 1;
+  let candidate = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (chapters[mid]!.startMs <= currentTimeMs) {
+      candidate = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (candidate === -1) return null;
+  const chapter = chapters[candidate]!;
+  return currentTimeMs < chapter.endMs ? chapter : null;
 }
 
 /** Bounded smart-rewind for time spent away from the book. */

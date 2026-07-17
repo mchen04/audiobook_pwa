@@ -13,17 +13,31 @@ import {
   Pause,
   Play,
 } from "@phosphor-icons/react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { BookDetailsDialog, type BookDetails } from "@/components/book/book-details-dialog";
+import type { BookDetails } from "@/components/book/book-details-dialog";
 import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
 import { formatClock } from "@/lib/format-time";
 
 import { PlayerSheet, type PlayerSheetView } from "./chapter-sheet";
-import { usePlayback } from "./playback-provider";
+import {
+  useCurrentChapter,
+  usePlayback,
+  usePlaybackDerived,
+  usePlaybackTime,
+} from "./playback-provider";
+import type { SleepMode } from "./use-sleep-timer";
+
+// The details dialog is a heavy edit form most sessions never open; load it
+// on first use and keep it out of the player bundle.
+const BookDetailsDialog = dynamic(
+  () => import("@/components/book/book-details-dialog").then((mod) => mod.BookDetailsDialog),
+  { ssr: false },
+);
 
 export function FullPlayer({
   playerBook,
@@ -46,6 +60,7 @@ export function FullPlayer({
 }) {
   const router = useRouter();
   const playback = usePlayback();
+  const currentChapter = useCurrentChapter();
   const { loadBook } = playback;
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sheetView, setSheetView] = useState<PlayerSheetView | null>(null);
@@ -67,10 +82,8 @@ export function FullPlayer({
     }
   }, [autoplayNext, nextInCollection, offlineMode, playback.lastEndedAt, router]);
 
-  const chapterIndex = useMemo(
-    () => playerBook.chapters.findIndex((chapter) => chapter.id === playback.currentChapter?.id),
-    [playback.currentChapter?.id, playerBook.chapters],
-  );
+  // Chapter positions are validated to equal their array index.
+  const chapterIndex = currentChapter?.position ?? -1;
 
   function moveChapter(delta: number) {
     const target = playerBook.chapters[chapterIndex + delta];
@@ -89,7 +102,7 @@ export function FullPlayer({
           <ArrowLeft size={19} aria-hidden="true" />
           <span>{backLabel}</span>
         </Link>
-        <span>{playback.currentChapter?.title || "Full audiobook"}</span>
+        <span>{currentChapter?.title || "Full audiobook"}</span>
         <div className="player-topbar-actions">
           {details && !offlineMode && (
             <button type="button" className="icon-text-button" onClick={() => setDetailsOpen(true)}>
@@ -130,11 +143,7 @@ export function FullPlayer({
             </div>
           </div>
 
-          <Scrubber
-            durationMs={playerBook.durationMs}
-            currentTimeMs={playback.currentTimeMs}
-            onSeek={playback.seek}
-          />
+          <Scrubber durationMs={playerBook.durationMs} onSeek={playback.seek} />
 
           <div className="transport-controls">
             <button
@@ -239,19 +248,15 @@ export function FullPlayer({
         chapters={playerBook.chapters}
         history={playback.history}
         historyNotice={playback.historyNotice}
-        activeChapterId={playback.currentChapter?.id ?? null}
+        activeChapterId={currentChapter?.id ?? null}
         isPlaying={playback.isPlaying}
         onChapterSelect={playback.seek}
         onHistoryRestore={playback.restoreHistoryPosition}
         diagnostic={details?.chapterDiagnostic}
       />
 
-      {details && (
-        <BookDetailsDialog
-          details={details}
-          open={detailsOpen}
-          onClose={() => setDetailsOpen(false)}
-        />
+      {details && detailsOpen && (
+        <BookDetailsDialog details={details} open onClose={() => setDetailsOpen(false)} />
       )}
     </div>
   );
@@ -259,13 +264,12 @@ export function FullPlayer({
 
 function Scrubber({
   durationMs,
-  currentTimeMs,
   onSeek,
 }: {
   durationMs: number;
-  currentTimeMs: number;
   onSeek: (positionMs: number) => void;
 }) {
+  const currentTimeMs = usePlaybackTime();
   const [scrubMs, setScrubMs] = useState<number | null>(null);
   const draggingRef = useRef(false);
   const shownMs = scrubMs ?? Math.min(currentTimeMs, durationMs);
@@ -354,7 +358,7 @@ function SleepMenu() {
     >
       <summary>
         <Clock size={19} />
-        <span aria-live="polite">{sleepLabel(playback.sleepMode)}</span>
+        <SleepLabel mode={playback.sleepMode} />
       </summary>
       <div>
         {[15, 30, 45, 60].map((minutes) => (
@@ -390,7 +394,13 @@ function SleepMenu() {
   );
 }
 
-function sleepLabel(mode: ReturnType<typeof usePlayback>["sleepMode"]): string {
+function SleepLabel({ mode }: { mode: SleepMode }) {
+  // Recomputed each playback tick, but only a label change re-renders.
+  const label = usePlaybackDerived(() => sleepLabel(mode));
+  return <span aria-live="polite">{label}</span>;
+}
+
+function sleepLabel(mode: SleepMode): string {
   if (!mode) return "Sleep timer";
   if (mode.kind === "chapter") return "End of chapter";
   return `${Math.max(1, Math.ceil((mode.endsAt - Date.now()) / 60_000))} min left`;

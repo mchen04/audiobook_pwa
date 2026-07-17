@@ -3,6 +3,7 @@
 import { RefObject, useCallback, useEffect, useRef } from "react";
 
 import type { PlayerBook } from "@/domain/player";
+import { PROGRESS_CONFLICT_EVENT } from "@/lib/app-keys";
 import {
   queueProgress,
   reconcileProgressConflict,
@@ -112,18 +113,16 @@ export function useProgressPersistence(
 
   useEffect(() => {
     const reconcile = (event: Event) => {
+      // The provider's listener owns the playback surface (audio element and
+      // stores); this one only keeps the completion bookkeeping in step.
       const detail = (event as CustomEvent<ProgressConflictDetail>).detail;
       const activeBook = activeBookRef.current;
       if (detail.userId !== userId || activeBook?.id !== detail.bookId) return;
       completionRef.current.set(detail.bookId, detail.completed);
-      if (audioRef.current) {
-        audioRef.current.currentTime = detail.positionMs / 1000;
-        audioRef.current.playbackRate = detail.playbackRate;
-      }
     };
-    window.addEventListener("chapterline:progress-conflict", reconcile);
-    return () => window.removeEventListener("chapterline:progress-conflict", reconcile);
-  }, [activeBookRef, audioRef, userId]);
+    window.addEventListener(PROGRESS_CONFLICT_EVENT, reconcile);
+    return () => window.removeEventListener(PROGRESS_CONFLICT_EVENT, reconcile);
+  }, [activeBookRef, userId]);
 
   return { persistProgress, onListeningTick, markInProgress };
 }

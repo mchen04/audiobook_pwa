@@ -2,15 +2,14 @@ import { openDB, type DBSchema, type IDBPDatabase, type IDBPObjectStore } from "
 
 import type { PlaybackHistoryEntry, PlaybackHistorySnapshot } from "@/domain/player";
 import { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
-import { shouldRetainMutation } from "@/lib/offline-sync";
+import { withKeyedLock } from "@/lib/keyed-lock";
+import { REPLAY_CONCURRENCY, REPLAY_PAGE_SIZE, shouldRetainMutation } from "@/lib/offline-sync";
+import { singleFlight } from "@/lib/single-flight";
 import { runBounded } from "@/lib/run-bounded";
 
 export { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
 const DATABASE_NAME = "hark-playback-history-v1";
-const REPLAY_PAGE_SIZE = 100;
-const REPLAY_CONCURRENCY = 4;
 const activeHistoryReplays = new Map<string, Promise<void>>();
-const activeBookSyncLocks = new Map<string, Promise<void>>();
 
 export type PlaybackActionStoreResult = "stored" | "rejected" | "unavailable";
 
@@ -160,17 +159,13 @@ export async function storePlaybackAction(
   }
 }
 
-export async function replayPlaybackHistory(
+export function replayPlaybackHistory(
   userId: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<void> {
-  const active = activeHistoryReplays.get(userId);
-  if (active) return active;
-  const replay = replayPlaybackHistorySnapshot(userId, fetchFn).finally(() => {
-    if (activeHistoryReplays.get(userId) === replay) activeHistoryReplays.delete(userId);
-  });
-  activeHistoryReplays.set(userId, replay);
-  return replay;
+  return singleFlight(activeHistoryReplays, userId, () =>
+    replayPlaybackHistorySnapshot(userId, fetchFn),
+  );
 }
 
 async function replayPlaybackHistorySnapshot(userId: string, fetchFn: typeof fetch): Promise<void> {
@@ -233,6 +228,9 @@ async function syncPlaybackAction(
     const response = await fetchFn(`/api/books/${entry.bookId}/history`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      // Survives navigation like the progress PATCH, so an action recorded
+      // right before a reload still reaches the server instead of aborting.
+      keepalive: true,
       body: JSON.stringify({
         id: entry.id,
         action: entry.action,
@@ -269,33 +267,12 @@ async function syncPlaybackAction(
   }
 }
 
-async function syncPlaybackActionInOrder(
+function syncPlaybackActionInOrder(
   entry: StoredPlaybackAction,
   fetchFn: typeof fetch,
 ): Promise<boolean> {
   const key = sequenceKey(entry.userId, entry.bookId);
-  const operation = () => withModuleHistorySyncLock(key, () => drainPendingBook(entry, fetchFn));
-  if (typeof navigator !== "undefined" && navigator.locks) {
-    return navigator.locks.request(`hark:playback-history:${key}`, operation);
-  }
-  return operation();
-}
-
-async function withModuleHistorySyncLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-  const previous = activeBookSyncLocks.get(key) || Promise.resolve();
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => gate);
-  activeBookSyncLocks.set(key, queued);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (activeBookSyncLocks.get(key) === queued) activeBookSyncLocks.delete(key);
-  }
+  return withKeyedLock(`hark:playback-history:${key}`, () => drainPendingBook(entry, fetchFn));
 }
 
 async function drainPendingBook(

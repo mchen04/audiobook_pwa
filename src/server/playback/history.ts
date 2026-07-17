@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 
 import { PLAYBACK_HISTORY_LIMIT, type PlaybackAction } from "@/domain/playback-history";
 import { db } from "@/server/db/client";
@@ -54,12 +54,17 @@ export async function savePlaybackAction(userId: string, input: PlaybackActionIn
       )[0];
     if (!inserted) return saved || false;
 
-    await transaction.insert(playbackActions).values({
-      ...input,
-      playbackRate: String(input.playbackRate),
-      recordedAt: inserted.recordedAt,
-      userId,
-    });
+    // Conflict-safe so a device replaying an action whose receipt aged out
+    // below can never crash on the primary key.
+    await transaction
+      .insert(playbackActions)
+      .values({
+        ...input,
+        playbackRate: String(input.playbackRate),
+        recordedAt: inserted.recordedAt,
+        userId,
+      })
+      .onConflictDoNothing({ target: playbackActions.id });
 
     await transaction.execute(sql`
       delete from ${playbackActions}
@@ -72,6 +77,21 @@ export async function savePlaybackAction(userId: string, input: PlaybackActionIn
         offset ${PLAYBACK_HISTORY_LIMIT}
       )
     `);
+
+    // Receipts guard idempotent replay from long-offline devices; a year
+    // covers any realistic retry horizon, so older rows are swept here — an
+    // indexed lookup that almost always deletes nothing.
+    await transaction
+      .delete(playbackActionReceipts)
+      .where(
+        and(
+          eq(playbackActionReceipts.userId, userId),
+          eq(playbackActionReceipts.bookId, input.bookId),
+          lt(playbackActionReceipts.recordedAt, new Date(Date.now() - RECEIPT_RETENTION_MS)),
+        ),
+      );
     return saved;
   });
 }
+
+const RECEIPT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;

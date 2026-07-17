@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages: ["music-metadata"],
   experimental: {
+    optimizePackageImports: ["@phosphor-icons/react"],
     serverActions: {
       bodySizeLimit: "2mb",
     },

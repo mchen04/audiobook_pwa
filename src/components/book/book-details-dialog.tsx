@@ -4,7 +4,7 @@ import { ArrowCounterClockwise, CheckCircle, Trash, X } from "@phosphor-icons/re
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { removeOfflineBook } from "@/lib/offline-library";
+import { useDeleteBook } from "@/components/book/use-delete-book";
 import { usePlayback } from "@/components/player/playback-provider";
 import { formatDurationRounded } from "@/lib/format-time";
 import {
@@ -42,10 +42,13 @@ export function BookDetailsDialog({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [collections, setCollections] = useState<CollectionSummary[] | null>(null);
   const [newCollectionName, setNewCollectionName] = useState("");
+  const { deleteBook, deleting, deleteLabel } = useDeleteBook(
+    playback.userId,
+    details.id,
+    setError,
+  );
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -119,28 +122,6 @@ export function BookDetailsDialog({
     } else {
       setError("Archiving needs a connection right now.");
     }
-  }
-
-  async function deleteBook() {
-    if (!confirmingDelete) {
-      setConfirmingDelete(true);
-      return;
-    }
-    setDeleting(true);
-    const response = await fetch(`/api/books/${details.id}`, { method: "DELETE" }).catch(
-      () => null,
-    );
-    if (!response?.ok) {
-      setDeleting(false);
-      setError("The book could not be deleted. Check your connection and try again.");
-      return;
-    }
-    playback.unloadBook();
-    await removeOfflineBook(playback.userId, details.id).catch(() => {
-      setError("The book was deleted, but device cleanup will retry automatically.");
-    });
-    router.push("/library");
-    router.refresh();
   }
 
   async function toggleCollection(collection: CollectionSummary, include: boolean) {
@@ -335,15 +316,11 @@ export function BookDetailsDialog({
             <button
               type="button"
               className="danger-button"
-              onClick={deleteBook}
+              onClick={() => void deleteBook()}
               disabled={deleting}
             >
               <Trash size={17} aria-hidden="true" />
-              {deleting
-                ? "Deleting"
-                : confirmingDelete
-                  ? "Tap again to permanently delete"
-                  : "Delete this book"}
+              {deleteLabel}
             </button>
           </section>
         </div>

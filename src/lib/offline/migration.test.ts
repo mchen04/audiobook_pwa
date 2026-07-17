@@ -48,7 +48,7 @@ describe("bookmark storage removal", () => {
       }),
     });
 
-    const { getOfflineBook } = await import("./offline-library");
+    const { getOfflineBook } = await import("./library");
     await getOfflineBook("user-1", "book-1");
 
     const upgraded = await openDB(OFFLINE_DATABASE, 5);
@@ -88,7 +88,7 @@ describe("bookmark storage removal", () => {
     });
     legacy.close();
 
-    const { nextDeviceSequence } = await import("./offline-sync");
+    const { nextDeviceSequence } = await import("../offline-sync");
     await nextDeviceSequence("upgrade-trigger");
 
     const upgraded = await openDB(SYNC_DATABASE, 3);

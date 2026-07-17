@@ -1,0 +1,1 @@
+DROP INDEX "books_owner_updated_idx";

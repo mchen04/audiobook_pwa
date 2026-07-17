@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { storeLocalBookMedia } = vi.hoisted(() => ({ storeLocalBookMedia: vi.fn() }));
 
-vi.mock("@/lib/offline-library", () => ({ storeLocalBookMedia }));
+vi.mock("@/lib/offline/media-store", () => ({ storeLocalBookMedia }));
 vi.mock("music-metadata", () => ({
   parseBlob: vi.fn().mockResolvedValue({
     format: {

@@ -17,6 +17,8 @@ const sqlClient =
     max: process.env.NODE_ENV === "production" ? 10 : 3,
     idle_timeout: 20,
     connect_timeout: 10,
+    // Neon's pooled connection strings sit behind PgBouncer in transaction
+    // mode, which cannot host named prepared statements.
     prepare: false,
   });
 

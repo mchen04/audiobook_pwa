@@ -120,7 +120,6 @@ export const books = pgTable(
     ...timestamps,
   },
   (table) => [
-    index("books_owner_updated_idx").on(table.ownerId, table.updatedAt, table.id),
     index("books_owner_created_id_idx").on(table.ownerId, table.createdAt, table.id),
     index("books_owner_title_id_idx").on(table.ownerId, sql`lower(${table.title})`, table.id),
     index("books_owner_author_id_idx").on(table.ownerId, sql`lower(${table.author})`, table.id),
@@ -178,8 +177,9 @@ export const chapters = pgTable(
     endMs: bigint("end_ms", { mode: "number" }).notNull(),
   },
   (table) => [
+    // All chapter reads filter by book and order by position; time lookups
+    // binary-search in memory client-side, so no startMs index is needed.
     uniqueIndex("chapters_book_position_unique").on(table.bookId, table.position),
-    index("chapters_book_start_idx").on(table.bookId, table.startMs),
     check("chapters_position_nonnegative", sql`${table.position} >= 0`),
     check(
       "chapters_bounds_valid",
@@ -278,7 +278,8 @@ export const playbackActions = pgTable(
   ],
 );
 
-// Durable idempotency ledger kept independently of the capped history projection.
+// Durable idempotency ledger kept independently of the capped history
+// projection; rows older than the replay horizon are swept on history writes.
 export const playbackActionReceipts = pgTable(
   "playback_action_receipts",
   {
@@ -408,9 +409,15 @@ export const listeningSessions = pgTable(
     listenedMs: bigint("listened_ms", { mode: "number" }).notNull(),
   },
   (table) => [
-    index("listening_sessions_user_started_idx").on(table.userId, table.startedAt),
+    // The export stream pages by (userId, id); the recent-sessions panel
+    // reads (userId, bookId, startedAt). No other read paths exist, so these
+    // two indexes are the complete set for this append-heavy table.
     index("listening_sessions_user_id_idx").on(table.userId, table.id),
-    index("listening_sessions_book_started_idx").on(table.bookId, table.startedAt),
+    index("listening_sessions_user_book_started_idx").on(
+      table.userId,
+      table.bookId,
+      table.startedAt,
+    ),
     check("listening_sessions_times_valid", sql`${table.endedAt} >= ${table.startedAt}`),
     check(
       "listening_sessions_positions_nonnegative",

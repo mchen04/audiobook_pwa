@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hasEnoughCapacity } from "./offline-library";
+import { hasEnoughCapacity } from "./media-store";
 
 describe("offline storage capacity", () => {
   it("allows unknown quotas and unknown file sizes", () => {

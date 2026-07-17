@@ -12,12 +12,12 @@ import {
 } from "@phosphor-icons/react";
 import Link from "next/link";
 import Image from "next/image";
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, memo, useEffect, useRef, useState } from "react";
 
 import type { LibraryBook } from "@/domain/library";
 import { formatDurationRounded } from "@/lib/format-time";
 import { importLocalMp3 } from "@/lib/local-import";
-import { listOfflineBooks } from "@/lib/offline-library";
+import { listOfflineCoverUrls } from "@/lib/offline/library";
 import type { LibraryPage } from "@/lib/wire";
 
 import { type SortOrder, type StatusFilter } from "./library-view";
@@ -53,6 +53,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
   const [upload, setUpload] = useState<UploadState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [localCovers, setLocalCovers] = useState<Record<string, string>>({});
+  const [coverRefresh, setCoverRefresh] = useState(0);
   const { page, reload, loadMore, loading } = useLibraryBooks(initialPage, {
     query,
     status,
@@ -61,22 +62,19 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
   });
   const books = page.books;
 
+  // The cover map is filter-independent; it changes only when a book is
+  // imported on this device, so searches and pagination never re-read it.
   useEffect(() => {
     let active = true;
-    void listOfflineBooks(userId)
-      .then((records) => {
-        if (!active) return;
-        const covers: Record<string, string> = {};
-        for (const record of records) {
-          if (record.offlineCoverUrl) covers[record.book.id] = record.offlineCoverUrl;
-        }
-        setLocalCovers(covers);
+    void listOfflineCoverUrls(userId)
+      .then((covers) => {
+        if (active) setLocalCovers(covers);
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, [userId, books]);
+  }, [userId, coverRefresh]);
 
   const allTags = page.tags;
   const continueBook = page.continueBook;
@@ -101,6 +99,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       await importLocalMp3(userId, file, (percent, stage) =>
         setUpload({ filename: file.name, percent, stage }),
       );
+      setCoverRefresh((current) => current + 1);
       await reload();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The MP3 could not be imported.");
@@ -383,7 +382,8 @@ function BookCover({ book, coverUrl }: { book: LibraryBook; coverUrl?: string })
   );
 }
 
-function BookItem({
+// Memoized so search keystrokes re-render the tools row, not the whole grid.
+const BookItem = memo(function BookItem({
   book,
   compact,
   coverUrl,
@@ -441,4 +441,4 @@ function BookItem({
       )}
     </article>
   );
-}
+});

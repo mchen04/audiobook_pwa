@@ -61,4 +61,27 @@ describe("service-worker chunked media", () => {
       `${mediaUrl}/chunk/2`,
     ]);
   });
+
+  it("serves stored cover art directly instead of gating it on the chunked format", async () => {
+    const coverUrl = "/offline-media/book-cover";
+    const entries = new Map<string, Response>([
+      [
+        coverUrl,
+        new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/jpeg" } }),
+      ],
+    ]);
+    const match = vi.fn(async (url: string) => entries.get(url)?.clone());
+    const serveOfflineMedia = createServeOfflineMedia({
+      open: vi.fn(async () => ({ match })) as never,
+    } as unknown as CacheStorage);
+
+    const response = await serveOfflineMedia(
+      new Request(`https://example.test${coverUrl}`),
+      coverUrl,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/jpeg");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+  });
 });

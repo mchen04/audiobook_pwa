@@ -1,12 +1,14 @@
 import { openDB, type DBSchema } from "idb";
 
+import { PROGRESS_CONFLICT_EVENT } from "@/lib/app-keys";
+import { singleFlight } from "@/lib/single-flight";
+import { withKeyedLock } from "@/lib/keyed-lock";
 import { runBounded } from "@/lib/run-bounded";
 
 const DATABASE_NAME = "chapterline-sync-v1";
-const REPLAY_PAGE_SIZE = 100;
-const REPLAY_CONCURRENCY = 4;
+export const REPLAY_PAGE_SIZE = 100;
+export const REPLAY_CONCURRENCY = 4;
 const activeReplays = new Map<string, Promise<void>>();
-const activeProgressLocks = new Map<string, Promise<void>>();
 
 export type QueuedProgress = {
   userId: string;
@@ -86,27 +88,11 @@ export async function queueProgress(entry: QueuedProgress): Promise<void> {
   await transaction.done;
 }
 
-export async function withProgressMutationLock<T>(
+export function withProgressMutationLock<T>(
   bookId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (typeof navigator !== "undefined" && navigator.locks) {
-    return navigator.locks.request(`chapterline:progress:${bookId}`, operation);
-  }
-  const previous = activeProgressLocks.get(bookId) || Promise.resolve();
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => gate);
-  activeProgressLocks.set(bookId, queued);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (activeProgressLocks.get(bookId) === queued) activeProgressLocks.delete(bookId);
-  }
+  return withKeyedLock(`chapterline:progress:${bookId}`, operation);
 }
 
 export async function nextDeviceSequence(bookId: string): Promise<number> {
@@ -147,13 +133,7 @@ export function replayQueuedMutations(
   userId: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<void> {
-  const active = activeReplays.get(userId);
-  if (active) return active;
-  const replay = replayQueueSnapshot(userId, fetchFn).finally(() => {
-    if (activeReplays.get(userId) === replay) activeReplays.delete(userId);
-  });
-  activeReplays.set(userId, replay);
-  return replay;
+  return singleFlight(activeReplays, userId, () => replayQueueSnapshot(userId, fetchFn));
 }
 
 async function replayQueueSnapshot(userId: string, fetchFn: typeof fetch): Promise<void> {
@@ -223,7 +203,7 @@ export async function reconcileProgressConflict(
     return false;
   }
   if ((await currentDeviceSequence(entry.bookId)) > entry.deviceSequence) return false;
-  const { projectOfflineProgress } = await import("@/lib/offline-library");
+  const { projectOfflineProgress } = await import("@/lib/offline/library");
   const { saveLocalPosition } = await import("@/lib/playback-core");
   await projectOfflineProgress(entry.userId, entry.bookId, {
     positionMs,
@@ -239,7 +219,7 @@ export async function reconcileProgressConflict(
   );
   if (typeof window !== "undefined") {
     window.dispatchEvent(
-      new CustomEvent("chapterline:progress-conflict", {
+      new CustomEvent(PROGRESS_CONFLICT_EVENT, {
         detail: { userId: entry.userId, bookId: entry.bookId, positionMs, completed, playbackRate },
       }),
     );

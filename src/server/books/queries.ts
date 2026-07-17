@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
 import { db } from "@/server/db/client";
@@ -30,7 +30,6 @@ export type LibraryQuery = {
   sort?: LibrarySort;
   cursor?: string;
   limit?: number;
-  includeMeta?: boolean;
 };
 
 const librarySelection = {
@@ -47,17 +46,10 @@ const librarySelection = {
   positionMs: playbackStates.positionMs,
   completed: playbackStates.completed,
   progressUpdatedAt: playbackStates.updatedAt,
-  // One round trip: tags ride along as a JSON aggregate per book.
-  tags: sql<string[]>`coalesce((
-        select json_agg(${tags.name} order by ${tags.name})
-        from ${bookTags}
-        join ${tags} on ${tags.id} = ${bookTags.tagId}
-        where ${bookTags.bookId} = ${books.id}
-      ), '[]'::json)`,
 };
 
 /** Stable keyset pagination keeps database, response, hydration, and DOM work bounded. */
-export async function listBooksForUser(userId: string, input: LibraryQuery = {}) {
+export async function listBooksPage(userId: string, input: LibraryQuery = {}) {
   const limit = Math.min(100, Math.max(1, input.limit || 50));
   const status = input.status || "all";
   const sort = input.sort || "activity";
@@ -112,10 +104,12 @@ export async function listBooksForUser(userId: string, input: LibraryQuery = {})
         })
       : null;
 
-  if (input.includeMeta === false) return { books: pageRows, nextCursor };
+  // The matching total is identical across cursor pages of one filter, so
+  // only the first page pays the count; later pages return null (unchanged).
+  if (cursor) return { books: await withBookTags(pageRows), nextCursor, total: null };
 
-  const baseConditions = conditions.slice(0, cursor ? -1 : conditions.length);
-  const [[total], [libraryTotal], tagRows, [continueBook]] = await Promise.all([
+  const [taggedBooks, [total]] = await Promise.all([
+    withBookTags(pageRows),
     db
       .select({ value: count() })
       .from(books)
@@ -123,7 +117,14 @@ export async function listBooksForUser(userId: string, input: LibraryQuery = {})
         playbackStates,
         and(eq(playbackStates.bookId, books.id), eq(playbackStates.userId, userId)),
       )
-      .where(and(...baseConditions)),
+      .where(and(...conditions)),
+  ]);
+  return { books: taggedBooks, nextCursor, total: total?.value || 0 };
+}
+
+/** The filter-independent library shell: totals, tag chips, and the continue card. */
+export async function getLibraryOverview(userId: string) {
+  const [[libraryTotal], tagRows, [continueBook]] = await Promise.all([
     db.select({ value: count() }).from(books).where(eq(books.ownerId, userId)),
     db
       .select({ name: tags.name })
@@ -132,7 +133,17 @@ export async function listBooksForUser(userId: string, input: LibraryQuery = {})
       .orderBy(asc(tags.name))
       .limit(100),
     db
-      .select(librarySelection)
+      // A correlated tag aggregate is the right tool for this single-row
+      // query; page rows use the batched withBookTags instead.
+      .select({
+        ...librarySelection,
+        tags: sql<string[]>`coalesce((
+          select json_agg(${tags.name} order by ${tags.name})
+          from ${bookTags}
+          join ${tags} on ${tags.id} = ${bookTags.tagId}
+          where ${bookTags.bookId} = ${books.id}
+        ), '[]'::json)`,
+      })
       .from(books)
       .leftJoin(mediaAssets, eq(mediaAssets.bookId, books.id))
       .leftJoin(
@@ -152,13 +163,35 @@ export async function listBooksForUser(userId: string, input: LibraryQuery = {})
   ]);
 
   return {
-    books: pageRows,
-    nextCursor,
-    total: total?.value || 0,
     libraryTotal: libraryTotal?.value || 0,
     tags: tagRows.map((tag) => tag.name),
     continueBook: continueBook || null,
   };
+}
+
+/** One indexed batch fetch instead of a correlated tags subquery per row. */
+async function withBookTags<T extends { id: string }>(
+  rows: T[],
+): Promise<Array<T & { tags: string[] }>> {
+  if (!rows.length) return [];
+  const tagRows = await db
+    .select({ bookId: bookTags.bookId, name: tags.name })
+    .from(bookTags)
+    .innerJoin(tags, eq(tags.id, bookTags.tagId))
+    .where(
+      inArray(
+        bookTags.bookId,
+        rows.map((row) => row.id),
+      ),
+    )
+    .orderBy(asc(tags.name));
+  const byBook = new Map<string, string[]>();
+  for (const tag of tagRows) {
+    const names = byBook.get(tag.bookId) || [];
+    names.push(tag.name);
+    byBook.set(tag.bookId, names);
+  }
+  return rows.map((row) => ({ ...row, tags: byBook.get(row.id) || [] }));
 }
 
 function statusCondition(status: NonNullable<LibraryQuery["status"]>): SQL {
@@ -179,7 +212,13 @@ function librarySortExpression(sort: NonNullable<LibraryQuery["sort"]>): SQL {
   if (sort === "title") return sql`lower(${books.title})`;
   if (sort === "author") return sql`lower(${books.author})`;
   if (sort === "added") return sql`${books.createdAt}`;
-  return sql`${books.updatedAt}`;
+  // Activity = the later of the last metadata edit and the last listen;
+  // greatest() skips nulls, so books never played sort by their edits. The
+  // expression is not indexable, which is the deliberate trade: per-user
+  // libraries sort a few hundred rows in memory, while a denormalized
+  // activity column would put index write-amplification back on the 15s
+  // progress heartbeat. Revisit only if libraries reach many thousands.
+  return sql`greatest(${books.updatedAt}, ${playbackStates.updatedAt})`;
 }
 
 function cursorCondition(
@@ -206,7 +245,11 @@ function libraryCursorValue(
   if (sort === "title") return String(row.title).toLowerCase();
   if (sort === "author") return String(row.author).toLowerCase();
   if (sort === "added") return (row.createdAt as Date).toISOString();
-  return row.updatedAt.toISOString();
+  const activityAt =
+    row.progressUpdatedAt && row.progressUpdatedAt > row.updatedAt
+      ? row.progressUpdatedAt
+      : row.updatedAt;
+  return activityAt.toISOString();
 }
 
 export async function getBookForUser(userId: string, bookId: string) {
@@ -334,9 +377,13 @@ export async function getPlaybackHistorySnapshotForBook(
   bookId: string,
   limit = PLAYBACK_HISTORY_LIMIT,
 ) {
+  // The advisory lock is load-bearing: writers assign recordedAt under the
+  // same key, so a read holding it can never miss an entry with
+  // recordedAt <= capturedAt. Reading the clock in the lock statement —
+  // possibly before the wait — only under-claims the boundary, which is safe.
   return db.transaction(async (transaction) => {
-    await transaction.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${playbackHistoryLockKey(userId, bookId)}, 0))`,
+    const [boundary] = await transaction.execute<{ capturedAt: string }>(
+      sql`select pg_advisory_xact_lock(hashtextextended(${playbackHistoryLockKey(userId, bookId)}, 0)), clock_timestamp() as "capturedAt"`,
     );
     const rows = await transaction
       .select({
@@ -353,9 +400,6 @@ export async function getPlaybackHistorySnapshotForBook(
       .where(and(eq(playbackActions.userId, userId), eq(playbackActions.bookId, bookId)))
       .orderBy(desc(playbackActions.recordedAt), desc(playbackActions.id))
       .limit(Math.min(PLAYBACK_HISTORY_LIMIT, Math.max(1, limit)));
-    const [boundary] = await transaction.execute<{ capturedAt: string }>(
-      sql`select clock_timestamp() as "capturedAt"`,
-    );
     return { rows, capturedAt: boundary!.capturedAt };
   });
 }

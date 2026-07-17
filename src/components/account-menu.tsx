@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { ACTIVE_USER_KEY } from "@/lib/app-keys";
 import { authClient } from "@/lib/auth-client";
 
 type AccountMenuProps = {
@@ -18,7 +19,7 @@ export function AccountMenu({ email }: AccountMenuProps) {
   async function signOut() {
     setPending(true);
     await authClient.signOut();
-    localStorage.removeItem("chapterline:active-user");
+    localStorage.removeItem(ACTIVE_USER_KEY);
     router.replace("/login");
     router.refresh();
   }
