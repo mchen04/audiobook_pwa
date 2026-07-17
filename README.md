@@ -54,13 +54,13 @@ and no practical file-size limit beyond the device's free space, so a single
 
 ## Commands
 
-| Command                              | What it does                                                                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                   |
-| `pnpm test`                          | Vitest suites (MP3 parsing contract, range + service-worker parity, progress conflict policy, offline queues, playback). |
-| `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                  |
-| `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                              |
-| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~100k rows onto an existing account for performance work.                                            |
+| Command                              | What it does                                                                                                            |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                  |
+| `pnpm test`                          | Vitest suites (MP3 parsing contract, service-worker range parsing, progress conflict policy, offline queues, playback). |
+| `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                 |
+| `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                             |
+| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~100k rows onto an existing account for performance work.                                           |
 
 Browser-level verification uses `agent-browser` against the production build,
 exercising the core flows (register, import, play, offline, resume) across

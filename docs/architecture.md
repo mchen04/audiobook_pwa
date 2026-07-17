@@ -2,8 +2,8 @@
 
 ## Status
 
-Decision record started 2026-07-09; last reconciled with the code on 2026-07-10
-after the structural convergence pass. Update this document whenever executable
+Decision record started 2026-07-09; last reconciled with the code on 2026-07-17
+after the performance and structural overhaul pass. Update this document whenever executable
 reality changes.
 
 ## Product boundary
@@ -73,12 +73,16 @@ Neon Postgres
    answers 409 with the existing book id for device reattachment.
 3. The audio bytes go into this device's Cache Storage under an
    `/offline-media/<uuid>` URL backed by independently cached 4 MiB chunks, with
-   a per-user IndexedDB record; embedded cover art is stored beside it. If
+   a per-user IndexedDB record; embedded cover art is stored beside it along
+   with a downscaled thumbnail so small surfaces (library cards, downloads
+   list, mini player) never decode full-size art. Fingerprint hashing runs in
+   a web worker to keep `hash-wasm` out of page bundles. If
    storing fails, the metadata remains recoverable and choosing the MP3 again
    completes the device attachment.
 4. Playback always serves from the device store through the service worker,
-   which answers HTTP Range requests (206/416 parity-tested against the
-   canonical parser). There is no server media route.
+   which answers HTTP Range requests (the service worker's 206/416 parser is
+   unit-tested directly). There is no server media route or server-side range
+   parser.
 5. On a device that lacks the bytes, the player's media gate asks for the
    original MP3 and verifies byte size and fingerprint before attaching it —
    positions and playback history were already synced through Postgres.
@@ -119,11 +123,18 @@ Neon Postgres
   smart rewind, start-position resolution, local device state), unit-tested.
 - `src/components/player/`: the provider wires one audio element to focused
   hooks — progress persistence, sleep timer, Media Session, tab arbitration,
-  playback history — with rendering kept in `full-player.tsx`/`mini-player.tsx`.
+  playback history, transport/seek actions (`use-transport-actions.ts`) — with
+  rendering kept in `full-player.tsx`/`mini-player.tsx`. Playback time lives in
+  an external store (`playback-time-store.ts`) so timeupdate ticks don't
+  re-render the player tree; chapter selection binary-searches on the hot path.
+  The provider is the single sink for progress-conflict reconciliation.
 - `src/lib/offline/` (`db`, `media-store`, `deletion-journal`, `library`) +
   `local-import.ts`: the device-local media store and the in-browser import
   pipeline; `offline-sync.ts`: mutation queues.
 - `src/lib/wire.ts`: runtime guards at every client fetch boundary.
+- Shared lib primitives: `keyed-lock.ts` (one keyed-lock implementation),
+  `single-flight.ts` (single-flight replay wrapper), `format-bytes.ts`, and
+  `app-keys.ts` (named device-storage keys and window events).
 - `src/app/styles/`: the stylesheet split by surface, imported in cascade
   order from `globals.css`.
 
