@@ -1,6 +1,6 @@
 # iPhone PWA verification
 
-Chapterline has a repeatable iPhone-shaped WebKit gate and a short physical-device
+Hark has a repeatable iPhone-shaped WebKit gate and a short physical-device
 gate. The automated run catches Safari engine differences in auth cookies, the
 Files picker, MP3 parsing, device storage, media range requests, playback, seeking,
 reloads, and offline playback. A physical iPhone remains authoritative for the

@@ -64,13 +64,19 @@ Neon Postgres
 
 1. Import happens in the browser: `music-metadata` parses the chosen file
    (shared pure interpreter in `src/domain/mp3.ts` — format validation,
-   chapter normalization, artwork sniffing), and a streaming whole-file
+   chapter normalization, artwork sniffing — when the format-level chapter
+   list is truncated, the complete native ID3 chapter sequence is recovered
+   instead, and sequences that don't cover the audiobook's duration are
+   rejected as malformed), and a streaming whole-file
    SHA-256 identifies the exact bytes without buffering the book in memory.
 2. `POST /api/books/local` registers metadata only — validated title/author,
    duration, byte size, fingerprint, and the full chapter list (revalidated
    server-side, batch-inserted, capped at 10,000 chapters). A database-unique
    owner/fingerprint pair makes concurrent duplicate imports atomic; a match
-   answers 409 with the existing book id for device reattachment.
+   answers 409 with the existing book id for device reattachment. On that
+   duplicate path, if the newly parsed chapter list is a complete sequence and
+   the stored one was truncated by an earlier import, the server repairs the
+   existing book's chapters in the same transaction.
 3. The audio bytes go into this device's Cache Storage under an
    `/offline-media/<uuid>` URL backed by independently cached 4 MiB chunks, with
    a per-user IndexedDB record; embedded cover art is stored beside it along
