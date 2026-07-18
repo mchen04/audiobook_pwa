@@ -1,7 +1,7 @@
 # Hark
 
 A private, installable, offline-first audiobook player for the chaptered MP3s
-that [Epub Listener](../Epub_Listener/README.md) produces. One account is one
+that Epub Listener (a sibling project) produces. One account is one
 solo library: import an MP3, keep its embedded chapters, and resume exactly
 where you left off on any device.
 
@@ -52,6 +52,10 @@ and no practical file-size limit beyond the device's free space, so a single
 | `BETTER_AUTH_SECRET` | Session signing secret.                                          |
 | `BETTER_AUTH_URL`    | The app's own origin, e.g. `http://localhost:3000`.              |
 
+Optional: `RESEND_API_KEY` and `MAIL_FROM` enable password-reset email in
+production (see `docs/operations.md`); in development, reset mails are written
+to `.data/mail/` instead.
+
 ## Commands
 
 | Command                              | What it does                                                                                                            |
@@ -60,7 +64,7 @@ and no practical file-size limit beyond the device's free space, so a single
 | `pnpm test`                          | Vitest suites (MP3 parsing contract, service-worker range parsing, progress conflict policy, offline queues, playback). |
 | `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                 |
 | `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                             |
-| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~100k rows onto an existing account for performance work.                                           |
+| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~60k rows onto an existing account for performance work.                                            |
 
 Browser-level verification uses `agent-browser` against the production build,
 exercising the core flows (register, import, play, offline, resume) across
