@@ -1,11 +1,19 @@
 import type { PlayerBook } from "@/domain/player";
 import { createCoverThumbnail } from "@/lib/cover-thumbnail";
+import { runBounded } from "@/lib/run-bounded";
 
 import { database, MEDIA_CACHE, offlineBookKey, withMediaWriteLock, type OfflineBook } from "./db";
-import { deleteJournaledCacheEntry, deleteJournaledMedia } from "./deletion-journal";
+import {
+  deleteJournaledCacheEntries,
+  deleteJournaledCacheEntry,
+  deleteJournaledMedia,
+} from "./deletion-journal";
 import { getOfflineBook } from "./library";
 
 const MEDIA_CHUNK_BYTES = 4 * 1024 * 1024;
+// Overlaps file reads with cache commits while keeping at most ~12MB of audio
+// in flight, well inside iOS WebKit's memory budget.
+const MEDIA_WRITE_CONCURRENCY = 3;
 
 /**
  * Stores an imported MP3 in bounded chunks. iOS WebKit has a much smaller
@@ -17,6 +25,7 @@ export async function storeLocalBookMedia(
   book: Omit<PlayerBook, "mediaUrl" | "coverUrl">,
   file: File,
   artwork: { data: Uint8Array; mimeType: string } | null,
+  onProgress?: (fraction: number) => void,
 ): Promise<OfflineBook> {
   const key = offlineBookKey(userId, book.id);
   const startedAt = Date.now();
@@ -25,7 +34,7 @@ export async function storeLocalBookMedia(
     if (pending?.completedAt && pending.completedAt >= startedAt) {
       throw new Error("This download was removed while it was being saved.");
     }
-    return storeLocalBookMediaUnlocked(userId, book, file, artwork);
+    return storeLocalBookMediaUnlocked(userId, book, file, artwork, onProgress);
   });
 }
 
@@ -34,6 +43,7 @@ async function storeLocalBookMediaUnlocked(
   book: Omit<PlayerBook, "mediaUrl" | "coverUrl">,
   file: File,
   artwork: { data: Uint8Array; mimeType: string } | null,
+  onProgress?: (fraction: number) => void,
 ): Promise<OfflineBook> {
   await ensureStorageCapacity(file.size);
   if (navigator.storage?.persist) await navigator.storage.persist().catch(() => false);
@@ -47,27 +57,52 @@ async function storeLocalBookMediaUnlocked(
     { length: chunkCount },
     (_, index) => `${offlineMediaUrl}/chunk/${index}`,
   );
-  const cleanupUrls: string[] = [];
+  const cleanupUrls: string[] = [...chunkUrls, offlineMediaUrl];
   let cache: Cache | undefined;
   try {
+    // Journal rows for every chunk land in one transaction before any bytes
+    // move: the journal-before-bytes invariant is unchanged, but a
+    // thousand-chunk audiobook costs one IndexedDB commit instead of one per
+    // chunk.
+    const journal = db.transaction("cacheEntries", "readwrite");
+    await Promise.all([
+      ...cleanupUrls.map((url) => journal.store.put({ url, userId, bookId: book.id })),
+      journal.done,
+    ]);
     cache = await caches.open(MEDIA_CACHE);
-    for (let index = 0; index < chunkCount; index += 1) {
-      const url = chunkUrls[index]!;
-      await db.put("cacheEntries", { url, userId, bookId: book.id });
-      cleanupUrls.push(url);
-      await cache.put(
-        url,
-        new Response(
-          file.slice(
-            index * MEDIA_CHUNK_BYTES,
-            Math.min(file.size, (index + 1) * MEDIA_CHUNK_BYTES),
-          ),
-          { headers: { "Content-Type": "application/octet-stream" } },
-        ),
-      );
-    }
-    await db.put("cacheEntries", { url: offlineMediaUrl, userId, bookId: book.id });
-    cleanupUrls.push(offlineMediaUrl);
+    let storedChunks = 0;
+    let writeFailed = false;
+    let writeFailure: unknown;
+    // Workers swallow their own failure and drain, so no chunk write is still
+    // in flight when cleanup below starts deleting what they wrote.
+    await runBounded(
+      Array.from({ length: chunkCount }, (_, index) => index),
+      MEDIA_WRITE_CONCURRENCY,
+      async (index) => {
+        if (writeFailed) return;
+        try {
+          await cache!.put(
+            chunkUrls[index]!,
+            new Response(
+              file.slice(
+                index * MEDIA_CHUNK_BYTES,
+                Math.min(file.size, (index + 1) * MEDIA_CHUNK_BYTES),
+              ),
+              { headers: { "Content-Type": "application/octet-stream" } },
+            ),
+          );
+        } catch (error) {
+          if (!writeFailed) {
+            writeFailed = true;
+            writeFailure = error;
+          }
+          return;
+        }
+        storedChunks += 1;
+        onProgress?.(storedChunks / (chunkCount + 1));
+      },
+    );
+    if (writeFailed) throw writeFailure;
     await cache.put(
       offlineMediaUrl,
       new Response(
@@ -85,11 +120,10 @@ async function storeLocalBookMediaUnlocked(
         },
       ),
     );
+    onProgress?.(1);
   } catch (error) {
     if (cache) {
-      await Promise.allSettled(
-        cleanupUrls.map((url) => deleteJournaledCacheEntry(db, cache!, url)),
-      );
+      await deleteJournaledCacheEntries(db, cache, cleanupUrls).catch(() => undefined);
     } else {
       await Promise.allSettled(cleanupUrls.map((url) => db.delete("cacheEntries", url)));
     }

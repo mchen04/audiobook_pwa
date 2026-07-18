@@ -12,6 +12,7 @@ import {
   type OfflineDb,
 } from "./db";
 import {
+  deleteJournaledCacheEntries,
   deleteJournaledCacheEntry,
   deleteJournaledMedia,
   removeOfflineBook,
@@ -125,11 +126,19 @@ export async function clearLocalDataForUser(userId: string): Promise<void> {
   const cacheCleanupFailed = cleanup.some((result) => result.status === "rejected");
   const db = await database();
   const orphaned = await db.getAllFromIndex("cacheEntries", "by-user", userId);
+  // Grouped per book so a chunked audiobook takes one lock and one batched
+  // delete instead of thousands of per-chunk lock acquisitions.
+  const orphansByBook = new Map<string, string[]>();
+  for (const entry of orphaned) {
+    const group = orphansByBook.get(entry.bookId);
+    if (group) group.push(entry.url);
+    else orphansByBook.set(entry.bookId, [entry.url]);
+  }
   const orphanCleanup = await Promise.allSettled(
-    orphaned.map((entry) =>
-      withMediaWriteLock(offlineBookKey(userId, entry.bookId), async () => {
+    [...orphansByBook.entries()].map(([bookId, urls]) =>
+      withMediaWriteLock(offlineBookKey(userId, bookId), async () => {
         const cache = await caches.open(MEDIA_CACHE);
-        await deleteJournaledCacheEntry(db, cache, entry.url);
+        await deleteJournaledCacheEntries(db, cache, urls);
       }),
     ),
   );
