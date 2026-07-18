@@ -75,8 +75,8 @@ phone, tablet, and desktop viewports.
 All application code lives in `src/` (~14k lines): `app/` (routes and API),
 `components/` (UI), `lib/` (offline sync, storage, playback history), `server/`
 (DB schema and queries), and `domain/` (pure logic). Migrations are in
-`drizzle/`, tests in `tests/`, and the hand-written service worker is
-`public/sw.js`.
+`drizzle/`, tests in `tests/`, and the service worker (maintained directly,
+not build-generated) is `public/sw.js`.
 
 Everything else on disk is generated and git-ignored — `.next/` (the Next.js
 build, ~500MB and hundreds of thousands of lines of compiled JS),

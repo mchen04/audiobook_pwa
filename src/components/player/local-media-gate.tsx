@@ -19,7 +19,7 @@ type GateState =
   | { phase: "ready"; mediaUrl: string; coverUrl: string | null; coverThumbUrl: string | null }
   | { phase: "missing" }
   | { phase: "unavailable" }
-  | { phase: "attaching" };
+  | { phase: "attaching"; percent: number | null };
 
 /**
  * Audio bytes live only on the user's devices. Before the player mounts, this
@@ -99,7 +99,7 @@ export function LocalMediaGate({
     if (!file) return;
 
     setError(null);
-    setState({ phase: "attaching" });
+    setState({ phase: "attaching", percent: null });
     try {
       if (byteSize && file.size !== byteSize) {
         throw new Error(
@@ -128,6 +128,7 @@ export function LocalMediaGate({
         },
         file,
         (await parseLocalMp3(file)).artwork,
+        (fraction) => setState({ phase: "attaching", percent: Math.round(fraction * 100) }),
       );
       setState({
         phase: "ready",
@@ -159,7 +160,12 @@ export function LocalMediaGate({
         <h1>{playerBook.title}</h1>
         <p className="gate-author">{playerBook.author}</p>
         {state.phase === "checking" && <p>Checking this device for the audio…</p>}
-        {state.phase === "attaching" && <p>Verifying and storing the MP3 on this device…</p>}
+        {state.phase === "attaching" && (
+          <p>
+            Verifying and storing the MP3 on this device…
+            {state.percent !== null ? ` ${state.percent}%` : ""}
+          </p>
+        )}
         {state.phase === "unavailable" && (
           <>
             <p>

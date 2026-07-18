@@ -50,6 +50,7 @@ describe("local MP3 import", () => {
       }),
       file,
       null,
+      expect.any(Function),
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -82,7 +83,13 @@ describe("local MP3 import", () => {
 
     await importLocalMp3("mobile-user", file, vi.fn());
 
-    expect(storeLocalBookMedia).toHaveBeenCalledWith("mobile-user", canonical, file, null);
+    expect(storeLocalBookMedia).toHaveBeenCalledWith(
+      "mobile-user",
+      canonical,
+      file,
+      null,
+      expect.any(Function),
+    );
   });
 
   it("keeps recoverable metadata when device storage fails", async () => {

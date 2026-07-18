@@ -115,7 +115,7 @@ export async function importLocalMp3(
     }
   }
   // Copying a multi-gigabyte file into device storage is the long tail of the
-  // import; the stage label keeps the wait legible while the percent holds.
+  // import; the percent tracks stored chunks so the wait visibly moves.
   onProgress(70, "Saving to this device");
 
   const chapters: PlayerChapter[] = parsed.chapters.map((chapter) => ({
@@ -138,6 +138,8 @@ export async function importLocalMp3(
       },
       file,
       parsed.artwork ? { data: parsed.artwork.data, mimeType: parsed.artwork.mimeType } : null,
+      (fraction) =>
+        onProgress(Math.min(99, 70 + Math.round(fraction * 29)), "Saving to this device"),
     );
   } catch (error) {
     // Registration is already visible to other tabs and devices. Keep the
