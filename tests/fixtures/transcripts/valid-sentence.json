@@ -1,0 +1,29 @@
+{
+  "format": "epub-listener-transcript",
+  "version": 1,
+  "producer": "epub_listener/fixture",
+  "engine": "kokoro-mlx",
+  "generationKey": "tts_backend=kokoro-mlx-gain+2.7db\nvoice=af_heart\nspeed=+0%",
+  "language": "en",
+  "chapters": [
+    {
+      "index": 0,
+      "title": "Chapter 1",
+      "granularity": "sentence",
+      "sentences": [
+        {
+          "text": "The first chunk of narration.",
+          "start": 0,
+          "end": 2100,
+          "words": []
+        },
+        {
+          "text": "A second chunk follows it.",
+          "start": 2100,
+          "end": 4400,
+          "words": []
+        }
+      ]
+    }
+  ]
+}
