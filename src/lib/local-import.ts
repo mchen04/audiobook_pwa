@@ -1,10 +1,20 @@
 import { interpretMp3Metadata, InvalidMp3Error, type ParsedMp3 } from "@/domain/mp3";
 import type { PlayerBook, PlayerChapter } from "@/domain/player";
+import type { BookTranscript } from "@/domain/transcript";
 import { fingerprintMedia } from "@/lib/media-fingerprint";
 import { storeLocalBookMedia } from "@/lib/offline/media-store";
+import { storeBookTranscript } from "@/lib/offline/transcript-store";
+import { extractTranscript } from "@/lib/transcript-import";
+
+export type ParsedLocalMp3 = ParsedMp3 & {
+  /** Read-along cues embedded by the generator, if present and valid. */
+  transcript: BookTranscript | null;
+  /** Why a present transcript was dropped; audio import is unaffected. */
+  transcriptDiagnostic: string | null;
+};
 
 /** Parses an MP3 entirely in the browser; the bytes never leave the device. */
-export async function parseLocalMp3(file: File): Promise<ParsedMp3> {
+export async function parseLocalMp3(file: File): Promise<ParsedLocalMp3> {
   const { parseBlob } = await import("music-metadata");
   let metadata;
   try {
@@ -22,7 +32,16 @@ export async function parseLocalMp3(file: File): Promise<ParsedMp3> {
     parsedDuration && Number.isFinite(parsedDuration) && parsedDuration > 0
       ? undefined
       : await probeAudioDurationMs(file);
-  return interpretMp3Metadata(metadata, fallbackTitle, fallbackDurationMs);
+  const parsed = interpretMp3Metadata(metadata, fallbackTitle, fallbackDurationMs);
+  let transcript: BookTranscript | null = null;
+  let transcriptDiagnostic: string | null = null;
+  try {
+    transcript = await extractTranscript(metadata, parsed.durationMs);
+  } catch (error) {
+    transcriptDiagnostic = error instanceof Error ? error.message : "Transcript rejected.";
+    console.warn(`Read-along transcript dropped for "${file.name}": ${transcriptDiagnostic}`);
+  }
+  return { ...parsed, transcript, transcriptDiagnostic };
 }
 
 /**
@@ -147,6 +166,15 @@ export async function importLocalMp3(
     // have attached successfully; choosing the same MP3 repairs local media.
     const reason = error instanceof Error ? error.message : "The audiobook could not be saved.";
     throw new Error(`${reason} Choose the same MP3 again to finish saving it on this device.`);
+  }
+  if (parsed.transcript) {
+    // Device-only: cues live beside the audio and never reach the server. A
+    // failed cue write is not worth failing an import the audio survived.
+    try {
+      await storeBookTranscript(userId, bookId, parsed.transcript);
+    } catch {
+      console.warn("Read-along cues could not be saved; the book plays without them.");
+    }
   }
   onProgress(100, "Finishing");
 }

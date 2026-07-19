@@ -1,6 +1,7 @@
 import { openDB, type DBSchema } from "idb";
 
 import type { PlayerBook } from "@/domain/player";
+import type { TranscriptSentence } from "@/domain/transcript";
 import { withKeyedLock } from "@/lib/keyed-lock";
 
 const DATABASE_NAME = "chapterline-offline-v1";
@@ -25,10 +26,29 @@ export class OfflineStorageUnavailableError extends Error {
   }
 }
 
+/**
+ * One chapter's read-along cues, keyed `userId:bookId:chapterIndex` (index
+ * zero-padded so key-range scans stay ordered). Stored per chapter so the
+ * player only ever materializes the current chapter's cue list.
+ */
+export type StoredChapterTranscript = {
+  key: string;
+  userId: string;
+  bookId: string;
+  chapterIndex: number;
+  granularity: "word" | "sentence";
+  sentences: TranscriptSentence[];
+};
+
 interface OfflineDatabase extends DBSchema {
   downloads: {
     key: string;
     value: OfflineBook;
+    indexes: { "by-user": string };
+  };
+  transcripts: {
+    key: string;
+    value: StoredChapterTranscript;
     indexes: { "by-user": string };
   };
   deletions: {
@@ -54,7 +74,7 @@ interface OfflineDatabase extends DBSchema {
 export type OfflineDb = Awaited<ReturnType<typeof database>>;
 
 export function database() {
-  return openDB<OfflineDatabase>(DATABASE_NAME, 5, {
+  return openDB<OfflineDatabase>(DATABASE_NAME, 6, {
     upgrade(db, oldVersion, _newVersion, transaction) {
       if (oldVersion < 1) {
         const downloads = db.createObjectStore("downloads", { keyPath: "key" });
@@ -67,6 +87,10 @@ export function database() {
       if (oldVersion < 4) {
         const entries = db.createObjectStore("cacheEntries", { keyPath: "url" });
         entries.createIndex("by-user", "userId");
+      }
+      if (oldVersion < 6) {
+        const transcripts = db.createObjectStore("transcripts", { keyPath: "key" });
+        transcripts.createIndex("by-user", "userId");
       }
       if (oldVersion >= 1 && oldVersion < 5) {
         const downloads = transaction.objectStore("downloads");

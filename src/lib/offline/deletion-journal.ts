@@ -8,6 +8,7 @@ import {
   type OfflineBook,
   type OfflineDb,
 } from "./db";
+import { deleteBookTranscript } from "./transcript-store";
 
 const CACHE_DELETE_CONCURRENCY = 8;
 
@@ -69,6 +70,11 @@ async function completeOfflineDeletion(db: OfflineDb, key: string): Promise<void
     await deleteJournaledMedia(db, cache, mediaUrl);
     if (coverUrl) await deleteJournaledCacheEntry(db, cache, coverUrl);
     if (coverThumbUrl) await deleteJournaledCacheEntry(db, cache, coverThumbUrl);
+  }
+  const bookId = pending?.bookId || existing?.book.id;
+  const userId = pending?.userId || existing?.userId;
+  if (bookId && userId) {
+    await deleteBookTranscript(db, userId, bookId).catch(() => undefined);
   }
   await db.delete("downloads", key);
   if (pending) {
