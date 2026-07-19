@@ -1122,3 +1122,17 @@
 .player-topbar .icon-text-button.is-active {
   color: var(--accent);
 }
+
+/* Phone landscape: the pane fills the row layout's height budget. */
+@media (max-height: 480px) {
+  .transcript-stage {
+    width: min(70vw, 34rem);
+  }
+
+  .transcript-pane {
+    /* Match the landscape cover's height budget so the hero row never
+       spills over the topbar or scrubber. */
+    height: clamp(5.5rem, 30dvh, 8rem);
+    padding: 0.55rem 0.65rem;
+  }
+}
