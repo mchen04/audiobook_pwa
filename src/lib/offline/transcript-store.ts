@@ -74,6 +74,18 @@ export async function deleteBookTranscript(
   await Promise.all([...keys.map((key) => transaction.store.delete(key)), transaction.done]);
 }
 
+/** Book ids with any stored cues — one indexed key scan for library badges. */
+export async function listBookIdsWithTranscripts(userId: string): Promise<Set<string>> {
+  const db = await database();
+  const keys = await db.getAllKeysFromIndex("transcripts", "by-user", userId);
+  const bookIds = new Set<string>();
+  const prefix = `${userId}:`;
+  for (const key of keys) {
+    bookIds.add(key.slice(prefix.length, key.lastIndexOf(":")));
+  }
+  return bookIds;
+}
+
 export async function deleteAllTranscriptsForUser(userId: string): Promise<void> {
   const db = await database();
   const keys = await db.getAllKeysFromIndex("transcripts", "by-user", userId);

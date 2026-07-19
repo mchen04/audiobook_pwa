@@ -1018,3 +1018,107 @@
   line-height: 1.5;
   padding: 0.6rem 0.7rem 0.75rem;
 }
+
+/* ---- Read-along text view ---- */
+
+.transcript-stage {
+  position: relative;
+  width: min(92vw, 36rem);
+}
+
+.transcript-pane {
+  height: min(calc(52vw / 0.78), 21.8rem, 34dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 0.9rem 1rem;
+}
+
+.transcript-pane-empty {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.transcript-sentences {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.transcript-sentence {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 0.55rem;
+  padding: 0.28rem 0.5rem;
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-muted);
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.transcript-sentence:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.transcript-sentence.is-active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.transcript-word {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-radius: 0.3rem;
+  padding: 0.02rem 0.16rem;
+  margin: -0.02rem -0.02rem;
+}
+
+.transcript-close {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  display: grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.transcript-close:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 25%, var(--border));
+}
+
+.player-cover-flip {
+  display: grid;
+  justify-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: var(--radius-panel);
+  cursor: pointer;
+}
+
+.player-topbar .icon-text-button.is-active {
+  color: var(--accent);
+}

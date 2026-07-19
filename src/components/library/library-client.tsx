@@ -6,6 +6,7 @@ import {
   Play,
   Rows,
   SquaresFour,
+  TextAlignLeft,
   UploadSimple,
   WarningCircle,
   X,
@@ -18,6 +19,7 @@ import type { LibraryBook } from "@/domain/library";
 import { formatDurationRounded } from "@/lib/format-time";
 import { importLocalMp3 } from "@/lib/local-import";
 import { listOfflineCoverUrls } from "@/lib/offline/library";
+import { listBookIdsWithTranscripts } from "@/lib/offline/transcript-store";
 import type { LibraryPage } from "@/lib/wire";
 
 import { type SortOrder, type StatusFilter } from "./library-view";
@@ -53,6 +55,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
   const [upload, setUpload] = useState<UploadState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [localCovers, setLocalCovers] = useState<Record<string, string>>({});
+  const [readAlongIds, setReadAlongIds] = useState<Set<string>>(new Set());
   const [coverRefresh, setCoverRefresh] = useState(0);
   const { page, reload, loadMore, loading } = useLibraryBooks(initialPage, {
     query,
@@ -69,6 +72,11 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
     void listOfflineCoverUrls(userId)
       .then((covers) => {
         if (active) setLocalCovers(covers);
+      })
+      .catch(() => undefined);
+    void listBookIdsWithTranscripts(userId)
+      .then((ids) => {
+        if (active) setReadAlongIds(ids);
       })
       .catch(() => undefined);
     return () => {
@@ -279,6 +287,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
                   key={book.id}
                   compact={view === "list"}
                   coverUrl={localCovers[book.id]}
+                  hasReadAlong={readAlongIds.has(book.id)}
                 />
               ))}
             </div>
@@ -387,10 +396,12 @@ const BookItem = memo(function BookItem({
   book,
   compact,
   coverUrl,
+  hasReadAlong,
 }: {
   book: LibraryBook;
   compact: boolean;
   coverUrl?: string;
+  hasReadAlong?: boolean;
 }) {
   const percent = progressPercent(book);
 
@@ -410,6 +421,12 @@ const BookItem = memo(function BookItem({
           <p className="book-diagnostic" title={book.chapterDiagnostic}>
             <WarningCircle size={15} aria-hidden="true" />
             One chapter
+          </p>
+        )}
+        {hasReadAlong && (
+          <p className="book-readalong">
+            <TextAlignLeft size={13} aria-hidden="true" />
+            Read-along
           </p>
         )}
         {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}
