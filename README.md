@@ -9,7 +9,9 @@ where you left off on any device.
 stored in this device's own storage; the server only ever sees metadata —
 titles, chapters, progress, and playback history. There is no upload, no object storage,
 and no practical file-size limit beyond the device's free space, so a single
-600-hour audiobook imports the same way a two-hour one does.
+600-hour audiobook imports the same way a two-hour one does. If the MP3 carries
+an embedded read-along transcript, its text is book content too, so it is stored
+on the device alongside the audio and never included in any server request.
 
 ## What it does
 
@@ -21,6 +23,14 @@ and no practical file-size limit beyond the device's free space, so a single
   intervals, 0.5x–3x speed, sleep timer (presets, custom minutes, end of
   chapter), a 50-action playback history, finished/restart state, and
   lock-screen Media Session controls where the browser supports them.
+- **Read along**: books whose MP3 carries an Epub Listener transcript get a
+  "Text" toggle in the player and a "Read-along" badge in the library. Tapping
+  it swaps the cover for the book text, where the narrated sentence highlights
+  and auto-scrolls and the exact spoken word is marked karaoke-style; tap a
+  sentence to jump there. It works fully offline. Books without a transcript
+  look and behave exactly as before. (Transcript, if present, is validated and
+  size-capped in the browser; a malformed one is dropped and the audio still
+  imports.)
 - **Resume anywhere**: positions, playback history, and library organization sync
   through the server with per-device monotonic sequences and deterministic
   conflict rules. On a device that doesn't hold the audio yet, the player asks

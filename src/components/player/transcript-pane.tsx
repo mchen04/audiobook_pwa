@@ -52,6 +52,10 @@ export function TranscriptPane({
   }, [sentences]);
 
   useEffect(() => {
+    // The scroll container only exists once cues render (the empty/pending
+    // state is a different element), and the pane remounts per chapter, so
+    // this must re-run when sentences arrive — not just at mount — or the
+    // manual-scroll grace never attaches after a chapter change.
     const container = scrollRef.current;
     if (!container) return;
     const noteManualScroll = () => {
@@ -63,7 +67,7 @@ export function TranscriptPane({
       container.removeEventListener("wheel", noteManualScroll);
       container.removeEventListener("touchmove", noteManualScroll);
     };
-  }, []);
+  }, [sentences]);
 
   useEffect(() => {
     if (activeIndex < 0 || Date.now() < manualUntilRef.current) return;

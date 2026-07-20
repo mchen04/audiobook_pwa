@@ -187,6 +187,46 @@ describe("TranscriptPane", () => {
     );
     expect(screen.getByText(/No text for Ch Nine/)).toBeInTheDocument();
   });
+
+  it("attaches manual-scroll grace after mounting empty then filling (chapter swap)", () => {
+    // The container only exists after cues load; the pane also mounts empty on
+    // every chapter change. A manual scroll must still pause auto-scroll.
+    const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+    clock.ms = 400;
+    const { rerender, container } = render(
+      <TranscriptPane
+        sentences={[]}
+        chapterStartMs={0}
+        chapterTitle="Ch"
+        pending
+        onSeek={vi.fn()}
+      />,
+    );
+    rerender(
+      <TranscriptPane
+        sentences={wordSentences}
+        chapterStartMs={0}
+        chapterTitle="Ch"
+        onSeek={vi.fn()}
+      />,
+    );
+    scrollIntoView.mockClear();
+
+    // Reader scrolls by hand -> grace window opens.
+    fireEvent.wheel(container.querySelector(".transcript-pane")!);
+    // Narration advances to the next sentence.
+    clock.ms = 2500;
+    rerender(
+      <TranscriptPane
+        sentences={wordSentences}
+        chapterStartMs={0}
+        chapterTitle="Ch"
+        onSeek={vi.fn()}
+      />,
+    );
+    // Auto-scroll must stay paused: no scrollIntoView during the grace window.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
 });
 
 describe("CoverNowReading", () => {
