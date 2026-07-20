@@ -411,6 +411,12 @@ const BookItem = memo(function BookItem({
           without adding a duplicate tab stop. */}
       <Link href={`/books/${book.id}`} className="book-cover" tabIndex={-1} aria-hidden="true">
         <BookCover book={book} coverUrl={coverUrl} />
+        {hasReadAlong && (
+          <span className="book-readalong">
+            <TextAlignLeft size={12} aria-hidden="true" />
+            Read-along
+          </span>
+        )}
       </Link>
       <div className="book-copy">
         <Link href={`/books/${book.id}`} className="book-title">
@@ -421,12 +427,6 @@ const BookItem = memo(function BookItem({
           <p className="book-diagnostic" title={book.chapterDiagnostic}>
             <WarningCircle size={15} aria-hidden="true" />
             One chapter
-          </p>
-        )}
-        {hasReadAlong && (
-          <p className="book-readalong">
-            <TextAlignLeft size={13} aria-hidden="true" />
-            Read-along
           </p>
         )}
         {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}

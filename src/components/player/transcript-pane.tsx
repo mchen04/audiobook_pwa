@@ -38,6 +38,19 @@ export function TranscriptPane({
   const activeRowRef = useRef<HTMLButtonElement>(null);
   const manualUntilRef = useRef(0);
 
+  // The bottom fade is a scroll affordance; showing it on a fully visible
+  // list would read as accidental truncation instead.
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const update = () =>
+      container.classList.toggle("is-scrollable", container.scrollHeight > container.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [sentences]);
+
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
@@ -92,6 +105,27 @@ export function TranscriptPane({
   );
 }
 
+/** A single dimmed line under the cover echoing the sentence being narrated. */
+export function CoverNowReading({
+  sentences,
+  chapterStartMs,
+}: {
+  sentences: TranscriptSentence[];
+  chapterStartMs: number;
+}) {
+  const text = usePlaybackTimeDerived((timeMs) => {
+    const index = activeCueIndex(sentences, timeMs - chapterStartMs);
+    return index >= 0 ? sentences[index]!.text : "";
+  });
+  // Marked aria-hidden: the text view is the accessible read-along surface;
+  // this cover echo would otherwise announce a new sentence every few seconds.
+  return text ? (
+    <p className="player-now-reading" aria-hidden="true">
+      {text}
+    </p>
+  ) : null;
+}
+
 const SentenceRow = memo(function SentenceRow({
   sentence,
   chapterStartMs,
@@ -114,11 +148,13 @@ const SentenceRow = memo(function SentenceRow({
         aria-current={isActive || undefined}
         onClick={() => onSelect(sentence)}
       >
-        {isActive && sentence.words.length > 0 ? (
-          <ActiveSentence sentence={sentence} chapterStartMs={chapterStartMs} />
-        ) : (
-          sentence.text
-        )}
+        <span className="transcript-sentence-text">
+          {isActive && sentence.words.length > 0 ? (
+            <ActiveSentence sentence={sentence} chapterStartMs={chapterStartMs} />
+          ) : (
+            sentence.text
+          )}
+        </span>
       </button>
     </li>
   );

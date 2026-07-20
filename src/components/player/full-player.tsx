@@ -34,7 +34,7 @@ import {
   usePlaybackDerived,
   usePlaybackTime,
 } from "./playback-provider";
-import { TranscriptPane } from "./transcript-pane";
+import { CoverNowReading, TranscriptPane } from "./transcript-pane";
 import type { SleepMode } from "./use-sleep-timer";
 
 // The details dialog is a heavy edit form most sessions never open; load it
@@ -98,8 +98,10 @@ export function FullPlayer({
   }, [playback.userId, playerBook.id]);
 
   const chapterIndexForCues = currentChapter?.position ?? -1;
+  // Cues load for any transcript-bearing book, not just while the text view is
+  // open, so the cover can echo the narrated line and the pane opens instantly.
   useEffect(() => {
-    if (!showText || chapterIndexForCues < 0) return;
+    if (!hasTranscript || chapterIndexForCues < 0) return;
     let active = true;
     const bookId = playerBook.id;
     void getChapterTranscript(playback.userId, bookId, chapterIndexForCues)
@@ -118,7 +120,7 @@ export function FullPlayer({
     return () => {
       active = false;
     };
-  }, [showText, chapterIndexForCues, playback.userId, playerBook.id]);
+  }, [hasTranscript, chapterIndexForCues, playback.userId, playerBook.id]);
 
   const cuesReady =
     chapterCues?.bookId === playerBook.id && chapterCues.chapterIndex === chapterIndexForCues;
@@ -186,7 +188,7 @@ export function FullPlayer({
           aria-labelledby="book-title"
           inert={sheetView ? true : undefined}
         >
-          <div className="player-hero">
+          <div className={`player-hero ${showText ? "has-text" : ""}`}>
             {showText ? (
               <div className="transcript-stage">
                 <TranscriptPane
@@ -216,6 +218,12 @@ export function FullPlayer({
             <div className="player-book-copy">
               <h1 id="book-title">{playerBook.title}</h1>
               <p>{playerBook.author}</p>
+              {!showText && hasTranscript && cuesReady && (
+                <CoverNowReading
+                  sentences={chapterCues.sentences}
+                  chapterStartMs={currentChapter?.startMs ?? 0}
+                />
+              )}
             </div>
           </div>
 
@@ -351,7 +359,7 @@ function CoverArt({ playerBook, onFlip }: { playerBook: PlayerBook; onFlip?: () 
     />
   ) : (
     <div className="player-cover" aria-hidden="true">
-      <span>{playerBook.title.slice(0, 2).toUpperCase()}</span>
+      <span>{titleMonogram(playerBook.title)}</span>
       <small>MP3</small>
     </div>
   );
@@ -362,6 +370,18 @@ function CoverArt({ playerBook, onFlip }: { playerBook: PlayerBook; onFlip?: () 
     <button type="button" className="player-cover-flip" aria-label="Show text" onClick={onFlip}>
       {art}
     </button>
+  );
+}
+
+/** Word-initial monogram, matching the library's cover placeholders. */
+function titleMonogram(title: string): string {
+  return (
+    title
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join("")
+      .toUpperCase() || "AB"
   );
 }
 

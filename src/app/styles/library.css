@@ -606,18 +606,24 @@
   font-size: var(--text-xs);
 }
 
-/* Device-local read-along availability. */
-.book-readalong {
+/* Device-local read-along availability: overlaid on the cover so the badge
+   never shifts card baselines out of alignment. */
+.book-cover > .book-readalong {
+  position: absolute;
+  top: 0.55rem;
+  left: 0.55rem;
+  max-width: none;
   display: inline-flex;
   align-items: center;
-  gap: 0.28rem;
-  margin: 0.15rem 0 0;
-  width: fit-content;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  gap: 0.26rem;
   border-radius: var(--radius-pill);
-  padding: 0.08rem 0.5rem;
+  padding: 0.14rem 0.55rem;
   font-size: var(--text-xs);
   font-weight: 640;
-  color: color-mix(in srgb, var(--accent) 82%, var(--text));
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  line-height: 1.1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  color: var(--accent-contrast);
+  /* Fully opaque so the pill renders identically over every cover gradient. */
+  background: var(--accent);
 }
