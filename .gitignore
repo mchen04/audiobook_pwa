@@ -10,6 +10,9 @@
 /uploads/
 *.mp3
 !tests/fixtures/Downloads/Chapterline-iPhone-Test.mp3
+# Tiny (2-chapter) generated MP3 carrying an embedded read-along transcript,
+# used by the import/privacy tests to exercise the real GEOB parse path.
+!tests/fixtures/transcripts/tiny-book.mp3
 
 # environment and secrets
 .env
