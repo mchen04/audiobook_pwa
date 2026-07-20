@@ -18,6 +18,7 @@ import {
   removeOfflineBook,
   retryPendingOfflineDeletions,
 } from "./deletion-journal";
+import { deleteAllTranscriptsForUser, deleteBookTranscript } from "./transcript-store";
 
 export async function listOfflineBooks(userId: string): Promise<OfflineBook[]> {
   await retryPendingOfflineDeletions(userId);
@@ -71,6 +72,7 @@ async function reconcileOfflineRecord(db: OfflineDb, cache: Cache, record: Offli
     if (url) await deleteJournaledCacheEntry(db, cache, url).catch(() => false);
   }
   await deleteJournaledMedia(db, cache, record.offlineMediaUrl).catch(() => false);
+  await deleteBookTranscript(db, record.userId, record.book.id).catch(() => undefined);
   await db.delete("downloads", record.key);
   return undefined;
 }
@@ -150,6 +152,7 @@ export async function clearLocalDataForUser(userId: string): Promise<void> {
   }
   keysToRemove.forEach((key) => localStorage.removeItem(key));
 
+  await deleteAllTranscriptsForUser(userId).catch(() => undefined);
   await clearQueuedMutationsForUser(userId);
   const { clearPlaybackHistoryForUser } = await import("@/lib/playback-history");
   await clearPlaybackHistoryForUser(userId);

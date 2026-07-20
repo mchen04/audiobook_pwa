@@ -56,8 +56,15 @@ Neon Postgres
   metadata only, including a versioned content fingerprint for duplicate
   detection and cross-device file verification. New imports use whole-file
   SHA-256; legacy sample fingerprints remain readable for existing books.
-- Book deletion removes rows server-side and the local bytes client-side;
-  account deletion cascades every row and wipes this device's local data.
+- An embedded read-along transcript (a GEOB frame Epub Listener writes; format
+  in that repo's `docs/transcript-format.md`) is book content, so it is treated
+  like the audio: extracted, validated, and size-capped in the browser, stored
+  per chapter in IndexedDB on the device, and never placed in any server
+  request. A missing, malformed, or oversized transcript is dropped and the
+  audio import is unaffected.
+- Book deletion removes rows server-side and the local bytes client-side
+  (including its transcript cues); account deletion cascades every row and
+  wipes this device's local data.
 - Progress uses device/session IDs and monotonic per-device sequence numbers. The server rejects duplicate/stale events while allowing an explicit user rewind.
 
 ## Media flow

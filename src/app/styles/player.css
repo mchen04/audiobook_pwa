@@ -1018,3 +1018,232 @@
   line-height: 1.5;
   padding: 0.6rem 0.7rem 0.75rem;
 }
+
+/* ---- Read-along text view ---- */
+
+.transcript-stage {
+  position: relative;
+  width: min(92vw, 36rem);
+}
+
+.transcript-pane {
+  min-height: 6.5rem;
+  max-height: min(28rem, 42dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  padding: 0.9rem 1rem;
+}
+
+/* Fade both edges when the transcript scrolls so it reads as a reading window
+   rather than accidentally clipped text; the extra padding keeps the first and
+   last lines clear of the fade when parked at an end. */
+.transcript-pane.is-scrollable {
+  padding-top: 1.2rem;
+  padding-bottom: 1.2rem;
+  mask-image: linear-gradient(transparent 0, #000 1rem, #000 calc(100% - 1rem), transparent);
+}
+
+.transcript-pane-empty {
+  display: grid;
+  min-height: 10rem;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.transcript-sentences {
+  margin: 0 auto;
+  padding: 0;
+  max-width: 34rem;
+  list-style: none;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.transcript-sentence {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 0.55rem;
+  padding: 0.28rem 0.5rem;
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-muted);
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.transcript-sentence:hover {
+  color: var(--text);
+}
+
+.transcript-sentence-text {
+  border-radius: 0.4rem;
+  padding: 0.1rem 0.3rem;
+  margin: -0.1rem -0.3rem;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background 140ms ease;
+}
+
+.transcript-sentence.is-active {
+  color: var(--text);
+}
+
+.transcript-sentence.is-active .transcript-sentence-text {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.transcript-word {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-radius: 0.3rem;
+  padding: 0.05rem 0.14rem;
+  /* No negative margin: the word-spacing around the pill stays even. */
+  margin: 0;
+}
+
+.transcript-close {
+  position: absolute;
+  /* Straddles the pane's top edge over the top padding, inset from the right
+     so it clears the viewport edge and never occludes a line of text. */
+  top: -0.55rem;
+  right: 0.4rem;
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  border: 1px solid color-mix(in srgb, var(--text) 40%, var(--border));
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+  transition:
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.transcript-close:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 25%, var(--border));
+}
+
+.player-cover-flip {
+  display: grid;
+  justify-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: var(--radius-panel);
+  cursor: pointer;
+}
+
+.player-topbar .icon-text-button.is-active {
+  color: var(--accent);
+}
+
+/* While reading, the transcript is the hero; the title recedes. */
+.player-hero.has-text .player-book-copy h1 {
+  font-size: 1.05rem;
+  color: var(--text-muted);
+}
+
+.player-hero.has-text .player-book-copy p {
+  font-size: 0.85rem;
+}
+
+/* A single line under the cover echoing the sentence being narrated, so
+   read-along context is present even before flipping to the text view. The
+   compound selector outranks `.player-book-copy p`, which would otherwise
+   force the author's muted color and size onto this line. */
+.player-book-copy .player-now-reading {
+  margin: 0.5rem auto 0;
+  max-width: 30rem;
+  /* A distinct medium gray: clearly darker than the muted author line (so the
+     live position never reads as static metadata) yet subordinate to the bold
+     title, and comfortably above AA in the light theme. */
+  color: color-mix(in srgb, var(--text) 62%, var(--text-muted));
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-align: center;
+  text-wrap: balance;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Phone landscape: the pane fills the row layout's height budget. */
+@media (max-height: 480px) {
+  /* While reading, the topbar already names the chapter and the book title
+     is one flip away: give the whole hero row to the text. */
+  .player-hero.has-text .player-book-copy {
+    display: none;
+  }
+
+  .transcript-stage {
+    width: min(72vw, 36rem);
+    margin-top: 0.75rem;
+  }
+
+  .transcript-close {
+    /* No room above the pane in landscape (the topbar sits right there), so
+       the control lives inside the reserved top-right gutter, nudged down so
+       the full 44px target clears the topbar's Text/Details pills. */
+    top: 0.75rem;
+    right: 0.35rem;
+  }
+
+  .transcript-pane {
+    /* Match the landscape cover's height budget so the hero row never
+       spills over the topbar or scrubber. */
+    min-height: 5rem;
+    max-height: clamp(6rem, 33dvh, 9.5rem);
+    padding: 0.55rem 3rem 0.55rem 0.75rem;
+  }
+
+  .transcript-pane.is-scrollable {
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .player-book-copy .player-now-reading {
+    margin-top: 0.3rem;
+    -webkit-line-clamp: 1;
+  }
+}
+
+/* Wide screens: give the reading surface real proportions. */
+@media (min-width: 1100px) and (min-height: 700px) {
+  .transcript-stage {
+    width: min(72vw, 52rem);
+  }
+
+  .transcript-pane {
+    /* Same vertical budget as the cover so the transport never leaves the fold. */
+    max-height: 34dvh;
+    padding: 1.4rem 1.7rem;
+  }
+
+  /* A row-height fade so the scroll affordance is perceptible on the wide,
+     tall desktop pane (the default 1rem fade is thinner than a line here). */
+  .transcript-pane.is-scrollable {
+    padding-top: 1.7rem;
+    padding-bottom: 1.7rem;
+    mask-image: linear-gradient(transparent 0, #000 1.6rem, #000 calc(100% - 1.6rem), transparent);
+  }
+
+  .transcript-sentence {
+    font-size: 1.06rem;
+    line-height: 1.66;
+    padding: 0.36rem 0.7rem;
+  }
+}

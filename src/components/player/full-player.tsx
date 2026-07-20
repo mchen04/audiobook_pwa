@@ -12,6 +12,8 @@ import {
   ListBullets,
   Pause,
   Play,
+  TextAlignLeft,
+  X,
 } from "@phosphor-icons/react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -21,7 +23,9 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
+import type { TranscriptSentence } from "@/domain/transcript";
 import { formatClock } from "@/lib/format-time";
+import { getChapterTranscript, getTranscriptChapterIndexes } from "@/lib/offline/transcript-store";
 
 import { PlayerSheet, type PlayerSheetView } from "./chapter-sheet";
 import {
@@ -30,6 +34,7 @@ import {
   usePlaybackDerived,
   usePlaybackTime,
 } from "./playback-provider";
+import { CoverNowReading, TranscriptPane } from "./transcript-pane";
 import type { SleepMode } from "./use-sleep-timer";
 
 // The details dialog is a heavy edit form most sessions never open; load it
@@ -66,6 +71,59 @@ export function FullPlayer({
   const [sheetView, setSheetView] = useState<PlayerSheetView | null>(null);
   const mountedEndedAtRef = useRef(playback.lastEndedAt);
   const autoplayConsumedForRef = useRef<string | null>(null);
+  // All read-along state is keyed by book (and chapter) instead of being
+  // reset in effects: a stale entry for another book simply never matches.
+  const [transcriptBookId, setTranscriptBookId] = useState<string | null>(null);
+  const [textViewBookId, setTextViewBookId] = useState<string | null>(null);
+  const [chapterCues, setChapterCues] = useState<{
+    bookId: string;
+    chapterIndex: number;
+    sentences: TranscriptSentence[];
+  } | null>(null);
+  const hasTranscript = transcriptBookId === playerBook.id;
+  const showText = hasTranscript && textViewBookId === playerBook.id;
+
+  // Read-along cues live only in this device's storage; one indexed lookup
+  // decides whether the Text control exists at all.
+  useEffect(() => {
+    let active = true;
+    void getTranscriptChapterIndexes(playback.userId, playerBook.id)
+      .then((indexes) => {
+        if (active && indexes.length > 0) setTranscriptBookId(playerBook.id);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [playback.userId, playerBook.id]);
+
+  const chapterIndexForCues = currentChapter?.position ?? -1;
+  // Cues load for any transcript-bearing book, not just while the text view is
+  // open, so the cover can echo the narrated line and the pane opens instantly.
+  useEffect(() => {
+    if (!hasTranscript || chapterIndexForCues < 0) return;
+    let active = true;
+    const bookId = playerBook.id;
+    void getChapterTranscript(playback.userId, bookId, chapterIndexForCues)
+      .then((record) => {
+        if (active) {
+          setChapterCues({
+            bookId,
+            chapterIndex: chapterIndexForCues,
+            sentences: record?.sentences ?? [],
+          });
+        }
+      })
+      .catch(() => {
+        if (active) setChapterCues({ bookId, chapterIndex: chapterIndexForCues, sentences: [] });
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasTranscript, chapterIndexForCues, playback.userId, playerBook.id]);
+
+  const cuesReady =
+    chapterCues?.bookId === playerBook.id && chapterCues.chapterIndex === chapterIndexForCues;
 
   useEffect(() => {
     const shouldAutoplay = autoplay && autoplayConsumedForRef.current !== playerBook.id;
@@ -104,6 +162,17 @@ export function FullPlayer({
         </Link>
         <span>{currentChapter?.title || "Full audiobook"}</span>
         <div className="player-topbar-actions">
+          {hasTranscript && (
+            <button
+              type="button"
+              className={`icon-text-button ${showText ? "is-active" : ""}`}
+              aria-pressed={showText}
+              onClick={() => setTextViewBookId(showText ? null : playerBook.id)}
+            >
+              <TextAlignLeft size={19} aria-hidden="true" />
+              <span>Text</span>
+            </button>
+          )}
           {details && !offlineMode && (
             <button type="button" className="icon-text-button" onClick={() => setDetailsOpen(true)}>
               <DotsThreeCircle size={19} aria-hidden="true" />
@@ -119,27 +188,42 @@ export function FullPlayer({
           aria-labelledby="book-title"
           inert={sheetView ? true : undefined}
         >
-          <div className="player-hero">
-            {playerBook.coverUrl ? (
-              <Image
-                className="player-cover"
-                src={playerBook.coverUrl}
-                alt=""
-                width={320}
-                height={480}
-                unoptimized
-                priority
-              />
-            ) : (
-              <div className="player-cover" aria-hidden="true">
-                <span>{playerBook.title.slice(0, 2).toUpperCase()}</span>
-                <small>MP3</small>
+          <div className={`player-hero ${showText ? "has-text" : ""}`}>
+            {showText ? (
+              <div className="transcript-stage">
+                <TranscriptPane
+                  key={`${playerBook.id}:${chapterIndexForCues}`}
+                  sentences={cuesReady ? chapterCues.sentences : []}
+                  chapterStartMs={currentChapter?.startMs ?? 0}
+                  chapterTitle={currentChapter?.title ?? ""}
+                  pending={!cuesReady}
+                  onSeek={playback.seek}
+                />
+                <button
+                  type="button"
+                  className="transcript-close"
+                  aria-label="Show cover"
+                  onClick={() => setTextViewBookId(null)}
+                >
+                  <X size={17} aria-hidden="true" />
+                </button>
               </div>
+            ) : (
+              <CoverArt
+                playerBook={playerBook}
+                onFlip={hasTranscript ? () => setTextViewBookId(playerBook.id) : undefined}
+              />
             )}
 
             <div className="player-book-copy">
               <h1 id="book-title">{playerBook.title}</h1>
               <p>{playerBook.author}</p>
+              {!showText && hasTranscript && cuesReady && (
+                <CoverNowReading
+                  sentences={chapterCues.sentences}
+                  chapterStartMs={currentChapter?.startMs ?? 0}
+                />
+              )}
             </div>
           </div>
 
@@ -259,6 +343,45 @@ export function FullPlayer({
         <BookDetailsDialog details={details} open onClose={() => setDetailsOpen(false)} />
       )}
     </div>
+  );
+}
+
+function CoverArt({ playerBook, onFlip }: { playerBook: PlayerBook; onFlip?: () => void }) {
+  const art = playerBook.coverUrl ? (
+    <Image
+      className="player-cover"
+      src={playerBook.coverUrl}
+      alt=""
+      width={320}
+      height={480}
+      unoptimized
+      priority
+    />
+  ) : (
+    <div className="player-cover" aria-hidden="true">
+      <span>{titleMonogram(playerBook.title)}</span>
+      <small>MP3</small>
+    </div>
+  );
+  if (!onFlip) return art;
+  // The labeled toggle lives in the topbar; the cover itself is a bonus tap
+  // target for readers who expect it to flip.
+  return (
+    <button type="button" className="player-cover-flip" aria-label="Show text" onClick={onFlip}>
+      {art}
+    </button>
+  );
+}
+
+/** Word-initial monogram, matching the library's cover placeholders. */
+function titleMonogram(title: string): string {
+  return (
+    title
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join("")
+      .toUpperCase() || "AB"
   );
 }
 

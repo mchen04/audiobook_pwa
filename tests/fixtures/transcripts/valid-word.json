@@ -1,0 +1,283 @@
+{
+  "format": "epub-listener-transcript",
+  "version": 1,
+  "producer": "epub_listener/fixture",
+  "engine": "edge",
+  "generationKey": "tts_backend=edge\nvoice=en-US-AriaNeural\nspeed=+0%",
+  "language": "en",
+  "chapters": [
+    {
+      "index": 0,
+      "title": "Chapter 1",
+      "granularity": "word",
+      "sentences": [
+        {
+          "text": "It was a dark and stormy night.",
+          "start": 0,
+          "end": 2040,
+          "words": [
+            {
+              "text": "It",
+              "start": 0,
+              "end": 240,
+              "charStart": 0,
+              "charEnd": 2
+            },
+            {
+              "text": "was",
+              "start": 300,
+              "end": 540,
+              "charStart": 3,
+              "charEnd": 6
+            },
+            {
+              "text": "a",
+              "start": 600,
+              "end": 840,
+              "charStart": 7,
+              "charEnd": 8
+            },
+            {
+              "text": "dark",
+              "start": 900,
+              "end": 1140,
+              "charStart": 9,
+              "charEnd": 13
+            },
+            {
+              "text": "and",
+              "start": 1200,
+              "end": 1440,
+              "charStart": 14,
+              "charEnd": 17
+            },
+            {
+              "text": "stormy",
+              "start": 1500,
+              "end": 1740,
+              "charStart": 18,
+              "charEnd": 24
+            },
+            {
+              "text": "night",
+              "start": 1800,
+              "end": 2040,
+              "charStart": 25,
+              "charEnd": 30
+            }
+          ]
+        },
+        {
+          "text": "\"Stay close,\" said Dr.",
+          "start": 2100,
+          "end": 3240,
+          "words": [
+            {
+              "text": "Stay",
+              "start": 2100,
+              "end": 2340,
+              "charStart": 1,
+              "charEnd": 5
+            },
+            {
+              "text": "close",
+              "start": 2400,
+              "end": 2640,
+              "charStart": 6,
+              "charEnd": 11
+            },
+            {
+              "text": "said",
+              "start": 2700,
+              "end": 2940,
+              "charStart": 14,
+              "charEnd": 18
+            },
+            {
+              "text": "Dr.",
+              "start": 3000,
+              "end": 3240,
+              "charStart": 19,
+              "charEnd": 22
+            }
+          ]
+        },
+        {
+          "text": "Hale.",
+          "start": 3300,
+          "end": 3540,
+          "words": [
+            {
+              "text": "Hale",
+              "start": 3300,
+              "end": 3540,
+              "charStart": 0,
+              "charEnd": 4
+            }
+          ]
+        },
+        {
+          "text": "The lantern flickered twice.",
+          "start": 3600,
+          "end": 4740,
+          "words": [
+            {
+              "text": "The",
+              "start": 3600,
+              "end": 3840,
+              "charStart": 0,
+              "charEnd": 3
+            },
+            {
+              "text": "lantern",
+              "start": 3900,
+              "end": 4140,
+              "charStart": 4,
+              "charEnd": 11
+            },
+            {
+              "text": "flickered",
+              "start": 4200,
+              "end": 4440,
+              "charStart": 12,
+              "charEnd": 21
+            },
+            {
+              "text": "twice",
+              "start": 4500,
+              "end": 4740,
+              "charStart": 22,
+              "charEnd": 27
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "title": "Chapter 2",
+      "granularity": "word",
+      "sentences": [
+        {
+          "text": "Route 123 opened in Jan.",
+          "start": 0,
+          "end": 2110,
+          "words": [
+            {
+              "text": "Route",
+              "start": 0,
+              "end": 250,
+              "charStart": 0,
+              "charEnd": 5
+            },
+            {
+              "text": "one",
+              "start": 310,
+              "end": 560,
+              "charStart": 6,
+              "charEnd": 9
+            },
+            {
+              "text": "twenty",
+              "start": 620,
+              "end": 870,
+              "charStart": 6,
+              "charEnd": 9
+            },
+            {
+              "text": "three",
+              "start": 930,
+              "end": 1180,
+              "charStart": 6,
+              "charEnd": 9
+            },
+            {
+              "text": "opened",
+              "start": 1240,
+              "end": 1490,
+              "charStart": 10,
+              "charEnd": 16
+            },
+            {
+              "text": "in",
+              "start": 1550,
+              "end": 1800,
+              "charStart": 17,
+              "charEnd": 19
+            },
+            {
+              "text": "Jan.",
+              "start": 1860,
+              "end": 2110,
+              "charStart": 20,
+              "charEnd": 24
+            }
+          ]
+        },
+        {
+          "text": "1999.",
+          "start": 2170,
+          "end": 2420,
+          "words": [
+            {
+              "text": "1999",
+              "start": 2170,
+              "end": 2420,
+              "charStart": 0,
+              "charEnd": 4
+            }
+          ]
+        },
+        {
+          "text": "Nearly 45% of drivers used it.",
+          "start": 2480,
+          "end": 4280,
+          "words": [
+            {
+              "text": "Nearly",
+              "start": 2480,
+              "end": 2730,
+              "charStart": 0,
+              "charEnd": 6
+            },
+            {
+              "text": "45%",
+              "start": 2790,
+              "end": 3040,
+              "charStart": 7,
+              "charEnd": 10
+            },
+            {
+              "text": "of",
+              "start": 3100,
+              "end": 3350,
+              "charStart": 11,
+              "charEnd": 13
+            },
+            {
+              "text": "drivers",
+              "start": 3410,
+              "end": 3660,
+              "charStart": 14,
+              "charEnd": 21
+            },
+            {
+              "text": "used",
+              "start": 3720,
+              "end": 3970,
+              "charStart": 22,
+              "charEnd": 26
+            },
+            {
+              "text": "it",
+              "start": 4030,
+              "end": 4280,
+              "charStart": 27,
+              "charEnd": 29
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

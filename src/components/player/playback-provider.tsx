@@ -499,6 +499,24 @@ export function usePlaybackDerived<T extends string | number | boolean | null>(d
   return useSyncExternalStore(store.subscribe, derive, derive);
 }
 
+/**
+ * Derives a primitive from the current position; recomputed per tick but the
+ * subscriber re-renders only when the derived value changes. This is what the
+ * read-along view leans on: cue lookups run every tick, re-renders only on
+ * cue boundaries.
+ */
+export function usePlaybackTimeDerived<T extends string | number | boolean | null>(
+  derive: (timeMs: number) => T,
+): T {
+  const store = useContext(PlaybackTimeContext);
+  if (!store) throw new Error("usePlaybackTimeDerived must be used inside PlaybackProvider");
+  return useSyncExternalStore(
+    store.subscribe,
+    () => derive(store.read()),
+    () => derive(0),
+  );
+}
+
 /** The chapter under the playhead; re-renders only when the chapter changes. */
 export function useCurrentChapter(): PlayerChapter | null {
   const { book } = usePlayback();
