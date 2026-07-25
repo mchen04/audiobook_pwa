@@ -6,11 +6,21 @@
  * can call the SHIPPING sync engine — the same modules `src/**` imports — from
  * inside a real browser.
  *
- * Why it exists at all: the mutation API in `src/lib/offline/outbox.ts` has no
- * UI call site yet, and a verifier that hand-assembled outbox rows would be
- * testing its own key builder rather than the product's. Everything below is a
- * thin forward to a production export. Nothing here reimplements a key, a
- * coalescing rule, a replay request or a mirror projection.
+ * Why it exists at all: the fuzz needs to drive thousands of mutations across
+ * randomized offline/online transitions, which no amount of clicking could
+ * reach, and a verifier that hand-assembled outbox rows would be testing its
+ * own key builder rather than the product's. Everything below is a thin forward
+ * to a production export. Nothing here reimplements a key, a coalescing rule, a
+ * replay request or a mirror projection.
+ *
+ * What this bridge CANNOT prove is that the shipping UI calls any of it — and
+ * for a while it did not, which is how this project once had a green
+ * zero-lost-writes fuzz over a module no button reached. That claim is now
+ * owned by `../real-ui-writes.spec.ts`, which makes its edits by typing into
+ * the real inputs and clicking the real buttons with the network off, and
+ * never touches this driver until the assertions are done. If that spec is
+ * ever deleted or weakened, everything below goes back to describing a module
+ * rather than a product.
  *
  * The one place that is not a pure forward is `pull()`, which repeats the fetch
  * loop of `use-library-books.ts#pull` because that loop is not exported — but
