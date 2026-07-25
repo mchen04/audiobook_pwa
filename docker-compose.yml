@@ -1,0 +1,39 @@
+# Local Postgres for every Hark test suite.
+#
+# Tests must never depend on the hosted Neon database: its cold start makes each
+# run slow and flaky, suites have to work offline, and parallel runs against one
+# shared remote database interfere with each other.
+#
+# The image tracks Neon's server major version (PostgreSQL 18) and its database
+# locale (builtin C.UTF-8, UTF8 encoding) so index and ordering behaviour match
+# production. `pg_trgm` ships with the official image's contrib modules, which
+# migration 0009 requires for `books_search_trgm_idx` and `tags_name_trgm_idx`.
+#
+# Bootstrap with: node scripts/test-db.mjs
+name: hark-test
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    container_name: hark-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hark
+      POSTGRES_PASSWORD: hark
+      POSTGRES_DB: hark_test
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=builtin --builtin-locale=C.UTF-8"
+    ports:
+      # Deliberately not 5432: an unusual host port keeps this container from
+      # colliding with any other Postgres on the machine.
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - hark-test-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hark -d hark_test -h 127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+volumes:
+  hark-test-pgdata:

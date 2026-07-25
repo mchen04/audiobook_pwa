@@ -18,6 +18,9 @@
 .env
 .env.*
 !.env.example
+# .env.test holds only local-container credentials, but keep it out of the repo
+# so a stray hosted connection string can never be committed through it.
+!.env.test.example
 
 # generated service worker artifacts
 /public/sw.js.map

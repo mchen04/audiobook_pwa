@@ -66,6 +66,23 @@ Optional: `RESEND_API_KEY` and `MAIL_FROM` enable password-reset email in
 production (see `docs/operations.md`); in development, reset mails are written
 to `.data/mail/` instead.
 
+### Test database
+
+Tests never touch the hosted database: its cold start makes runs slow and flaky,
+suites must work offline, and parallel runs against one shared remote database
+interfere. `docker-compose.yml` provides a local Postgres matching the hosted
+server's major version and locale, published on host port `54329`.
+
+```sh
+cp .env.test.example .env.test   # local-only credentials, gitignored
+node scripts/test-db.mjs         # start, migrate, and seed the test database
+```
+
+Everything test-related reads `.env.test`, never `.env.local`. Override the file
+with `HARK_ENV_FILE=<path>` or `--env-file=<path>`. `scripts/lib/assert-local-database.mjs`
+aborts the e2e config, the standalone test server, and this bootstrap script if
+`DATABASE_URL` ever points at a hosted provider such as Neon.
+
 ## Commands
 
 | Command                              | What it does                                                                                                            |
@@ -73,6 +90,7 @@ to `.data/mail/` instead.
 | `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                  |
 | `pnpm test`                          | Vitest suites (MP3 parsing contract, service-worker range parsing, progress conflict policy, offline queues, playback). |
 | `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                 |
+| `node scripts/test-db.mjs`           | Starts the local Postgres container, migrates it, and seeds the e2e account (`reset` to rebuild from empty).            |
 | `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                             |
 | `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~60k rows onto an existing account for performance work.                                            |
 

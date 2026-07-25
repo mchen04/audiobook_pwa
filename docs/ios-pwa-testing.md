@@ -8,12 +8,19 @@ Home Screen container and OS-level audio controls.
 
 ## Automated WebKit gate
 
-Install WebKit once, then run the scenario:
+Install WebKit once, start the local test database, then run the scenario:
 
 ```sh
 pnpm exec playwright install webkit
+cp .env.test.example .env.test
+node scripts/test-db.mjs
 pnpm test:e2e:ios
 ```
+
+The run reads `.env.test` (never `.env.local`) and refuses to start if
+`DATABASE_URL` points at a hosted database — the suite registers accounts and
+imports books, so it must own its data. Both the Playwright config and the
+standalone server print the `DATABASE_URL` host they connected to.
 
 The test builds and starts the production app, uses Playwright's iPhone 15 WebKit
 profile, exposes `navigator.standalone` as an installed Home Screen app does, and
@@ -31,6 +38,10 @@ picker. It then verifies:
 `BETTER_AUTH_URL` must exactly match `PLAYWRIGHT_BASE_URL` (both default to
 `http://localhost:3000`). Local HTTP cookies remain non-Secure; deployed HTTPS
 cookies remain Secure.
+
+The suite always builds and starts its own server, because a server already
+listening on the port may be a dev server wired to a hosted database. Set
+`HARK_REUSE_SERVER=1` to reuse one deliberately.
 
 ## Physical iPhone release gate
 
