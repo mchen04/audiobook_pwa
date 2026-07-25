@@ -152,6 +152,37 @@ export const listeningSessionSchema = z.strictObject({
   mutationId: z.uuid().optional(),
 });
 
+/**
+ * The same listening stretch as it arrives from the outbox.
+ *
+ * `toReplayRequest` gives every `history` mutation the same wire form —
+ * `POST /api/books/:id/history` with `id` set to the row's `mutationId` — so a
+ * listening stretch queued on a device with no connection replays through that
+ * one endpoint alongside the playback actions. The idempotency key therefore
+ * arrives as `id` here rather than as `mutationId`; it is required, because an
+ * append-only insert with no receipt to claim would record the same listen
+ * twice on the first retry.
+ */
+export const listeningStretchSchema = z.strictObject({
+  id: z.uuid(),
+  startedAt: z.iso.datetime(),
+  endedAt: z.iso.datetime(),
+  startPositionMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  endPositionMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+
+/**
+ * Everything `POST /api/books/:id/history` accepts.
+ *
+ * One book's history has two kinds of entry — the discrete actions the player
+ * records (`playbackActionSchema`) and the contiguous stretches the listening
+ * tracker measures — and the outbox has exactly one `history` mutation kind to
+ * carry both. The two shapes share no required key (`action` versus
+ * `startedAt`), so the union discriminates without ambiguity, and both halves
+ * stay `.strict()`.
+ */
+export const playbackHistoryEventSchema = z.union([playbackActionSchema, listeningStretchSchema]);
+
 // ---------------------------------------------------------------------------
 // POST /api/books/local
 // ---------------------------------------------------------------------------
@@ -170,6 +201,20 @@ const chapterSchema = z.strictObject({
 });
 
 export const bookRegistrationSchema = z.strictObject({
+  /**
+   * The id the importing device already keyed its local audio under.
+   *
+   * An import is journalled in the outbox before the network is touched, so the
+   * registration may not reach the server for days — and the device needs a
+   * book id *now*, to key the MP3 it just wrote into Cache Storage. Letting the
+   * device name the book is what makes the row that eventually lands the same
+   * book the device has been playing all along, instead of a second copy the
+   * next pull adds beside it.
+   *
+   * Optional: a registration with no id gets a server-generated one, which is
+   * what every build before the outbox sent.
+   */
+  bookId: z.uuid().optional(),
   fileName: z.string().min(1).max(8192),
   byteSize: z.number().int().positive().max(MAX_BYTE_SIZE),
   durationMs: z.number().int().positive().max(MAX_DURATION_MS),

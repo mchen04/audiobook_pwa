@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "fake-indexeddb/auto";
+import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 
 import { importLocalMp3, parseLocalMp3 } from "./local-import";
 
@@ -22,10 +24,34 @@ function fixtureFile(): File {
   return new File([bytes], "tiny-book.mp3", { type: "audio/mpeg" });
 }
 
+// An import journals its registration in the outbox before it touches the
+// network, so the module under test needs IndexedDB for the queue and
+// localStorage for the device id it attributes the mutation to. Neither is a
+// place transcript content could hide: both are on-device stores, and the
+// assertions below still watch every `fetch` the import makes.
+beforeEach(() => {
+  vi.stubGlobal("indexedDB", new FakeIDBFactory());
+  vi.stubGlobal("localStorage", memoryStorage());
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
+
+function memoryStorage() {
+  const map = new Map<string, string>();
+  return {
+    get length() {
+      return map.size;
+    },
+    key: (index: number) => [...map.keys()][index] ?? null,
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+    removeItem: (key: string) => void map.delete(key),
+    clear: () => map.clear(),
+  };
+}
 
 describe("import privacy", () => {
   it("parses the embedded transcript from the fixture", async () => {

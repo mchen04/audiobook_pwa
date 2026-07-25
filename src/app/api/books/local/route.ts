@@ -8,7 +8,7 @@ import {
 } from "@/domain/mp3";
 import { bookRegistrationSchema } from "@/server/api/mutation-schemas";
 import { withMutation } from "@/server/api/route-handler";
-import { expectRow, getBookForUser } from "@/server/books/queries";
+import { getBookForUser } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { books, chapters, mediaAssets } from "@/server/db/schema";
 import { validateUploadMetadata } from "@/server/media/filename";
@@ -49,18 +49,31 @@ export const POST = withMutation(
         }
       }
 
-      const created = expectRow(
-        await transaction
-          .insert(books)
-          .values({
-            ownerId: session.user.id,
-            title: data.title,
-            author: data.author,
-            narrator: data.narrator,
-            chapterDiagnostic: data.chapterDiagnostic,
-          })
-          .returning({ id: books.id }),
-      );
+      // A device-named registration is idempotent on that name. The outbox
+      // replays a queued import until the server answers, and the answer to
+      // "this book already exists, and it is yours" is that the write landed —
+      // not a primary-key crash that would retry until the end of time.
+      const [claimed] = await transaction
+        .insert(books)
+        .values({
+          ...(data.bookId ? { id: data.bookId } : {}),
+          ownerId: session.user.id,
+          title: data.title,
+          author: data.author,
+          narrator: data.narrator,
+          chapterDiagnostic: data.chapterDiagnostic,
+        })
+        .onConflictDoNothing({ target: books.id })
+        .returning({ id: books.id });
+      if (!claimed) {
+        const [existing] = await transaction
+          .select({ id: books.id })
+          .from(books)
+          .where(and(eq(books.id, data.bookId!), eq(books.ownerId, session.user.id)))
+          .limit(1);
+        return { settled: existing?.id ?? null };
+      }
+      const created = claimed;
       const [registeredMedia] = await transaction
         .insert(mediaAssets)
         .values({
@@ -139,6 +152,21 @@ export const POST = withMutation(
       await insertChapterRows(created.id, data.chapters);
       return { bookId: created.id, created: true, repaired: false, repairBlocked: false };
     });
+
+    if ("settled" in registration) {
+      // The device already named this book and the server already holds it, so
+      // this registration has nothing left to do. 200 rather than 409: the
+      // outbox reads any non-retryable answer as settled either way, but the
+      // 409 branch below means "a *different* book already owns these bytes",
+      // and this is not that.
+      if (!registration.settled) {
+        return Response.json(
+          { error: "That book id belongs to another account." },
+          { status: 409 },
+        );
+      }
+      return Response.json({ bookId: registration.settled, alreadyRegistered: true });
+    }
 
     if (!registration.created) {
       if (registration.repairBlocked) {

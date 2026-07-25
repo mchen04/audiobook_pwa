@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import "fake-indexeddb/auto";
+import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 
+// An import journals its registration in the outbox before it touches the
+// network, so the module under test needs the two browser globals that write
+// reaches for: IndexedDB for the queue, and localStorage for the device id it
+// attributes the mutation to.
 const { storeLocalBookMedia } = vi.hoisted(() => ({ storeLocalBookMedia: vi.fn() }));
 
 vi.mock("@/lib/offline/media-store", () => ({ storeLocalBookMedia }));
@@ -23,6 +29,8 @@ import { importLocalMp3 } from "./local-import";
 describe("local MP3 import", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubGlobal("indexedDB", new FakeIDBFactory());
+    vi.stubGlobal("localStorage", memoryStorage());
     storeLocalBookMedia.mockReset().mockResolvedValue(undefined);
   });
 
@@ -108,3 +116,17 @@ describe("local MP3 import", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+function memoryStorage() {
+  const map = new Map<string, string>();
+  return {
+    get length() {
+      return map.size;
+    },
+    key: (index: number) => [...map.keys()][index] ?? null,
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+    removeItem: (key: string) => void map.delete(key),
+    clear: () => map.clear(),
+  };
+}

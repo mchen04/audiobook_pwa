@@ -21,7 +21,7 @@ import type {
 } from "@/domain/player";
 import { ACTIVE_USER_KEY, PROGRESS_CONFLICT_EVENT, UNLOAD_PLAYER_EVENT } from "@/lib/app-keys";
 import { afterLaunchPaint } from "@/lib/launch-revalidation";
-import { createListeningTracker } from "@/lib/listening-tracker";
+import { createListeningTracker, queueListeningSession } from "@/lib/listening-tracker";
 import {
   loadPlaybackHistory,
   PLAYBACK_HISTORY_LIMIT,
@@ -95,7 +95,7 @@ const PlaybackTimeContext = createContext<PlaybackTimeStore | null>(null);
 export function PlaybackProvider({ children, userId }: { children: ReactNode; userId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const activeBookRef = useRef<PlayerBook | null>(null);
-  const trackerRef = useRef(createListeningTracker());
+  const trackerRef = useRef(createListeningTracker(queueListeningSession(userId)));
   const suppressNextPauseRef = useRef(false);
   const preferencesRef = useRef<PlayerPreferences>(DEFAULT_PREFERENCES);
   const positionSyncKeyRef = useRef("");

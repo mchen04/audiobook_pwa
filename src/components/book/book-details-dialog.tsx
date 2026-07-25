@@ -7,12 +7,16 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { useDeleteBook } from "@/components/book/use-delete-book";
 import { usePlayback } from "@/components/player/playback-provider";
 import { formatDurationRounded } from "@/lib/format-time";
+import { replayQueuedMutations } from "@/lib/offline-sync";
+import { listMirrorCollections } from "@/lib/offline/mirror";
 import {
-  isCollectionList,
-  isCollectionPayload,
-  readJson,
-  type CollectionSummary,
-} from "@/lib/wire";
+  commitArchiveChange,
+  commitCollectionEdge,
+  commitMetadataEdit,
+  commitTagList,
+} from "@/lib/offline/outbox";
+import { getDeviceId } from "@/lib/playback-core";
+import { isCollectionPayload, readJson, type CollectionSummary } from "@/lib/wire";
 
 export type BookDetails = {
   id: string;
@@ -41,7 +45,10 @@ export function BookDetailsDialog({
   const playback = usePlayback();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; queued: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [archived, setArchived] = useState(!!details.archivedAt);
+  const [tags, setTags] = useState(details.tags);
   const [collections, setCollections] = useState<CollectionSummary[] | null>(null);
   const [newCollectionName, setNewCollectionName] = useState("");
   const { deleteBook, deleting, deleteLabel } = useDeleteBook(
@@ -49,6 +56,25 @@ export function BookDetailsDialog({
     details.id,
     setError,
   );
+  function origin() {
+    return { userId: playback.userId, deviceId: getDeviceId() };
+  }
+
+  /**
+   * Every edit below is journalled in the outbox and projected into this
+   * device's mirror, so it is already saved by the time this returns — the
+   * server hears about it on the next drain, which is now if the network is
+   * there and on reconnect if it is not.
+   */
+  function settled(message: string) {
+    setError(null);
+    setNotice({ message, queued: !navigator.onLine });
+    void replayQueuedMutations(playback.userId).catch(() => undefined);
+    // A refresh is a *read*, and the only reader that could answer it is the
+    // server. Asking with the network down would fail for nothing: the mirror
+    // this edit just patched is what the library reads from either way.
+    if (navigator.onLine) router.refresh();
+  }
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -56,17 +82,13 @@ export function BookDetailsDialog({
     if (open && !dialog.open) {
       dialog.showModal();
       setError(null);
-      void fetch(`/api/collections?bookId=${encodeURIComponent(details.id)}`, {
-        cache: "no-store",
-      })
-        .then((response) => readJson(response, isCollectionList))
-        .then((payload) => {
-          if (payload) setCollections(payload.collections);
-        })
+      setNotice(null);
+      void listMirrorCollections(playback.userId, details.id)
+        .then(setCollections)
         .catch(() => setCollections(null));
     }
     if (!open && dialog.open) dialog.close();
-  }, [details.id, open]);
+  }, [details.id, open, playback.userId]);
 
   async function saveDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -74,72 +96,74 @@ export function BookDetailsDialog({
     setError(null);
     const data = new FormData(event.currentTarget);
     const seriesPositionRaw = String(data.get("seriesPosition") || "").trim();
-    const body = {
+    const fields = {
       title: String(data.get("title") || "").trim(),
       author: String(data.get("author") || "").trim(),
       narrator: String(data.get("narrator") || "").trim() || null,
       description: String(data.get("description") || "").trim() || null,
       series: String(data.get("series") || "").trim() || null,
       seriesPosition: seriesPositionRaw ? Number(seriesPositionRaw) : null,
-      tags: String(data.get("tags") || "")
-        .split(",")
-        .map((tag) => tag.trim())
-        .filter(Boolean)
-        .slice(0, 20),
     };
-    if (!body.title || !body.author) {
+    const nextTags = String(data.get("tags") || "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    if (!fields.title || !fields.author) {
       setError("Title and author are required.");
       setSaving(false);
       return;
     }
-    const response = await fetch(`/api/books/${details.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).catch(() => null);
-    setSaving(false);
-    if (!response?.ok) {
-      setError(
-        response && response.status < 500
-          ? "The changes could not be saved. Check the field values and try again."
-          : "The changes could not be saved. Check your connection and try again.",
-      );
+    try {
+      await commitMetadataEdit(origin(), details.id, fields);
+      await commitTagList(origin(), details.id, tags, nextTags);
+    } catch {
+      setSaving(false);
+      setError("This device could not record the change. Try again.");
       return;
     }
-    router.refresh();
-    onClose();
+    setTags(nextTags);
+    setSaving(false);
+    settled("Saved to this device.");
   }
 
   async function toggleArchived() {
-    const response = await fetch(`/api/books/${details.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ archived: !details.archivedAt }),
-    }).catch(() => null);
-    if (response?.ok) {
-      router.refresh();
-      onClose();
-    } else {
-      setError("Archiving needs a connection right now.");
+    const next = !archived;
+    try {
+      await commitArchiveChange(origin(), details.id, next);
+    } catch {
+      setError("This device could not record the change. Try again.");
+      return;
     }
+    setArchived(next);
+    settled(next ? "Archived." : "Moved back into the library.");
   }
 
   async function toggleCollection(collection: CollectionSummary, include: boolean) {
-    const response = await fetch(`/api/collections/${collection.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId: details.id, include }),
-    }).catch(() => null);
-    if (response?.ok) {
-      setCollections(
-        (current) =>
-          current?.map((entry) =>
-            entry.id === collection.id ? { ...entry, includesBook: include } : entry,
-          ) ?? null,
-      );
+    try {
+      await commitCollectionEdge(origin(), collection.id, details.id, include);
+    } catch {
+      setError("This device could not record the change. Try again.");
+      return;
     }
+    setCollections(
+      (current) =>
+        current?.map((entry) =>
+          entry.id === collection.id ? { ...entry, includesBook: include } : entry,
+        ) ?? null,
+    );
+    settled(include ? `Added to ${collection.name}.` : `Removed from ${collection.name}.`);
   }
 
+  /**
+   * The one action here that genuinely cannot be queued.
+   *
+   * Every other edit names something that already exists; a new collection has
+   * no id until the server mints one, and there is no queued mutation that can
+   * carry "a collection whose id I do not know yet". So this one asks the
+   * network, and says so plainly when the network is not there — rather than
+   * failing with the same wording as an edit that was in fact saved.
+   */
   async function createCollection(event: FormEvent) {
     event.preventDefault();
     const name = newCollectionName.trim();
@@ -151,7 +175,12 @@ export function BookDetailsDialog({
     }).catch(() => null);
     const payload = response ? await readJson(response, isCollectionPayload) : null;
     if (!payload) {
-      setError("The collection could not be created.");
+      setError(
+        response
+          ? "The collection could not be created."
+          : "A brand-new collection needs a connection, because only the server can name it. " +
+              "The collections you already have can be changed offline.",
+      );
       return;
     }
     setNewCollectionName("");
@@ -224,7 +253,12 @@ export function BookDetailsDialog({
           </label>
           <label>
             <span>Tags (comma separated)</span>
-            <input name="tags" defaultValue={details.tags.join(", ")} maxLength={400} />
+            <input
+              key={tags.join(",")}
+              name="tags"
+              defaultValue={tags.join(", ")}
+              maxLength={400}
+            />
           </label>
           <button type="submit" className="primary-button" disabled={saving}>
             {saving ? "Saving" : "Save changes"}
@@ -244,7 +278,7 @@ export function BookDetailsDialog({
                 Restart from beginning
               </button>
               <button type="button" className="secondary-button" onClick={toggleArchived}>
-                {details.archivedAt ? "Unarchive" : "Archive"}
+                {archived ? "Unarchive" : "Archive"}
               </button>
             </div>
             <p className="details-hint">
@@ -254,7 +288,9 @@ export function BookDetailsDialog({
 
           <section aria-labelledby="details-collections-title">
             <h3 id="details-collections-title">Collections</h3>
-            {collections === null && <p className="details-hint">Collections need a connection.</p>}
+            {collections === null && (
+              <p className="details-hint">This device&apos;s collections could not be read.</p>
+            )}
             {collections?.length === 0 && (
               <p className="details-hint">
                 Group series into an ordered collection to play them in order.
@@ -329,6 +365,12 @@ export function BookDetailsDialog({
       {error && (
         <p role="alert" className="dialog-error">
           {error}
+        </p>
+      )}
+      {!error && notice && (
+        <p role="status" className="dialog-notice" data-queued={notice.queued || undefined}>
+          {notice.message}
+          {notice.queued && " Your other devices get it when this one reconnects."}
         </p>
       )}
     </dialog>

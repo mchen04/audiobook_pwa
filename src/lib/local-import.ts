@@ -3,7 +3,9 @@ import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import type { BookTranscript } from "@/domain/transcript";
 import { fingerprintMedia } from "@/lib/media-fingerprint";
 import { storeLocalBookMedia } from "@/lib/offline/media-store";
+import { commitImport } from "@/lib/offline/outbox";
 import { storeBookTranscript } from "@/lib/offline/transcript-store";
+import { getDeviceId } from "@/lib/playback-core";
 import { extractTranscript } from "@/lib/transcript-import";
 
 export type ParsedLocalMp3 = ParsedMp3 & {
@@ -77,9 +79,25 @@ function probeAudioDurationMs(file: File): Promise<number> {
 }
 
 /**
- * The whole import: parse locally, register metadata with the server, then
- * store the audio bytes on this device. No audio ever uploads, so file size
- * is bounded only by this device's storage.
+ * The whole import: parse locally, journal the registration, tell the server
+ * about it if the server is reachable, then store the audio bytes on this
+ * device. No audio ever uploads, so file size is bounded only by this device's
+ * storage — and nothing on this path ever sends the file's contents anywhere.
+ *
+ * The registration is journalled in the outbox *before* the network is touched,
+ * which is what makes an import done on a plane a book rather than a lost
+ * afternoon. Two consequences follow from that ordering:
+ *
+ * - The book id is minted here, by this device, and travels in the queued
+ *   registration. The MP3 has to be keyed under *something* the moment it is
+ *   written, and waiting for the server to name it would mean either blocking
+ *   the import on a round trip or filing the audio under a name the eventual
+ *   row does not share. The route treats a registration that names an id it
+ *   already holds as settled, so a replay is a no-op rather than a second book.
+ * - The direct POST below is an optimization, not the write. It exists so an
+ *   online import is visible to the account's other devices immediately, and so
+ *   the 409 duplicate answer can reattach these bytes to the book that already
+ *   owns this fingerprint. When it cannot happen, the queued row still lands.
  */
 export async function importLocalMp3(
   userId: string,
@@ -95,29 +113,31 @@ export async function importLocalMp3(
   );
   onProgress(55, "Adding to your library");
 
+  const registration = {
+    bookId: crypto.randomUUID(),
+    fileName: encodeURIComponent(file.name),
+    byteSize: file.size,
+    durationMs: parsed.durationMs,
+    fingerprint,
+    fingerprintKind,
+    title: parsed.title,
+    author: parsed.author,
+    narrator: parsed.narrator,
+    chapterDiagnostic: parsed.chapterDiagnostic,
+    chapters: parsed.chapters,
+  };
+  await commitImport({ userId, deviceId: getDeviceId() }, fingerprint, registration);
+
   const response = await fetch("/api/books/local", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      fileName: encodeURIComponent(file.name),
-      byteSize: file.size,
-      durationMs: parsed.durationMs,
-      fingerprint,
-      fingerprintKind,
-      title: parsed.title,
-      author: parsed.author,
-      narrator: parsed.narrator,
-      chapterDiagnostic: parsed.chapterDiagnostic,
-      chapters: parsed.chapters,
-    }),
-  }).catch(() => {
-    throw new Error("The book could not be registered. Check your connection.");
-  });
-  let bookId: string;
+    body: JSON.stringify(registration),
+  }).catch(() => null);
+  let bookId = registration.bookId;
   let canonicalBook: Omit<PlayerBook, "mediaUrl" | "coverUrl"> | null = null;
-  if (response.ok) {
+  if (response?.ok) {
     ({ bookId } = (await response.json()) as { bookId: string });
-  } else {
+  } else if (response) {
     const payload = (await response.json().catch(() => null)) as {
       error?: string;
       existingBookId?: string;
@@ -125,7 +145,8 @@ export async function importLocalMp3(
     } | null;
     // A fingerprint match means this exact file already has a book — most
     // often one whose audio is missing on this device. Reattach the bytes to
-    // that book instead of dead-ending on "already in your library".
+    // that book instead of dead-ending on "already in your library". The queued
+    // row replays into the same 409 and settles without creating anything.
     if (response.status === 409 && payload?.existingBookId) {
       bookId = payload.existingBookId;
       canonicalBook = payload.playerBook || null;
@@ -133,6 +154,9 @@ export async function importLocalMp3(
       throw new Error(payload?.error || "The MP3 could not be imported.");
     }
   }
+  // `response` is null only when the network could not be reached at all. The
+  // registration is already durable, so the import continues under the id this
+  // device minted and the server is told on the next drain.
   // Copying a multi-gigabyte file into device storage is the long tail of the
   // import; the percent tracks stored chunks so the wait visibly moves.
   onProgress(70, "Saving to this device");

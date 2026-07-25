@@ -60,16 +60,50 @@ const PULL_PAGE_LIMIT = 50;
 
 /**
  * How long a device that has never synced may spend on its first pull before
- * the library gives up waiting and shows what it has.
+ * the library stops saying "setting up" and says what is actually happening.
  *
  * Without a ceiling a stalled-but-alive connection would hold a first-time user
  * on "setting up" indefinitely — the same failure the service worker's
- * navigation budget exists to prevent.
+ * navigation budget exists to prevent. What the ceiling may NOT do is conclude
+ * the pull succeeded: it is a deadline on the wording, not on the truth.
  */
 const FIRST_SYNC_GATE_MS = 4_000;
 
-/** Whether this device has ever completed a pull for the signed-in account. */
+/**
+ * How long to wait before asking again after a first pull that could not reach
+ * the server. Doubles per attempt and is capped, because a device with no
+ * mirror has nothing to show until this succeeds and equally must not turn a
+ * server outage into a retry storm.
+ */
+function retryDelayFor(attempt: number): number {
+  return Math.min(30_000, 2_000 * 2 ** Math.min(attempt, 4));
+}
+
+/**
+ * Whether this device has ever completed a pull for the signed-in account.
+ *
+ * `done` is set from exactly two facts — a sync cursor already in the mirror,
+ * or a pull that just applied one — and from nothing else. It used to be set by
+ * the gate above and by an `unreachable` pull as well, which meant a device
+ * that had never synced and could not reach the server announced that the
+ * account owns no books. It does not know that. Nobody has told it anything.
+ */
 type FirstSync = "unknown" | "pending" | "done";
+
+/** What the library may say about a first pull it has not yet completed. */
+export type FirstSyncStatus = "done" | "waiting" | "slow" | "unreachable";
+
+function firstSyncStatusOf(
+  firstSync: FirstSync,
+  attempt: number,
+  slowAttempt: number,
+  unreachedAttempt: number,
+): FirstSyncStatus {
+  if (firstSync === "done") return "done";
+  if (unreachedAttempt === attempt) return "unreachable";
+  if (slowAttempt === attempt) return "slow";
+  return "waiting";
+}
 
 export function useLibraryBooks(userId: string | null, filters: LibraryFilters) {
   const { query, status, tag, sort, onDevice } = filters;
@@ -79,6 +113,14 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
   const [nonce, setNonce] = useState(0);
   const [reconnects, setReconnects] = useState(0);
   const [firstSync, setFirstSync] = useState<FirstSync>("unknown");
+  /**
+   * Which pull attempt ran past the gate, and which one could not reach the
+   * server at all. Both are recorded as the attempt number rather than as a
+   * boolean, so a retry clears them by moving on instead of by a second state
+   * write racing the effect that starts the attempt they belong to.
+   */
+  const [slowAttempt, setSlowAttempt] = useState(-1);
+  const [unreachedAttempt, setUnreachedAttempt] = useState(-1);
 
   const reread = useCallback(() => setNonce((current) => current + 1), []);
 
@@ -136,13 +178,11 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
     let active = true;
     let cancelWait = () => {};
     let gate = 0;
-    const settleFirstSync = () => {
-      window.clearTimeout(gate);
-      if (active) setFirstSync("done");
-    };
+    let backoff = 0;
+    let firstPull = false;
+    const attempt = reconnects;
     const run = () => {
       void revalidate(userId).then((outcome) => {
-        settleFirstSync();
         if (!active) return;
         // An expired or revoked session must never strand the user on a
         // cached library. Purging belongs to the sign-in/sign-out path,
@@ -152,8 +192,24 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
           window.location.replace("/login");
           return;
         }
+        window.clearTimeout(gate);
+        // Only a pull that actually applied proves this device now knows what
+        // the account holds. `unreachable` proves the opposite.
+        if (outcome === "applied") setFirstSync("done");
+        else {
+          setUnreachedAttempt(attempt);
+          // A device with no mirror cannot show a library at all, so its first
+          // pull is retried on its own rather than waiting for the user to
+          // notice. One dropped request must not cost a launch. The delay grows
+          // and is capped, so a server that is down is asked politely rather
+          // than hammered, and every later pull is still reconnect-driven.
+          if (firstPull) backoff = window.setTimeout(retryFirstPull, retryDelayFor(attempt));
+        }
         reread();
       });
+    };
+    const retryFirstPull = () => {
+      if (active) setReconnects((current) => current + 1);
     };
     void getSyncMeta(userId)
       .catch(() => undefined)
@@ -164,13 +220,17 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
           cancelWait = afterLaunchPaint(run);
           return;
         }
+        firstPull = true;
         setFirstSync("pending");
-        gate = window.setTimeout(settleFirstSync, FIRST_SYNC_GATE_MS);
+        gate = window.setTimeout(() => {
+          if (active) setSlowAttempt(attempt);
+        }, FIRST_SYNC_GATE_MS);
         run();
       });
     return () => {
       active = false;
       window.clearTimeout(gate);
+      window.clearTimeout(backoff);
       cancelWait();
     };
   }, [userId, reconnects, reread]);
@@ -185,6 +245,9 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
 
   const retry = useCallback(() => {
     setUnavailable(false);
+    // Also re-runs the pull, which is what a device that has never synced is
+    // actually retrying — re-reading an empty mirror would tell it nothing.
+    setReconnects((current) => current + 1);
     reread();
   }, [reread]);
 
@@ -222,6 +285,16 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
      * The caller must not present that as the genuine "no books" state.
      */
     preparing: firstSync !== "done",
+    /**
+     * How that first pull is going, for the wording only — every value but
+     * `done` means this device does not know what the account holds, and none
+     * of them may carry the readiness marker.
+     *
+     * `slow` and `unreachable` are deliberately separate. A pull still in
+     * flight past the gate has not failed, and telling the user it did would be
+     * as wrong as telling them their library is empty.
+     */
+    firstSyncStatus: firstSyncStatusOf(firstSync, reconnects, slowAttempt, unreachedAttempt),
     unavailable,
     reload,
     retry,

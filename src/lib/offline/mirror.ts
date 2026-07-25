@@ -541,6 +541,38 @@ export async function listMirrorTagNames(userId: string): Promise<string[]> {
 }
 
 /**
+ * This account's collections, with the membership of one book marked.
+ *
+ * The details dialog used to ask `/api/collections` for exactly this, which
+ * made the whole section unusable with the network off — the list, and
+ * therefore every checkbox in it, simply did not render. The pull already
+ * delivers the collection list in full on every sync, so the device holds the
+ * same answer the route would have given.
+ */
+export async function listMirrorCollections(
+  userId: string,
+  bookId: string,
+): Promise<Array<{ id: string; name: string; includesBook: boolean }>> {
+  const db = await database();
+  const transaction = db.transaction(["collections", "collectionBooks"], "readonly");
+  const [collections, members] = await Promise.all([
+    transaction.objectStore("collections").index("by-user").getAll(userId),
+    transaction.objectStore("collectionBooks").index("by-user").getAll(userId),
+    transaction.done,
+  ]);
+  const includes = new Set(
+    members.filter((member) => member.bookId === bookId).map((member) => member.collectionId),
+  );
+  return collections
+    .map((collection) => ({
+      id: collection.collectionId,
+      name: collection.name,
+      includesBook: includes.has(collection.collectionId),
+    }))
+    .sort((left, right) => byName(left.name, right.name));
+}
+
+/**
  * The continue card: the most recently progressed book that is neither
  * archived, finished, nor untouched — the same rule as `getLibraryOverview`.
  */

@@ -101,10 +101,8 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   const [fallbackBookId, setFallbackBookId] = useState(bookIdFromUrl);
   const [pagination, setPagination] = useState({ key: "", pages: 1 });
 
-  const { snapshot, preparing, unavailable, reload, retry, removeDownload } = useLibraryBooks(
-    userId,
-    { query, status, tag: activeTag, sort, onDevice },
-  );
+  const { snapshot, preparing, firstSyncStatus, unavailable, reload, retry, removeDownload } =
+    useLibraryBooks(userId, { query, status, tag: activeTag, sort, onDevice });
 
   const books = snapshot?.books || [];
   const device: DeviceIndex = snapshot?.device || EMPTY_DEVICE_INDEX;
@@ -117,6 +115,11 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   // "you have no books" would simply be false there. Section 12's upgrading
   // device is unaffected: it has downloads, so `libraryTotal` is not zero and
   // its books render straight away.
+  //
+  // This stays true for as long as the device has not completed a pull — a
+  // failed or stalled first pull no longer resolves it, because a device that
+  // has not been told what the account holds cannot report what the account
+  // holds. There is no timeout after which a guess becomes a fact.
   const firstSync = !!snapshot && snapshot.libraryTotal === 0 && preparing;
   // The launch benchmark measures the moment this attribute lands in the DOM.
   // It is a contract: it may only be set when the user's REAL library is on
@@ -225,16 +228,40 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
     ) : null;
   }
 
-  // The device has nothing mirrored and has never asked for anything. Saying
+  // The device has nothing mirrored and has never completed a pull. Saying
   // "bring your first audiobook" here would be a guess presented as a fact, so
-  // it says what is actually happening — and carries no readiness marker.
+  // it says what is actually happening — and carries no readiness marker, in
+  // either of its two wordings.
   if (firstSync) {
+    // A pull that has not answered yet has not failed. Only one of these three
+    // says the device could not reach the account, and none of them claims to
+    // know what the account holds.
+    if (firstSyncStatus === "unreachable") {
+      return (
+        <section className="library-content" aria-labelledby="library-title">
+          <div className="no-results">
+            <CloudSlash size={30} weight="duotone" aria-hidden="true" />
+            <h2 id="library-title">This device has not seen your library yet</h2>
+            <p>
+              Hark could not reach your account from this device, so it cannot tell you what is in
+              your library. Nothing is lost — this finishes as soon as there is a connection.
+            </p>
+            <button type="button" className="secondary-button" onClick={retry}>
+              Try again
+            </button>
+          </div>
+        </section>
+      );
+    }
     return (
       <section className="library-content" aria-labelledby="library-title" aria-busy="true">
         <div className="no-results">
           <BookOpenText size={30} weight="duotone" aria-hidden="true" />
           <h2 id="library-title">Setting up your library</h2>
-          <p>Hark is bringing this account&apos;s books onto this device for the first time.</p>
+          <p>
+            Hark is bringing this account&apos;s books onto this device for the first time.
+            {firstSyncStatus === "slow" && " This one is taking longer than usual."}
+          </p>
         </div>
       </section>
     );

@@ -353,8 +353,23 @@ export function FullPlayer({
         diagnostic={details?.chapterDiagnostic}
       />
 
-      {details && detailsOpen && (
-        <BookDetailsDialog details={details} open onClose={() => setDetailsOpen(false)} />
+      {/*
+        Mounted as soon as this book has details, not on the first click.
+
+        The dialog stays a separate chunk — the library bundle, which is what
+        launch is measured on, renders `FullPlayer` with no `details` and so
+        never fetches it. But on a book page the chunk has to arrive BEFORE the
+        connection does not: fetching it on the click threw `ChunkLoadError`
+        offline and nothing opened, which would have made the whole offline
+        edit surface unreachable exactly when the outbox matters most. The
+        element renders nothing until `showModal()` runs.
+      */}
+      {details && (
+        <BookDetailsDialog
+          details={details}
+          open={detailsOpen}
+          onClose={() => setDetailsOpen(false)}
+        />
       )}
     </div>
   );

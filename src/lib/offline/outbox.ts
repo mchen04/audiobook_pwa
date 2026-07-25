@@ -21,6 +21,7 @@ import {
   type MirrorBookTag,
   type MirrorCollectionBook,
   type MirrorPlaybackState,
+  type MirrorTag,
   type OfflineDatabase,
 } from "./db";
 
@@ -178,6 +179,62 @@ export async function commitTagEdge(
     deviceId: origin.deviceId,
     deviceSequence: 0,
   });
+}
+
+/**
+ * The details dialog's whole-tag-list field, expressed as edges.
+ *
+ * The dialog offers a comma-separated list of *names*, but the queued form has
+ * to be per-edge. A `tags: [...]` replacement would be the last writer to reach
+ * the server wiping every tag another device added while this one was offline,
+ * which is precisely the conflict the design contract's section 7 resolves as
+ * add-wins-per-edge. Only what the user actually changed is queued.
+ *
+ * A name with no id in the mirror — a tag being invented right now, or one this
+ * device has never pulled — gets a locally minted id and a mirror vocabulary
+ * row. The id is a guess the server is free to ignore: `resolveEdgeTag` falls
+ * back to the name, re-establishing or creating the entry, and the next pull
+ * replaces the guess with the real row. Minting it locally is what lets the new
+ * chip appear on this device immediately instead of after a round trip.
+ */
+export async function commitTagList(
+  origin: Origin,
+  bookId: string,
+  previous: string[],
+  next: string[],
+): Promise<void> {
+  const before = new Map(previous.map((name) => [name.trim().toLowerCase(), name.trim()]));
+  const after = new Map(next.map((name) => [name.trim().toLowerCase(), name.trim()]));
+  before.delete("");
+  after.delete("");
+
+  const db = await database();
+  const vocabulary = await db.getAllFromIndex("tags", "by-user", origin.userId);
+  const idByName = new Map(vocabulary.map((tag) => [tag.name.toLowerCase(), tag.tagId]));
+
+  for (const [lowered] of before) {
+    if (after.has(lowered)) continue;
+    const tagId = idByName.get(lowered);
+    // Nothing local names this tag, so there is no edge to express. The book's
+    // own tag list is re-read from the next pull either way.
+    if (tagId) await commitTagEdge(origin, bookId, tagId, false);
+  }
+  for (const [lowered, name] of after) {
+    if (before.has(lowered)) continue;
+    let tagId = idByName.get(lowered);
+    if (!tagId) {
+      tagId = crypto.randomUUID();
+      const record: MirrorTag = {
+        key: mirrorKey(origin.userId, tagId),
+        userId: origin.userId,
+        tagId,
+        name,
+      };
+      await db.put("tags", record);
+      idByName.set(lowered, tagId);
+    }
+    await commitTagEdge(origin, bookId, tagId, true);
+  }
 }
 
 export function commitCollectionEdge(
