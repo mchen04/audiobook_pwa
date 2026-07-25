@@ -17,11 +17,6 @@ const LEGACY_MEDIA_CACHE = "chapterline-media-v1";
  * lists this exact path as the entry a sign-in sweep may leave in place.
  */
 const OFFLINE_URL = "/offline";
-/**
- * The URL a launch asks for. The shell is cached under this too, byte for byte
- * the same user-agnostic document as `/offline` — see `precacheShell`.
- */
-const LAUNCH_URL = "/library";
 const PRECACHE = [OFFLINE_URL, "/icons/icon-192.png"];
 /**
  * How long a navigation the shell cannot answer may wait on the network.
@@ -35,43 +30,7 @@ const NAVIGATION_TIMEOUT_MS = 3000;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(precacheShell().then(() => self.skipWaiting()));
-  declareLaunchRoute(event);
 });
-
-/**
- * Take the launch off the network even before this worker is awake.
- *
- * Serving `/library` from Cache Storage in `fetch` below is not the whole job.
- * When a navigation arrives and the worker is not running — which on a real
- * home-screen launch is nearly always — the browser has to boot it first, and
- * Chromium hedges that wait by speculatively racing the network for the same
- * document (`ServiceWorkerAutoPreload`). The page is still served from the
- * cache and never waits for that request, so it costs the user no time; it
- * costs the SERVER a full `/library` render and its Postgres queries, on every
- * cold launch, and the answer is thrown away.
- *
- * The static routing API states the rule declaratively, so the browser can
- * satisfy the navigation from the cache without starting the worker at all and
- * has nothing to hedge against. Measured: 6 discarded document renders and 24
- * Postgres queries per benchmark run before this, zero after.
- *
- * `addRoutes` is Chromium-only and rejects on a malformed rule, so it is
- * guarded — where it is unsupported the `fetch` handler below is unchanged and
- * still authoritative. This is an optimisation of who answers, never of what.
- */
-function declareLaunchRoute(event) {
-  if (typeof event.addRoutes !== "function") return;
-  try {
-    const routed = event.addRoutes({
-      condition: { urlPattern: { pathname: "/library" }, requestMode: "navigate" },
-      source: "cache",
-    });
-    if (routed && typeof routed.catch === "function") routed.catch(() => undefined);
-  } catch {
-    // An unsupported rule shape must never fail the install; the worker still
-    // answers the same navigation itself, one wasted request later.
-  }
-}
 
 // The shell has to render with no network at all — it is what a warm launch is
 // served — so its static chunks are captured here at install time rather than
@@ -82,13 +41,6 @@ async function precacheShell() {
   await cache.addAll(PRECACHE);
   const offlinePage = await cache.match(OFFLINE_URL);
   if (!offlinePage) throw new Error("The required offline page was not cached.");
-  // The same document, stored a second time under the URL a launch actually
-  // asks for. `serveNavigation` does not need this — it maps /library onto the
-  // /offline entry itself — but the static route declared in `install` is a
-  // plain cache lookup by request URL, and a miss there falls through to the
-  // network, which is the opposite of what it is for. Storing it under both
-  // keys is what makes the declarative rule and the handler agree.
-  await cache.put(LAUNCH_URL, offlinePage.clone());
   const html = await offlinePage.clone().text();
   const assets = [...new Set(html.match(/\/_next\/static\/[^"'\s\\]+/g) || [])];
   await Promise.all(assets.map((asset) => cache.add(asset)));

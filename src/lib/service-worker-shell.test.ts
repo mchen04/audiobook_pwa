@@ -21,7 +21,6 @@ describe("service-worker shell installation", () => {
     // `/offline` and the static shell when an account switches.
     expect(constants).toContain('const CACHE_VERSION = "chapterline-shell-');
     expect(constants).toContain('const OFFLINE_URL = "/offline"');
-    expect(constants).toContain('const LAUNCH_URL = "/library"');
     expect(constants).toContain("const PRECACHE = [OFFLINE_URL");
   });
 
@@ -33,20 +32,6 @@ describe("service-worker shell installation", () => {
 
     expect(cache.addAll).toHaveBeenCalledWith(["/offline", "/icons/icon-192.png"]);
     expect(cache.add).toHaveBeenCalledWith("/_next/static/chunks/offline.js");
-  });
-
-  it("stores the shell under the URL a launch actually asks for", async () => {
-    // The static route declared in `install` is a plain cache lookup by request
-    // URL, and a miss falls through to the network — which would put the cold
-    // launch back on the network it exists to avoid. `serveNavigation` maps
-    // /library onto the /offline entry itself, so this second copy is what
-    // makes the declarative rule and the handler agree.
-    const cache = shellCache();
-    const precacheShell = createPrecacheShell({ open: vi.fn().mockResolvedValue(cache) });
-
-    await precacheShell();
-
-    expect(cache.put).toHaveBeenCalledWith("/library", expect.any(Response));
   });
 
   it("rejects installation when a required chunk cannot be cached", async () => {
@@ -65,6 +50,5 @@ function shellCache() {
       .fn()
       .mockResolvedValue(new Response('<script src="/_next/static/chunks/offline.js"></script>')),
     add: vi.fn().mockResolvedValue(undefined),
-    put: vi.fn().mockResolvedValue(undefined),
   };
 }
