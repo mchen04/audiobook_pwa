@@ -13,6 +13,11 @@ and no practical file-size limit beyond the device's free space, so a single
 an embedded read-along transcript, its text is book content too, so it is stored
 on the device alongside the audio and never included in any server request.
 
+**Your library reads from the device, too.** Every book row, chapter, tag and
+position is mirrored into this device's IndexedDB, and the library screen reads
+only from there; the network syncs afterwards, in the background. The design
+contract for that is `docs/local-first.md`.
+
 ## What it does
 
 - **Import**: parses the MP3 entirely in the browser — title/author/narrator,
@@ -33,14 +38,25 @@ on the device alongside the audio and never included in any server request.
   imports.)
 - **Resume anywhere**: positions, playback history, and library organization sync
   through the server with per-device monotonic sequences and deterministic
-  conflict rules. On a device that doesn't hold the audio yet, the player asks
-  for the original MP3 and verifies it by size and content fingerprint before
-  attaching it.
-- **Offline**: every imported book is already local, served by the service
-  worker with full seeking; offline progress/history replay idempotently on
-  reconnect.
-- **Organize**: search, status and tag filters, sort orders, grid/list views,
-  collections with optional next-book autoplay, archive, and delete.
+  conflict rules. Every write is journaled to a local outbox first, projected
+  onto the local mirror second, and replayed against the server by its
+  `mutationId` so a retry is a no-op rather than a double-apply. On a device
+  that doesn't hold the audio yet, the player asks for the original MP3 and
+  verifies it by size and content fingerprint before attaching it.
+- **Offline**: the library screen reads this device's IndexedDB mirror, so
+  search, filters, sort, the "On this device" facet and the continue card behave
+  identically with the network off — there is no "am I online?" branch on the
+  read path. The `/library` document itself is served from Cache Storage without
+  touching the network, so a cold database and airplane mode cost what wifi
+  costs: warm-launch p95 measures 134-151ms across fast, slow, 3000ms-cold-database
+  and offline profiles, with zero server document hits and zero Postgres
+  queries. Imported audio is served by the service worker with full seeking, and
+  queued writes replay when the app is next open.
+- **Organize**: search, status and tag filters, an "On this device" facet, sort
+  orders, grid/list views, collections with optional next-book autoplay,
+  archive, and delete. There is one library screen: books whose audio is not on
+  this device stay browsable, searchable, taggable and sortable, are marked as
+  not on the device, and never look playable.
 - **Own your data**: JSON export of all metadata/progress and full account
   deletion (rows and this device's local data — the audio files were always
   yours).
@@ -70,8 +86,9 @@ to `.data/mail/` instead.
 
 Tests never touch the hosted database: its cold start makes runs slow and flaky,
 suites must work offline, and parallel runs against one shared remote database
-interfere. `docker-compose.yml` provides a local Postgres matching the hosted
-server's major version and locale, published on host port `54329`.
+interfere. `docker-compose.yml` provides a local Postgres 18 matching the hosted
+server's major version and locale (builtin `C.UTF-8`), with the `pg_trgm`
+extension migration 0009 needs, published on `127.0.0.1:54329`.
 
 ```sh
 cp .env.test.example .env.test   # local-only credentials, gitignored
@@ -85,26 +102,44 @@ aborts the e2e config, the standalone test server, and this bootstrap script if
 
 ## Commands
 
-| Command                              | What it does                                                                                                            |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                  |
-| `pnpm test`                          | Vitest suites (MP3 parsing contract, service-worker range parsing, progress conflict policy, offline queues, playback). |
-| `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                 |
-| `node scripts/test-db.mjs`           | Starts the local Postgres container, migrates it, and seeds the e2e account (`reset` to rebuild from empty).            |
-| `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                             |
-| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~60k rows onto an existing account for performance work.                                            |
+| Command                              | What it does                                                                                                                                                                                                                                 |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                        | The full non-browser gate: format check, lint, typecheck, all tests, production build.                                                                                                                                                       |
+| `pnpm test`                          | Vitest suites (MP3 and transcript parsing contracts, service-worker range/navigation/shell logic, progress conflict policy, the outbox and the mirror, IndexedDB upgrades, playback).                                                        |
+| `pnpm test:idb-migrate`              | Just the IndexedDB upgrade suite: every shipped version of both databases is opened from a fixture and carried forward, so downloads, transcripts and a pending deletion journal survive `chapterline-offline-v1` v7 and outbox v4.          |
+| `pnpm test:e2e:ios`                  | Production iPhone/WebKit flow: register, choose from Downloads, play, seek, relaunch, and play offline.                                                                                                                                      |
+| `pnpm test:e2e:launch`               | The launch benchmark in `tests/perf/`: warm launch to real library content over four networks (fast, slow, 3000ms cold database, offline), asserting p95, spread, server document hits and Postgres queries.                                 |
+| `pnpm test:e2e:parity`               | The parity project in `tests/parity/`, whose harness removes the network at the socket instead of through Playwright interception, because interception sits above the service worker and can be bypassed.                                   |
+| `pnpm test:sync`                     | The data-integrity project in `tests/sync/`: outbox durability and coalescing, two-device convergence, progress conflicts, mirror/audio eviction recovery, lossless re-import, and a seeded mutation fuzz across offline/online transitions. |
+| `node scripts/test-db.mjs`           | Starts the local Postgres container, migrates it, and seeds the e2e account. Subcommands `up`, `reset`, `down`, `migrate`, `seed`, `guard`, `psql` are also exposed as `pnpm db:test:*`.                                                     |
+| `pnpm db:migrate`                    | Applies ordered SQL migrations (idempotent; proven from an empty database).                                                                                                                                                                  |
+| `node scripts/seed-perf.mjs <email>` | Seeds 1,000 books / ~60k rows onto an existing account for performance work.                                                                                                                                                                 |
 
 Browser-level verification uses `agent-browser` against the production build,
 exercising the core flows (register, import, play, offline, resume) across
 phone, tablet, and desktop viewports.
 
+Three limits are worth stating before reading a green run as more than it is.
+The launch benchmark measures in a **Chromium** persistent context with iPhone 15
+emulation: in Playwright 1.61.1, WebKit's persistent context accepts
+`cache.put()` but returns nothing from `cache.match()`, in the page and in the
+service worker alike, so the app's worker cannot even install there. The harness
+probes WebKit first on every run and will switch back automatically when that is
+fixed; until then, WebKit PWA coverage comes from `tests/e2e/iphone-pwa.spec.ts`.
+The outbox drains only while the app is open, because iOS will not wake a closed
+PWA — an offline write reaches the server on the next foregrounded launch or
+reconnect, never before. And audio evicted by the OS is gone: it exists nowhere
+but the device, so the book stays visible with its metadata and asks for the MP3
+again.
+
 ## Repository layout
 
-All application code lives in `src/` (~14k lines): `app/` (routes and API),
-`components/` (UI), `lib/` (offline sync, storage, playback history), `server/`
-(DB schema and queries), and `domain/` (pure logic). Migrations are in
-`drizzle/`, tests in `tests/`, and the service worker (maintained directly,
-not build-generated) is `public/sw.js`.
+All application code lives in `src/` (~17k lines, plus ~7k of co-located unit
+tests): `app/` (routes and API), `components/` (UI), `lib/` (the device mirror,
+the outbox and sync, storage, playback history), `server/` (DB schema, queries,
+and the sync pull), and `domain/` (pure logic). Migrations are in `drizzle/`,
+browser-driven suites in `tests/` (`e2e/`, `perf/`, `parity/`, `sync/`), and the
+service worker (maintained directly, not build-generated) is `public/sw.js`.
 
 Everything else on disk is generated and git-ignored — `.next/` (the Next.js
 build, ~500MB and hundreds of thousands of lines of compiled JS),
@@ -114,6 +149,10 @@ actual source; count `src/` (plus `drizzle/` and `tests/`) for a real figure.
 
 ## Documentation
 
-- `docs/architecture.md` — stack, boundaries, data rules, offline model.
+- `docs/architecture.md` — stack, boundaries, data rules, the local read model,
+  the write path, and the launch path.
+- `docs/local-first.md` — the design contract for the device-authoritative
+  library: what is mirrored, the outbox, pull, conflict rules, the launch path,
+  eviction, and account lifecycle.
 - `docs/operations.md` — deployment, backups, troubleshooting, limitations.
 - `docs/ios-pwa-testing.md` — automated WebKit and physical-iPhone release gates.
