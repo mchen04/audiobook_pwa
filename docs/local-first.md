@@ -113,7 +113,7 @@ instead of aborting the version-change transaction. The new version number still
 commits, and because each sweep is guarded by `oldVersion < N` it can never run
 again.
 
-Today both sweeps only *delete* legacy rows, so a silent partial sweep leaves
+Today both sweeps only _delete_ legacy rows, so a silent partial sweep leaves
 stale-but-harmless data. That stops being true the moment an upgrade **rewrites**
 data. Any new upgrade step must be `await`ed inside `upgrade()` before the
 version is bumped, so a failure aborts the transaction and the upgrade is retried

@@ -87,6 +87,14 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
   const allTags = page.tags;
   const continueBook = page.continueBook;
 
+  // The launch benchmark measures the moment this attribute lands in the DOM.
+  // It is a contract: it may only be set when the user's REAL library is on
+  // screen — actual book cards, or the genuine "no books yet" state. A skeleton,
+  // a spinner, a placeholder grid, or a filtered "no matching books" view must
+  // never carry it, or the benchmark starts measuring an empty box and the
+  // sub-500ms bar stops meaning anything.
+  const launchReady = page.libraryTotal === 0 ? "empty" : books.length > 0 ? "books" : undefined;
+
   function chooseFile() {
     setError(null);
     inputRef.current?.click();
@@ -131,6 +139,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       {page.libraryTotal === 0 ? (
         <section
           className="empty-library"
+          data-launch-ready={launchReady}
           aria-labelledby="library-title"
           aria-busy={!!upload}
           inert={upload ? true : undefined}
@@ -153,6 +162,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       ) : (
         <section
           className="library-content"
+          data-launch-ready={launchReady}
           aria-labelledby="library-title"
           aria-busy={!!upload}
           inert={upload ? true : undefined}
