@@ -51,7 +51,7 @@ describe("bookmark storage removal", () => {
     const { getOfflineBook } = await import("./library");
     await getOfflineBook("user-1", "book-1");
 
-    const upgraded = await openDB(OFFLINE_DATABASE, 6);
+    const upgraded = await openDB(OFFLINE_DATABASE, 7);
     const record = await upgraded.get("downloads", "user-1:book-1");
     expect(record).not.toHaveProperty("bookmarks");
     expect([...upgraded.objectStoreNames]).toContain("transcripts");

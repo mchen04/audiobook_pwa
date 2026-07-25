@@ -1,0 +1,1 @@
+CREATE INDEX "books_owner_updated_id_idx" ON "books" USING btree ("owner_id","updated_at","id");

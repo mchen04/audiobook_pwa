@@ -121,6 +121,8 @@ export const books = pgTable(
   },
   (table) => [
     index("books_owner_created_id_idx").on(table.ownerId, table.createdAt, table.id),
+    // The sync pull cursor scans (owner, updatedAt, id) in that exact order.
+    index("books_owner_updated_id_idx").on(table.ownerId, table.updatedAt, table.id),
     index("books_owner_title_id_idx").on(table.ownerId, sql`lower(${table.title})`, table.id),
     index("books_owner_author_id_idx").on(table.ownerId, sql`lower(${table.author})`, table.id),
     index("books_search_trgm_idx").using(
