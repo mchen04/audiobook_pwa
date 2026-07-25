@@ -4,9 +4,10 @@ import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
 import { listQueuedMutations, nextDeviceSequence } from "@/lib/offline-sync";
+import { listPendingPlaybackActions, storePlaybackAction } from "@/lib/playback-history";
 import { openDB } from "idb";
 
-import { listLocalUserIds, purgeAccount, purgeOnSignIn } from "./account-purge";
+import { listLocalUserIds, purgeAccount, purgeOnSignIn, purgeOnSignOut } from "./account-purge";
 import { database, MEDIA_CACHE, mirrorKey } from "./db";
 import { commitMetadataEdit } from "./outbox";
 
@@ -395,4 +396,208 @@ describe("purge runs on both sign-out and sign-in", () => {
 
     expect(await rowsFor(USER_A)).toStrictEqual(before);
   });
+
+  /**
+   * The production race, reproduced exactly.
+   *
+   * `@/lib/offline/account-purge` has no static importer, so in a built app the
+   * `await import(...)` inside `runAccountPurge` is a chunk fetch — a real
+   * asynchronous gap. `account-menu.tsx` used to clear `ACTIVE_USER_KEY` the
+   * instant `signOut()` resolved, which is inside that gap. The purge then read
+   * `null`, took the "nobody is signed in" branch, swept only the page cache,
+   * and left the mirror, the downloads, the MP3s, the outbox, the playback
+   * history and the deletion journal on the device.
+   *
+   * Here the gap is one microtask instead of one network round trip, which is
+   * the SHORTEST it can ever be — a fix that survives this survives production.
+   */
+  it("captures the departing account before the caller can clear the key", async () => {
+    const { runAccountPurge } = await import("@/lib/auth-client");
+    vi.stubGlobal("window", globalThis);
+    await seedAccount(USER_A);
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+
+    const purging = runAccountPurge({
+      request: { url: "https://hark.test/api/auth/sign-out" },
+    });
+    // Precisely what the sign-out call site did the moment `signOut()` resolved.
+    storage.removeItem(ACTIVE_USER_KEY);
+    await purging;
+
+    const after = await rowsFor(USER_A);
+    for (const [store, count] of Object.entries(after)) {
+      expect(count, `${store} survived a sign-out that raced the caller`).toBe(0);
+    }
+  });
 });
+
+/**
+ * F11a — signing out must not be what destroys an unsent write.
+ *
+ * Every user write in this product is journaled to the outbox and lives nowhere
+ * else until the server answers. `clearQueuedMutationsForUser` deletes that
+ * queue, so sign-out was silently throwing away every edit a user made offline.
+ */
+describe("sign-out drains before it purges", () => {
+  const ok = () => new Response(null, { status: 200 });
+
+  it("delivers the account's unsent writes to the server before dropping them", async () => {
+    await seedAccount(USER_A);
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+    expect((await listQueuedMutations(USER_A)).length).toBeGreaterThan(0);
+    const sent: string[] = [];
+    const fetchFn = (async (url: RequestInfo | URL) => {
+      sent.push(String(url));
+      return ok();
+    }) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(USER_A, { fetchFn });
+
+    expect(sent, "the queued metadata edit was never sent before the queue was cleared").toContain(
+      "/api/books/book",
+    );
+    expect(outcome.undelivered).toStrictEqual([]);
+    expect(outcome.failure).toBe(null);
+    expect(await listQueuedMutations(USER_A)).toStrictEqual([]);
+  });
+
+  it("drains pending playback history too, which is its own outbox", async () => {
+    const userId = "user-history-drain";
+    const dead = (async () => {
+      throw new Error("offline");
+    }) as typeof fetch;
+    await storePlaybackAction(userId, "book", playbackEntry("action-1"), dead);
+    expect((await listPendingPlaybackActions(userId)).length).toBe(1);
+    const sent: string[] = [];
+    const fetchFn = (async (url: RequestInfo | URL) => {
+      sent.push(String(url));
+      return ok();
+    }) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn });
+
+    expect(sent).toContain("/api/books/book/history");
+    expect(outcome.undelivered).toStrictEqual([]);
+  });
+
+  it("reports writes the server would not take instead of dropping them silently", async () => {
+    await seedAccount(USER_A);
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+    const fetchFn = (async () => new Response(null, { status: 503 })) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(USER_A, { fetchFn });
+
+    expect(
+      outcome.undelivered.map((write) => `${write.kind}:${write.entityId}`),
+      "an undeliverable write was dropped without a word",
+    ).toStrictEqual(["metadata:book"]);
+    // The privacy bar does not move to make room for the report: the queue is
+    // still gone, because it names the account and the book it renamed.
+    expect(await listQueuedMutations(USER_A)).toStrictEqual([]);
+  });
+
+  it("cannot be hung by a network that never answers", async () => {
+    const userId = "user-hangs";
+    await commitMetadataEdit({ userId, deviceId: "device-1" }, "book", { title: "Renamed" });
+    const fetchFn = (() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn, drainTimeoutMs: 25 });
+
+    expect(outcome.undelivered.map((write) => write.kind)).toStrictEqual(["metadata"]);
+    expect(await listQueuedMutations(userId)).toStrictEqual([]);
+  });
+});
+
+/**
+ * F9 — one failing step must not abandon the rest of the sweep.
+ *
+ * The failure is injected the way it actually happens: Cache Storage refuses to
+ * open, which is what `OfflineStorageUnavailableError` exists for. That makes
+ * `clearLocalDataForUser` throw, and everything after it used to be skipped —
+ * leaving the deletion journal (which names the account and the books it
+ * deleted) and the account's replay counters on disk under the next session.
+ */
+describe("a failing purge step does not abandon the ones after it", () => {
+  it("still purges the deletion journal and the replay counters, and reports the failure", async () => {
+    await seedAccount(USER_A);
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+    const openCache = caches.api.open;
+    caches.api.open = (async (name: string) => {
+      if (name === MEDIA_CACHE) throw new Error("Cache Storage is unavailable");
+      return openCache(name);
+    }) as typeof caches.api.open;
+
+    await expect(purgeAccount(USER_A)).rejects.toThrow();
+
+    caches.api.open = openCache;
+    expect(await deletionRowsFor(USER_A), "the deletion journal outlived the failure").toBe(0);
+    expect(await sequenceRowsFor(USER_A), "the replay counters outlived the failure").toBe(0);
+    expect(storage.getItem(ACTIVE_USER_KEY)).toBe(null);
+  });
+});
+
+/**
+ * F8 — the sweep enumerates all three databases.
+ *
+ * `chapterline-sync-v1` and `hark-playback-history-v1` are separate databases
+ * from the mirror. An account whose only surviving trace is in one of them is
+ * still an account whose writes and listening the next user can read.
+ */
+describe("every database is enumerated", () => {
+  it("finds an account whose only trace is an unsent write", async () => {
+    const userId = "user-outbox-only";
+    await commitMetadataEdit({ userId, deviceId: "device-1" }, "book", { title: "Renamed" });
+
+    expect(await listLocalUserIds()).toContain(userId);
+  });
+
+  it("finds an account whose only trace is what it listened to", async () => {
+    const userId = "user-history-only";
+    const dead = (async () => {
+      throw new Error("offline");
+    }) as typeof fetch;
+    await storePlaybackAction(userId, "book", playbackEntry("action-1"), dead);
+
+    expect(await listLocalUserIds()).toContain(userId);
+  });
+
+  it("purges an account the mirror has never heard of when somebody else signs in", async () => {
+    const stale = "user-outbox-only";
+    await commitMetadataEdit({ userId: stale, deviceId: "device-1" }, "book", { title: "Renamed" });
+    await storePlaybackAction(stale, "book", playbackEntry("action-1"), (async () => {
+      throw new Error("offline");
+    }) as typeof fetch);
+    await seedAccount(USER_B);
+
+    expect(await purgeOnSignIn(USER_B)).toStrictEqual([stale]);
+
+    expect(await listQueuedMutations(stale)).toStrictEqual([]);
+    expect(await listPendingPlaybackActions(stale)).toStrictEqual([]);
+    expect(await listLocalUserIds()).toStrictEqual([USER_B]);
+  });
+});
+
+function playbackEntry(id: string) {
+  return {
+    id,
+    action: "seek" as const,
+    positionMs: 3_000,
+    previousPositionMs: 1_000,
+    playbackRate: 1,
+    description: null,
+    occurredAt: "2026-07-01T00:00:00.000Z",
+    recordedAt: "2026-07-01T00:00:01.000Z",
+  };
+}
+
+async function deletionRowsFor(userId: string): Promise<number> {
+  const db = await database();
+  return (await db.getAll("deletions")).filter((row) => row.userId === userId).length;
+}
+
+async function sequenceRowsFor(userId: string): Promise<number> {
+  const sync = await openDB("chapterline-sync-v1");
+  const rows = (await sync.getAll("sequences")) as { key: string }[];
+  sync.close();
+  return rows.filter((row) => row.key.startsWith(`${userId}:`)).length;
+}

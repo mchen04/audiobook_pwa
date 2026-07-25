@@ -495,6 +495,30 @@ export async function listQueuedMutations(userId: string): Promise<QueuedMutatio
 }
 
 /**
+ * Every account with an unsent write in this database.
+ *
+ * The account purge enumerates the device before it sweeps it, and an account
+ * whose only remaining trace is a queued mutation is still an account whose
+ * intent — a rename, a tag, the title of a book — is readable by whoever signs
+ * in next. Read from the `by-user` index's keys, so the cost is the number of
+ * distinct accounts rather than the size of the queue.
+ */
+export async function listQueuedMutationUserIds(): Promise<string[]> {
+  const db = await database();
+  const index = db.transaction("mutations").store.index("by-user");
+  const users: string[] = [];
+  // A key cursor that skips past each account once it is seen: the walk costs
+  // one step per distinct account, not one per queued write.
+  let cursor = await index.openKeyCursor();
+  while (cursor) {
+    const userId = String(cursor.key);
+    users.push(userId);
+    cursor = await cursor.continue(`${userId}￿`);
+  }
+  return users;
+}
+
+/**
  * Drops one account's queue. `sequences` is deliberately untouched: those
  * high-water marks order every future replay, and resetting them would let a
  * stale event overwrite a newer one after the next sign-in.

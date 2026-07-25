@@ -204,6 +204,53 @@ export async function clearPlaybackHistoryForBook(userId: string, bookId: string
   await transaction.done;
 }
 
+/**
+ * Every account with a recorded play, pause or seek in this database.
+ *
+ * `hark-playback-history-v1` is a separate database from the mirror, opened by
+ * this lazily-imported module and named nothing like the others, so an account
+ * whose only surviving trace is what it listened to would otherwise be invisible
+ * to the account sweep. Read from the `by-user` index's keys.
+ */
+export async function listPlaybackHistoryUserIds(): Promise<string[]> {
+  const db = await database();
+  const index = db.transaction("actions").store.index("by-user");
+  const users: string[] = [];
+  let cursor = await index.openKeyCursor();
+  while (cursor) {
+    const userId = String(cursor.key);
+    users.push(userId);
+    cursor = await cursor.continue(`${userId}￿`);
+  }
+  return users;
+}
+
+/**
+ * The account's playback actions the server has not acknowledged. This store is
+ * its own outbox — `syncState: "pending"` rows are user writes that exist
+ * nowhere else — so a sign-out that clears it without draining first is a lost
+ * write exactly like dropping a queued mutation.
+ */
+export async function listPendingPlaybackActions(
+  userId: string,
+): Promise<Array<{ id: string; bookId: string; occurredAt: string }>> {
+  const db = await database();
+  const pending = await db
+    .transaction("actions")
+    .store.index("by-user-sync")
+    .getAll(
+      IDBKeyRange.bound(
+        [userId, "pending", "", 0],
+        [userId, "pending", "￿", Number.MAX_SAFE_INTEGER],
+      ),
+    );
+  return pending.map((entry) => ({
+    id: entry.id,
+    bookId: entry.bookId,
+    occurredAt: entry.occurredAt,
+  }));
+}
+
 export async function clearPlaybackHistoryForUser(userId: string): Promise<void> {
   const db = await database();
   const transaction = db.transaction(["actions", "sequences"], "readwrite");

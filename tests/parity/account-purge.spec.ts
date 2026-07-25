@@ -14,6 +14,7 @@ import {
   resetAccount,
   signInThroughUi,
   signOutThroughUi,
+  sql,
   warmUp,
   type Account,
   type Device,
@@ -101,7 +102,7 @@ test.afterAll(async () => {
  * a row, tag / collection / preference / session / progress mutations, a pull
  * that mirrors all of it, and one mutation left queued in the outbox.
  */
-async function seedAccountA(page: Page, origin: string, account: Account): Promise<void> {
+async function seedAccountA(page: Page, origin: string, account: Account): Promise<string> {
   await importThroughUi(page, "purge-kept.mp3", bookBuffer(KEPT_BOOK, 0));
   await expect(page.getByRole("link", { name: KEPT_BOOK.title, exact: true })).toBeVisible({
     timeout: 60_000,
@@ -210,6 +211,7 @@ async function seedAccountA(page: Page, origin: string, account: Account): Promi
     [account.userId, keptId!] as const,
   );
   expect(queued.mutationId, "no mutation was journaled into the outbox").toBeTruthy();
+  return keptId!;
 }
 
 /** Refuses to continue unless the device really is holding account A's life. */
@@ -238,7 +240,8 @@ function expectAccountAIsOnTheDevice(storage: DeviceStorage, account: Account): 
 async function expectNothingOfAccountARemains(
   page: Page,
   account: Account,
-  incoming: Account,
+  /** The account now signed in, or `null` when nobody is — the sign-out case. */
+  incoming: Account | null,
 ): Promise<DeviceStorage> {
   await expect
     .poll(async () => residueOf(await readDeviceStorage(page, account.userId)), {
@@ -277,7 +280,12 @@ async function expectNothingOfAccountARemains(
       `${store} still holds a record naming account A after the switch`,
     ).toBe(0);
   }
-  expect(after.activeUser, "the device did not move to the incoming account").toBe(incoming.userId);
+  expect(
+    after.activeUser,
+    incoming
+      ? "the device did not move to the incoming account"
+      : "the device still says it belongs to the account that signed out",
+  ).toBe(incoming ? incoming.userId : null);
   return after;
 }
 
@@ -299,7 +307,96 @@ async function expectLibraryShowsNothingOfA(page: Page, origin: string): Promise
   ).toStrictEqual([]);
 }
 
+/**
+ * Signs out and refuses to let the product's own warning be mistaken for a
+ * harness timeout.
+ *
+ * `AccountMenu` deliberately stops on `/settings` and shows an alert when a
+ * queued write could not be delivered before the sweep destroyed it, rather
+ * than navigating away from the news. `signOutThroughUi` is waiting for
+ * `/login`, so that shows up as an opaque 60s timeout unless the alert is read
+ * back. It is a genuine failure either way — a lost write — but it must read as
+ * one.
+ */
+async function signOutAndReportLostWrites(page: Page): Promise<void> {
+  await signOutThroughUi(page).catch(async (error: unknown) => {
+    const warning = await page
+      .getByRole("alert")
+      .first()
+      .innerText()
+      .catch(() => "");
+    if (!warning) throw error;
+    throw new Error(
+      `sign-out stopped to report writes it could not deliver: ${warning}. ` +
+        "docs/local-first.md section 5: a queued mutation is a user write that exists nowhere " +
+        "else, and signing out is not allowed to be what destroys it.",
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
+
+/**
+ * The case the rest of this file never covered: SIGN OUT, then look at the
+ * device. Nobody signs back in.
+ *
+ * Every other test here signs account B in immediately afterwards, where
+ * `purgeOnSignIn` cleans up whatever the sign-out left — so a sign-out purge
+ * that did nothing at all still passed them. The device is read here in exactly
+ * the state a user leaves it in when they hand the phone over, or when the next
+ * person to open the app is not a person who signs in.
+ */
+test("signing out leaves nothing of the account on the device, with nobody signed in", async ({
+  browser,
+}) => {
+  test.setTimeout(300_000);
+  await resetAccount(accountA.userId);
+  const device: Device = await openDevice(browser, {
+    withDriver: true,
+    deviceId: "purge-device-00000001",
+  });
+  try {
+    await signInThroughUi(device.page, accountA);
+    await warmUp(device.page);
+    const keptId = await seedAccountA(device.page, device.origin, accountA);
+
+    // One more unsent write, chosen because its delivery is visible in the
+    // server's own row rather than only in the absence of a local one: sign-out
+    // clears the outbox, so "the queue is empty afterwards" is equally true of
+    // a write that landed and one that was thrown away.
+    const renamed = `Renamed before signing out ${Date.now()}`;
+    await device.page.evaluate(
+      async ([userId, bookId, title]) => {
+        window.__harkSync.configure(userId as string, "purge-device-00000001");
+        await window.__harkSync.commit({
+          kind: "rename",
+          bookId: bookId as string,
+          fields: { title: title as string },
+        });
+      },
+      [accountA.userId, keptId, renamed] as const,
+    );
+
+    const before = await readDeviceStorage(device.page, accountA.userId);
+    expectAccountAIsOnTheDevice(before, accountA);
+
+    await signOutAndReportLostWrites(device.page);
+
+    // NOBODY signs in. This is the whole point of the test.
+    await expectNothingOfAccountARemains(device.page, accountA, null);
+
+    const [book] = await sql()<{ title: string }[]>`
+      SELECT title FROM books WHERE id = ${keptId}::uuid
+    `;
+    expect(
+      book?.title,
+      "the edit queued before signing out never reached the server, and the sign-out purge " +
+        "deleted the only copy of it. docs/local-first.md section 5.",
+    ).toBe(renamed);
+  } finally {
+    await device.context.close();
+  }
+});
 
 test("signing out and signing another account in leaves nothing of the first readable", async ({
   browser,
@@ -319,7 +416,7 @@ test("signing out and signing another account in leaves nothing of the first rea
     const before = await readDeviceStorage(device.page, accountA.userId);
     expectAccountAIsOnTheDevice(before, accountA);
 
-    await signOutThroughUi(device.page);
+    await signOutAndReportLostWrites(device.page);
     await signInThroughUi(device.page, accountB);
 
     await expectNothingOfAccountARemains(device.page, accountA, accountB);
