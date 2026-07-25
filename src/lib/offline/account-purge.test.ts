@@ -314,12 +314,19 @@ describe("account purge", () => {
     await shell.put("https://hark.test/offline", new Response("shell"));
     await shell.put("https://hark.test/_next/static/chunk.js", new Response("js"));
     await shell.put("https://hark.test/icons/icon-192.png", new Response("icon"));
-    await shell.put("https://hark.test/library", new Response("account page"));
+    // `/library` is the SAME cached document as `/offline`, stored under a
+    // second key so the service worker's static route can answer a cold launch
+    // without booting the worker. It carries no identity, so it survives — see
+    // `isUserAgnosticShellEntry`. A page that really does name an account does
+    // not, which is what the settings entry below is here to prove.
+    await shell.put("https://hark.test/library", new Response("shell"));
+    await shell.put("https://hark.test/settings", new Response("account page"));
     await seedAccount(USER_A);
 
     await purgeAccount(USER_A);
 
-    expect(await shell.match("https://hark.test/library")).toBeUndefined();
+    expect(await shell.match("https://hark.test/settings")).toBeUndefined();
+    expect(await shell.match("https://hark.test/library")).toBeDefined();
     expect(await shell.match("https://hark.test/offline")).toBeDefined();
     expect(await shell.match("https://hark.test/_next/static/chunk.js")).toBeDefined();
     expect(await shell.match("https://hark.test/icons/icon-192.png")).toBeDefined();

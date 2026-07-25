@@ -32,16 +32,34 @@ import {
  * library on screen, on every network the user can be on — and it is built so
  * that it cannot answer that question dishonestly.
  *
- * Four things guard the number:
+ * Seven things guard the number:
  *   1. The library is seeded to a realistic size and the size is asserted, so a
  *      two-book library can never make the bar trivial.
- *   2. Every launch runs in ONE persistent context, and the service worker's
- *      survival is re-proved before each profile. If persistence broke, every
- *      launch would silently be a cold launch.
+ *   2. Every measured launch closes the browser process and relaunches
+ *      `launchPersistentContext` against the SAME user data dir, and the
+ *      service worker's survival is re-proved (in a freshly relaunched process)
+ *      before each profile. The profile stays warm; the process does not. That
+ *      is what an iOS Home-Screen tap actually is: iOS kills backgrounded PWAs,
+ *      so nearly every real launch pays a browser start and a service-worker
+ *      cold start. A single long-lived context excludes both.
  *   3. Server hit counts, not timings, decide whether the document came from
  *      cache. A fast server and a cached document look identical on a clock.
  *   4. Each delayed profile proves its delay actually bit, and the offline
  *      profile proves the network really is gone, before its launches count.
+ *   5. The CPU is throttled, and the throttle is proved to have engaged by
+ *      timing a fixed CPU-bound loop with it on and off. `devices["iPhone 15"]`
+ *      sets viewport, user agent, device pixel ratio and touch — it does not
+ *      touch CPU, and almost every millisecond of a warm launch is device-local
+ *      CPU work.
+ *   6. What was PAINTED is asserted, not just that some marker appeared. The
+ *      app sets `data-launch-ready="empty"` on the "Bring your first audiobook"
+ *      screen, so a mirror that was never synced, or was evicted or purged,
+ *      paints an empty box in ~0ms and would otherwise report a superb number
+ *      with zero queries. Every launch on this 1000-book account must report
+ *      the "books" marker AND a counted, non-zero number of rendered book
+ *      cards, captured inside the page in the same tick the marker lands.
+ *   7. The reported number is wall clock measured in Node, which over-reports.
+ *      The in-page figure is printed beside every launch.
  *
  * The 500ms and 150ms bars are frozen. Nothing in this file may relax them.
  */
@@ -56,6 +74,35 @@ const LAUNCH_TIMEOUT_MS = 15_000;
 /** The full `scripts/seed-perf.mjs` library: the size a real owner has. */
 const MIN_BOOKS = 1000;
 const START_URL_PATH = "/library?source=pwa";
+/**
+ * Every rendered book card. The library renders `PAGE_SIZE` of them into
+ * `.book-grid` in the same React commit that sets `data-launch-ready="books"`,
+ * so counting them at the marker is counting what the user is looking at.
+ */
+const BOOK_CARD_SELECTOR = ".book-grid .book-item";
+
+/**
+ * CPU throttling rate applied to every measured launch, via CDP
+ * `Emulation.setCPUThrottlingRate`.
+ *
+ * Why any rate at all: the path this benchmark measures is almost entirely
+ * device-local CPU — hydrate React, open IndexedDB, `getAll` a thousand books
+ * plus playback states plus tag edges plus tags, filter and sort them in JS,
+ * render the cards. None of that is network. Run unthrottled on an M-series
+ * Mac, the resulting number has no defensible mapping to the phone in the
+ * owner's hand, and the 500ms bar is being cleared by hardware the owner does
+ * not have.
+ *
+ * Why 4x: it is the rate Chrome DevTools and Lighthouse use for their default
+ * "mobile" emulation, chosen to approximate a mid-tier phone against a
+ * developer laptop. It is a convention rather than a measurement of any one
+ * handset — a modern iPhone is faster than 4x-slowdown implies and a budget
+ * Android is slower — but it is the published, widely-agreed default, so it is
+ * the honest choice for a number nobody is going to re-derive. It is NOT tuned
+ * to whatever makes the bar pass; see `proveCpuThrottled`, which fails the run
+ * if the throttle silently did not engage.
+ */
+const CPU_THROTTLE_RATE = 4;
 
 type Profile = {
   id: string;
@@ -74,8 +121,23 @@ const PROFILES: Profile[] = [
 type Launch = {
   ms: number;
   timedOut: boolean;
+  /** The marker attribute, read back over the wire after the wait. */
   readyKind: string | null;
+  /** The marker attribute as it was in the tick the marker landed, in-page. */
+  paintedKind: string | null;
+  /** Book cards on screen in that same tick. Null only if the marker never came. */
+  cards: number | null;
   inPageMs: number | null;
+  /**
+   * How the browser says the launch document was delivered, and how many bytes
+   * came over the wire for it. This separates two things a server hit count
+   * alone cannot: "the paint came off the network" and "the paint came out of
+   * Cache Storage while the browser also spoke to the server".
+   */
+  deliveredBy: string | null;
+  transferSize: number | null;
+  /** Cost of closing the previous browser process and starting a new one. */
+  relaunchMs: number;
   hits: ProxyReport;
   queries: number;
 };
@@ -85,6 +147,15 @@ type ProfileResult = {
   launches: Launch[];
   armedEvidence: string;
   persistenceEvidence: string;
+};
+
+/** What the page recorded about itself at the moment the marker landed. */
+type PaintRecord = {
+  ms: number;
+  kind: string | null;
+  cards: number;
+  deliveredBy: string | null;
+  transferSize: number | null;
 };
 
 const envFile = process.env.HARK_ENV_FILE ?? DEFAULT_TEST_ENV_FILE;
@@ -100,19 +171,26 @@ const account = {
 
 let bookCount = 0;
 let engineNote = "";
+let cpuThrottleEvidence = "(not measured)";
 
 // ------------------------------------------------------------ engine choice
 /**
  * The benchmark is about a document served cache-first out of Cache Storage,
- * across launches, in a persistent profile. An engine that cannot read back
- * what it wrote to Cache Storage cannot host that measurement at all: the
- * harness would stay red no matter how correct the app became, which is just a
- * different way of measuring nothing.
+ * across launches, in a persistent profile, on a phone's CPU. Two capabilities
+ * are therefore not optional:
+ *
+ *   - Cache Storage read-back in a persistent context. An engine that cannot do
+ *     it cannot host the measurement at all: the harness would stay red no
+ *     matter how correct the app became, which is just a different way of
+ *     measuring nothing.
+ *   - CPU throttling. The measured path is almost entirely device-local CPU, so
+ *     an engine that runs it at full desktop speed produces a number with no
+ *     mapping to the owner's phone. That is a pleasant fiction, not a result.
  *
  * So the engine is chosen by capability, not by preference, and the choice is
  * printed. WebKit is tried first because iOS Safari is the target; Chromium is
- * used only if WebKit's persistent context fails the probe, and that fallback
- * is stated loudly wherever the numbers appear.
+ * used only if WebKit fails a probe, and that fallback is stated loudly
+ * wherever the numbers appear.
  */
 type Engine = { name: string; browserType: BrowserType; evidence: string[] };
 
@@ -126,6 +204,7 @@ async function selectEngine(): Promise<Engine> {
   for (const [name, browserType] of candidates) {
     const dir = mkdtempSync(path.join(tmpdir(), `hark-engine-${name}-`));
     let readBack: string | null = null;
+    let cpuThrottling = "not reached";
     let failure = "";
     try {
       const context = await browserType.launchPersistentContext(dir, {
@@ -143,6 +222,15 @@ async function selectEngine(): Promise<Engine> {
           await caches.delete("hark-engine-probe");
           return body;
         });
+        cpuThrottling = await context
+          .newCDPSession(page)
+          .then(async (session) => {
+            await session.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLE_RATE });
+            await session.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+            await session.detach();
+            return "accepted";
+          })
+          .catch((error: unknown) => `refused (${String(error).split("\n")[0]})`);
       } finally {
         await context.close();
       }
@@ -152,18 +240,19 @@ async function selectEngine(): Promise<Engine> {
       rmSync(dir, { recursive: true, force: true });
     }
 
-    const capable = readBack === "probe-body";
+    const capable = readBack === "probe-body" && cpuThrottling === "accepted";
     evidence.push(
-      `${name} persistent context: Cache Storage read-back = ${JSON.stringify(readBack)}` +
+      `${name} persistent context: Cache Storage read-back = ${JSON.stringify(readBack)}, ` +
+        `Emulation.setCPUThrottlingRate = ${cpuThrottling}` +
         (failure ? ` (${failure})` : "") +
-        (capable ? " — USABLE" : " — UNUSABLE for a cache-first launch measurement"),
+        (capable ? " — USABLE" : " — UNUSABLE for a cache-first, CPU-throttled launch measurement"),
     );
     if (capable) return { name, browserType, evidence };
   }
 
   throw new Error(
-    "No browser engine can read back from Cache Storage in a persistent context, so a " +
-      "cache-first launch cannot be measured at all:\n  " +
+    "No browser engine can both read back from Cache Storage in a persistent context and throttle " +
+      "its CPU, so a cache-first launch on a phone-like CPU cannot be measured at all:\n  " +
       evidence.join("\n  "),
   );
 }
@@ -237,76 +326,221 @@ async function readQueryCount(reset: boolean): Promise<number> {
   return payload.count;
 }
 
+// ------------------------------------------------------------ browser process
+/**
+ * Opens a persistent context against `userDataDir`.
+ *
+ * Called once per measured launch. The directory is the same every time, so the
+ * service worker registration, Cache Storage, IndexedDB and cookies survive;
+ * the browser process does not. That is the whole point — see note 2 at the top
+ * of this file.
+ */
+type ContextHandle = { context: BrowserContext; relaunchMs: number };
+
+const abortEverything = (route: Route) => route.abort("internetdisconnected");
+
+async function openLaunchContext(
+  engine: Engine,
+  userDataDir: string,
+  offline: boolean,
+): Promise<ContextHandle> {
+  const started = performance.now();
+  const context = await engine.browserType.launchPersistentContext(userDataDir, {
+    ...devices["iPhone 15"],
+    serviceWorkers: "allow",
+  });
+  // iOS sets this only when Safari launches the site from the Home Screen icon,
+  // which is the launch this benchmark is about. Re-applied on every relaunch,
+  // because init scripts live on the context, not on the profile directory.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "standalone", { configurable: true, value: true });
+  });
+  // setOffline(true) makes WebKit throw "internal error" on navigation even when
+  // the service worker could answer from cache; aborting routes removes the
+  // network while leaving the service worker able to serve.
+  if (offline) await context.route("**/*", abortEverything);
+  return { context, relaunchMs: performance.now() - started };
+}
+
+// ------------------------------------------------------------- CPU throttling
+/**
+ * Applies CPU throttling to one page over CDP. Must be called before the
+ * navigation, so that parse, hydrate, the IndexedDB reads and the render all
+ * run slowed down.
+ *
+ * The session is deliberately not detached: detaching resets the rate.
+ */
+async function throttleCpu(page: Page, rate: number): Promise<void> {
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setCPUThrottlingRate", { rate });
+}
+
+/**
+ * Proves the throttle actually engages, by timing an identical pure-CPU loop
+ * with it off and on. A CDP call that silently no-ops would make this benchmark
+ * worse than one that never claimed to throttle at all: it would print a
+ * "throttled" table full of desktop numbers.
+ */
+async function proveCpuThrottled(page: Page, rate: number): Promise<string> {
+  // No timers, no I/O, no allocation: a fixed amount of arithmetic, so the only
+  // thing that can change its duration is how much CPU the page is given.
+  const spin = () =>
+    page.evaluate(() => {
+      const started = performance.now();
+      let accumulator = 0;
+      for (let index = 0; index < 8_000_000; index += 1) accumulator += Math.sqrt(index % 977);
+      return { ms: performance.now() - started, accumulator };
+    });
+
+  await spin(); // warm the JIT, so the comparison is not measuring compilation
+  const free = Math.min((await spin()).ms, (await spin()).ms);
+
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setCPUThrottlingRate", { rate });
+  const throttled = Math.min((await spin()).ms, (await spin()).ms);
+  await session.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+  const restored = Math.min((await spin()).ms, (await spin()).ms);
+  await session.detach();
+
+  const observed = throttled / free;
+  expect(
+    observed,
+    `CPU throttling was requested at ${rate}x but a fixed CPU-bound loop took ${round(free)}ms ` +
+      `free and ${round(throttled)}ms throttled — a ${observed.toFixed(2)}x slowdown. The CDP ` +
+      "call did not bite, so every number below would be an unthrottled desktop number wearing " +
+      "a mobile label.",
+  ).toBeGreaterThanOrEqual(rate * 0.6);
+  expect(
+    restored / free,
+    `Setting the CPU throttling rate back to 1x did not restore full speed (${round(restored)}ms ` +
+      `vs ${round(free)}ms free), so the throttle control is not trustworthy in either direction.`,
+  ).toBeLessThan(rate * 0.6);
+
+  return (
+    `CPU throttle: a fixed 8M-iteration loop ran in ${round(free)}ms at 1x, ${round(throttled)}ms ` +
+    `at ${rate}x (${observed.toFixed(2)}x slowdown observed) and ${round(restored)}ms after ` +
+    `resetting to 1x — Emulation.setCPUThrottlingRate is genuinely biting`
+  );
+}
+
 // -------------------------------------------------------------- one "launch"
 /**
- * A launch is a brand new page in the SAME persistent context, navigating to
- * the manifest `start_url`. New page = fresh document, fresh JS heap, fresh
- * paint. Same context = the service worker, Cache Storage, IndexedDB and
- * cookies that a real second launch would still have.
+ * A launch closes the browser process and starts a new one against the same
+ * user data dir, then navigates to the manifest `start_url`.
+ *
+ * New process = fresh document, fresh JS heap, fresh paint, and a service
+ * worker that has to be woken from disk rather than one that has been resident
+ * the whole time. Same user data dir = the service worker registration, Cache
+ * Storage, IndexedDB and cookies that a real second launch would still have.
+ *
+ * The clock starts at the navigation, not at `launchPersistentContext`. The
+ * browser-spawn cost is measured and printed separately (`relaunchMs`) but kept
+ * out of the reported number, because Playwright's Chromium spawn plus its CDP
+ * handshake is a harness cost and not a defensible stand-in for iOS starting
+ * Safari. What the relaunch DOES buy the number is real and is included: the
+ * service worker cold start now sits on the measured path.
  */
 async function measureLaunch(
-  context: BrowserContext,
+  engine: Engine,
+  userDataDir: string,
   proxy: LatencyProxy,
   url: string,
+  offline: boolean,
 ): Promise<Launch> {
+  const handle = await openLaunchContext(engine, userDataDir, offline);
   proxy.reset();
   await readQueryCount(true);
 
-  const page = await context.newPage();
-  await page.addInitScript(() => {
-    const target = window as unknown as { __harkLaunchReadyMs: number | null };
-    target.__harkLaunchReadyMs = null;
-    const found = () => {
-      if (target.__harkLaunchReadyMs !== null) return true;
-      if (!document.querySelector("[data-launch-ready]")) return false;
-      target.__harkLaunchReadyMs = performance.now();
-      return true;
-    };
-    if (!found()) {
-      const observer = new MutationObserver(() => {
-        if (found()) observer.disconnect();
-      });
-      observer.observe(document, { childList: true, subtree: true, attributes: true });
+  try {
+    const page = await handle.context.newPage();
+    await throttleCpu(page, CPU_THROTTLE_RATE);
+    await page.addInitScript((cardSelector: string) => {
+      const target = window as unknown as {
+        __harkLaunch: {
+          ms: number;
+          kind: string | null;
+          cards: number;
+          deliveredBy: string | null;
+          transferSize: number | null;
+        } | null;
+      };
+      target.__harkLaunch = null;
+      const found = () => {
+        if (target.__harkLaunch !== null) return true;
+        const marker = document.querySelector("[data-launch-ready]");
+        if (!marker) return false;
+        const navigation = performance.getEntriesByType("navigation")[0] as
+          (PerformanceNavigationTiming & { deliveryType?: string }) | undefined;
+        // Marker value AND card count are read here, in the page, in the tick
+        // the marker lands. That costs no extra round trip and — unlike a
+        // question asked afterwards — it cannot be answered by content that
+        // only arrived later.
+        target.__harkLaunch = {
+          ms: performance.now(),
+          kind: marker.getAttribute("data-launch-ready"),
+          cards: document.querySelectorAll(cardSelector).length,
+          deliveredBy: navigation?.deliveryType ?? null,
+          transferSize: navigation?.transferSize ?? null,
+        };
+        return true;
+      };
+      if (!found()) {
+        const observer = new MutationObserver(() => {
+          if (found()) observer.disconnect();
+        });
+        observer.observe(document, { childList: true, subtree: true, attributes: true });
+      }
+    }, BOOK_CARD_SELECTOR);
+
+    const started = performance.now();
+    let timedOut = false;
+    try {
+      // "commit" rather than "load": the clock must stop at painted content, not
+      // at the load event, and an offline navigation must not throw before the
+      // service worker gets its chance to answer.
+      await page.goto(url, { waitUntil: "commit", timeout: LAUNCH_TIMEOUT_MS });
+    } catch {
+      // Recorded through the readiness wait below, never swallowed.
     }
-  });
+    let readyKind: string | null = null;
+    try {
+      const remaining = Math.max(250, LAUNCH_TIMEOUT_MS - (performance.now() - started));
+      const marker = await page.waitForSelector("[data-launch-ready]", {
+        state: "attached",
+        timeout: remaining,
+      });
+      readyKind = await marker.getAttribute("data-launch-ready");
+    } catch {
+      timedOut = true;
+    }
+    const ms = performance.now() - started;
 
-  const started = performance.now();
-  let timedOut = false;
-  try {
-    // "commit" rather than "load": the clock must stop at painted content, not
-    // at the load event, and an offline navigation must not throw before the
-    // service worker gets its chance to answer.
-    await page.goto(url, { waitUntil: "commit", timeout: LAUNCH_TIMEOUT_MS });
-  } catch {
-    // Recorded through the readiness wait below, never swallowed.
+    let painted: PaintRecord | null = null;
+    if (!timedOut) {
+      painted = await page
+        .evaluate(() => (window as unknown as { __harkLaunch: PaintRecord | null }).__harkLaunch)
+        .catch(() => null);
+    }
+
+    const queries = await readQueryCount(true);
+    const hits = proxy.report();
+
+    return {
+      ms,
+      timedOut,
+      readyKind,
+      paintedKind: painted?.kind ?? null,
+      cards: painted ? painted.cards : null,
+      inPageMs: painted?.ms ?? null,
+      deliveredBy: painted?.deliveredBy ?? null,
+      transferSize: painted?.transferSize ?? null,
+      relaunchMs: handle.relaunchMs,
+      hits,
+      queries,
+    };
+  } finally {
+    await handle.context.close();
   }
-  let readyKind: string | null = null;
-  try {
-    const remaining = Math.max(250, LAUNCH_TIMEOUT_MS - (performance.now() - started));
-    const marker = await page.waitForSelector("[data-launch-ready]", {
-      state: "attached",
-      timeout: remaining,
-    });
-    readyKind = await marker.getAttribute("data-launch-ready");
-  } catch {
-    timedOut = true;
-  }
-  const ms = performance.now() - started;
-
-  let inPageMs: number | null = null;
-  if (!timedOut) {
-    inPageMs = await page
-      .evaluate(
-        () => (window as unknown as { __harkLaunchReadyMs: number | null }).__harkLaunchReadyMs,
-      )
-      .catch(() => null);
-  }
-
-  const queries = await readQueryCount(true);
-  const hits = proxy.report();
-  await page.close();
-
-  return { ms, timedOut, readyKind, inPageMs, hits, queries };
 }
 
 // ------------------------------------------------------------- armed profiles
@@ -383,10 +617,13 @@ async function proveProfileArmed(
 
 // ------------------------------------------------------------ persistence
 /**
- * Re-proves, before every profile, that the persistent context still holds the
- * things that make a warm launch warm. If this silently broke, every "launch"
- * below would be a first install and the harness would be measuring the wrong
- * thing while still producing a plausible table.
+ * Re-proves, before every profile, that the persistent PROFILE still holds the
+ * things that make a warm launch warm — in a browser process that was itself
+ * just started against that profile directory. If this silently broke, every
+ * "launch" below would be a first install and the harness would be measuring
+ * the wrong thing while still producing a plausible table. Since every measured
+ * launch now relaunches the process, this is also the proof that relaunching
+ * does not throw the profile away.
  */
 async function proveContextPersisted(
   context: BrowserContext,
@@ -456,10 +693,15 @@ function renderTable(results: ProfileResult[]): string {
   );
   lines.push(engineNote);
   lines.push(
-    `bars: p95 <= ${P95_BAR_MS}ms on every profile · spread(p95) <= ${SPREAD_BAR_MS}ms · ` +
-      "zero server document hits · zero Postgres queries",
+    `CPU: throttled ${CPU_THROTTLE_RATE}x via Emulation.setCPUThrottlingRate · ` +
+      "every measured launch is a fresh browser process against the same profile directory",
   );
-  lines.push("=".repeat(112));
+  lines.push(
+    `bars: p95 <= ${P95_BAR_MS}ms on every profile · spread(p95) <= ${SPREAD_BAR_MS}ms · ` +
+      "zero server document hits · zero Postgres queries · every launch paints " +
+      '"books" with >0 book cards',
+  );
+  lines.push("=".repeat(122));
   lines.push(
     [
       "profile".padEnd(24),
@@ -471,15 +713,19 @@ function renderTable(results: ProfileResult[]): string {
       "api hits".padStart(9),
       "asset".padStart(7),
       "queries".padStart(8),
+      "marker".padStart(9),
+      "cards".padStart(8),
     ].join(" "),
   );
-  lines.push("-".repeat(112));
+  lines.push("-".repeat(122));
 
   for (const result of results) {
     const times = result.launches.map((launch) => launch.ms);
     const timeouts = result.launches.filter((launch) => launch.timedOut).length;
     const sum = (pick: (launch: Launch) => number) =>
       result.launches.reduce((total, launch) => total + pick(launch), 0);
+    const markers = [...new Set(result.launches.map((launch) => launch.paintedKind ?? "none"))];
+    const cardCounts = result.launches.map((launch) => launch.cards ?? 0);
     lines.push(
       [
         `${result.profile.id} ${result.profile.label}`.padEnd(24),
@@ -491,10 +737,15 @@ function renderTable(results: ProfileResult[]): string {
         String(sum((launch) => launch.hits.api)).padStart(9),
         String(sum((launch) => launch.hits.asset)).padStart(7),
         String(sum((launch) => launch.queries)).padStart(8),
+        markers.join("/").padStart(9),
+        (Math.min(...cardCounts) === Math.max(...cardCounts)
+          ? String(Math.min(...cardCounts))
+          : `${Math.min(...cardCounts)}-${Math.max(...cardCounts)}`
+        ).padStart(8),
       ].join(" "),
     );
   }
-  lines.push("-".repeat(112));
+  lines.push("-".repeat(122));
 
   const p95s = results.map((result) =>
     percentile(
@@ -523,9 +774,22 @@ function renderTable(results: ProfileResult[]): string {
         `over ${overheads.length} launches`,
     );
   }
+  // Excluded from the reported number on purpose, and printed so that the
+  // exclusion is visible rather than assumed. Playwright's browser spawn plus
+  // its CDP handshake is a harness cost; iOS starting Safari is not the same
+  // thing and this is not a measurement of it.
+  const relaunches = results.flatMap((result) => result.launches.map((l) => l.relaunchMs));
+  if (relaunches.length) {
+    lines.push(
+      `browser relaunch cost EXCLUDED from the figures above (harness browser spawn, not iOS ` +
+        `process start): p50 ${round(percentile(relaunches, 0.5))}ms · ` +
+        `p95 ${round(percentile(relaunches, 0.95))}ms over ${relaunches.length} relaunches`,
+    );
+  }
   lines.push("");
   lines.push(
-    "Per-launch detail (ms [in-page ms] · marker · doc/api/asset server hits · postgres queries):",
+    "Per-launch detail (ms [in-page ms] · marker · book cards painted · how the document was " +
+      "delivered:bytes over the wire · doc/api/asset server hits · postgres queries):",
   );
   for (const result of results) {
     const detail = result.launches
@@ -534,6 +798,8 @@ function renderTable(results: ProfileResult[]): string {
           `${round(launch.ms)}${launch.timedOut ? "!" : ""}` +
           `[${launch.inPageMs === null ? "-" : round(launch.inPageMs)}]` +
           `/${launch.readyKind ?? "none"}/` +
+          `${launch.cards === null ? "-" : launch.cards}cards/` +
+          `${launch.deliveredBy ?? "?"}:${launch.transferSize ?? "?"}B/` +
           `${launch.hits.document}-${launch.hits.api}-${launch.hits.asset}/${launch.queries}q`,
       )
       .join("  ");
@@ -543,13 +809,23 @@ function renderTable(results: ProfileResult[]): string {
   lines.push(
     "     that launch is recorded AT the timeout, which is a LOWER BOUND on its real cost)",
   );
+  lines.push(
+    "  (Ncards = book cards counted in the page in the same tick the marker landed. 0 cards, or " +
+      'any marker other than "books",',
+  );
+  lines.push(
+    `     means the launch painted something that is NOT this account's ${bookCount}-book library.)`,
+  );
+  lines.push("");
+  lines.push("CPU throttle proof:");
+  lines.push(`  ${cpuThrottleEvidence}`);
   lines.push("");
   lines.push("Profile-armed self-checks:");
   for (const result of results) lines.push(`  ${result.armedEvidence}`);
   lines.push("");
-  lines.push("Persistent-context proof (re-checked before each profile):");
+  lines.push("Persistent-profile proof (re-checked in a freshly relaunched process, per profile):");
   for (const result of results) lines.push(`  ${result.persistenceEvidence}`);
-  lines.push("=".repeat(112));
+  lines.push("=".repeat(122));
   return lines.join("\n");
 }
 
@@ -578,9 +854,9 @@ test("library paints real content in under 500ms on every network profile", asyn
   for (const line of engine.evidence) console.log(`[launch-benchmark] engine probe · ${line}`);
   if (engine.name !== "webkit") {
     console.log(
-      "[launch-benchmark] WARNING: WebKit's persistent context cannot read back from Cache " +
-        "Storage in this Playwright build, so the launch path is measured on Chromium with " +
-        "iPhone emulation. iOS-engine fidelity of the launch path is NOT covered by this run.",
+      "[launch-benchmark] WARNING: WebKit's persistent context failed the capability probe " +
+        "above, so the launch path is measured on Chromium with iPhone emulation and a 4x CPU " +
+        "throttle. iOS-engine fidelity of the launch path is NOT covered by this run.",
     );
   }
 
@@ -590,17 +866,9 @@ test("library paints real content in under 500ms on every network profile", asyn
   let context: BrowserContext | null = null;
 
   try {
-    // One persistent context for the whole run. A fresh newContext() per launch
-    // would throw away exactly the state that makes a warm launch fast.
-    context = await engine.browserType.launchPersistentContext(userDataDir, {
-      ...devices["iPhone 15"],
-      serviceWorkers: "allow",
-    });
-    // iOS sets this only when Safari launches the site from the Home Screen
-    // icon, which is the launch this benchmark is about.
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "standalone", { configurable: true, value: true });
-    });
+    // The sign-in context. It is closed before any measurement, and every
+    // measured launch starts its own process against this same directory.
+    context = (await openLaunchContext(engine, userDataDir, false)).context;
 
     proxy.setDelay(0);
     const setup: Page = await context.newPage();
@@ -640,40 +908,61 @@ test("library paints real content in under 500ms on every network profile", asyn
       "No service worker is controlling the page after sign-in, so nothing below would be a warm launch.",
     ).toContain("/sw.js");
     console.log(`[launch-benchmark] service worker controlling: ${controller}`);
+
+    // Before anything is measured: prove the CPU throttle engages in this
+    // engine. Done here, on a page that is about to be thrown away, so the
+    // measured launches never carry the cost of proving it.
+    cpuThrottleEvidence = await proveCpuThrottled(setup, CPU_THROTTLE_RATE);
+    console.log(`[launch-benchmark] ${cpuThrottleEvidence}`);
     await setup.close();
+
+    // Closing the sign-in process flushes the profile to disk. Everything below
+    // reads it back from there.
+    await context.close();
+    context = null;
 
     // One unmeasured launch so the shell's static assets are in Cache Storage.
     // Every measured launch below is therefore a warm launch, which is the case
     // the mission's bar is about.
-    await measureLaunch(context, proxy, `${proxy.origin}${START_URL_PATH}`);
+    await measureLaunch(engine, userDataDir, proxy, `${proxy.origin}${START_URL_PATH}`, false);
 
     for (const profile of PROFILES) {
       // Persistence and armed-ness are checked with the network in its normal
-      // state, then the profile is applied.
+      // state, then the profile is applied. This context is itself freshly
+      // launched against the same user data dir, so proving the service worker,
+      // Cache Storage, IndexedDB and cookie are here is proving they survived a
+      // process restart.
       proxy.setDelay(0);
-      const persistenceEvidence = await proveContextPersisted(
-        context,
-        proxy,
-        `before profile ${profile.id}`,
-      );
+      const probeContext = await openLaunchContext(engine, userDataDir, false);
+      let persistenceEvidence: string;
+      let armedEvidence: string;
+      try {
+        persistenceEvidence = await proveContextPersisted(
+          probeContext.context,
+          proxy,
+          `before profile ${profile.id}`,
+        );
 
-      proxy.setDelay(profile.delayMs);
-      const abortEverything = (route: Route) => route.abort("internetdisconnected");
-      if (profile.offline) {
-        // setOffline(true) makes WebKit throw "internal error" on navigation
-        // even when the service worker could answer from cache; aborting routes
-        // removes the network while leaving the service worker able to serve.
-        await context.route("**/*", abortEverything);
+        proxy.setDelay(profile.delayMs);
+        if (profile.offline) await probeContext.context.route("**/*", abortEverything);
+        armedEvidence = await proveProfileArmed(probeContext.context, proxy, profile);
+      } finally {
+        await probeContext.context.close();
       }
-
-      const armedEvidence = await proveProfileArmed(context, proxy, profile);
 
       const launches: Launch[] = [];
       for (let index = 0; index < LAUNCHES_PER_PROFILE; index += 1) {
-        launches.push(await measureLaunch(context, proxy, `${proxy.origin}${START_URL_PATH}`));
+        launches.push(
+          await measureLaunch(
+            engine,
+            userDataDir,
+            proxy,
+            `${proxy.origin}${START_URL_PATH}`,
+            profile.offline,
+          ),
+        );
       }
 
-      if (profile.offline) await context.unroute("**/*", abortEverything);
       results.push({ profile, launches, armedEvidence, persistenceEvidence });
     }
   } finally {
@@ -698,6 +987,12 @@ test("library paints real content in under 500ms on every network profile", asyn
       )
       .toBe(0);
 
+    // What was on screen, not merely that something was. The account owns
+    // `bookCount` books — verified in Postgres in beforeAll — so the only
+    // acceptable paint is the real library. `data-launch-ready="empty"` is the
+    // "Bring your first audiobook" screen: a mirror that was never synced, or
+    // was evicted or purged, paints it in almost no time with no queries, and
+    // that is exactly the fast-and-wrong result this benchmark exists to catch.
     for (const launch of result.launches) {
       expect
         .soft(
@@ -705,6 +1000,44 @@ test("library paints real content in under 500ms on every network profile", asyn
           `${label}: a launch finished without the readiness marker naming real content`,
         )
         .not.toBeNull();
+      expect
+        .soft(
+          launch.paintedKind,
+          `${label}: a launch painted "${launch.paintedKind ?? "nothing"}" on an account that ` +
+            `owns ${bookCount} books. Only "books" is this owner's real library; "empty" is the ` +
+            '"Bring your first audiobook" screen and "preparing"/none is a placeholder. A fast ' +
+            "launch that paints an empty box is not a fast launch.",
+        )
+        .toBe("books");
+      expect
+        .soft(
+          launch.cards ?? 0,
+          `${label}: a launch painted ${launch.cards ?? 0} book cards on an account that owns ` +
+            `${bookCount} books. The marker landed but nothing of the owner's library was on ` +
+            "screen.",
+        )
+        .toBeGreaterThan(0);
+      expect
+        .soft(
+          launch.readyKind,
+          `${label}: the marker read back over the wire ("${launch.readyKind}") disagrees with ` +
+            `what the page recorded at paint time ("${launch.paintedKind}"), so the content the ` +
+            "clock stopped on is not the content that was assessed.",
+        )
+        .toBe(launch.paintedKind);
+      // The paint itself must have come out of Cache Storage with nothing on
+      // the wire. This is deliberately a SEPARATE question from the server hit
+      // count below: a browser can serve the page from cache and still talk to
+      // the server, and the two failures have completely different causes and
+      // completely different fixes.
+      expect
+        .soft(
+          `${launch.deliveredBy}/${launch.transferSize}`,
+          `${label}: the launch document was delivered by "${launch.deliveredBy}" with ` +
+            `${launch.transferSize} bytes on the wire. A warm launch must paint from Cache ` +
+            "Storage with an empty transfer.",
+        )
+        .toBe("cache-storage/0");
     }
 
     // The honesty instrument. Timing cannot tell a cached document from a fast
@@ -715,8 +1048,11 @@ test("library paints real content in under 500ms on every network profile", asyn
       .soft(
         documentHits,
         `${label}: the document was fetched from the server ${documentHits} time(s) across ` +
-          `${LAUNCHES_PER_PROFILE} warm launches. A warm launch must be served from Cache ` +
-          `Storage, or the network is still on the paint path. Paths: ` +
+          `${LAUNCHES_PER_PROFILE} warm launches. A warm launch must not put the document on ` +
+          "the network at all. Check the delivery column first: if it says cache-storage/0B, " +
+          "the PAINT was cache-served and something else — the app, or the browser speculating " +
+          "around a cold service worker — still went to the server, and it still costs the " +
+          "owner and the server. Paths: " +
           result.launches.flatMap((l) => l.hits.documentPaths).join(", "),
       )
       .toBe(0);
