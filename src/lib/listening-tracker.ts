@@ -49,7 +49,9 @@ function defaultPost(bookId: string, payload: Parameters<PostSession>[1]): void 
   void fetch(`/api/books/${bookId}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    // Sessions are append-only, so the idempotency key is minted here, once per
+    // stretch: a retried or replayed POST records the same listen, never two.
+    body: JSON.stringify({ ...payload, mutationId: crypto.randomUUID() }),
     keepalive: true,
   }).catch(() => undefined);
 }

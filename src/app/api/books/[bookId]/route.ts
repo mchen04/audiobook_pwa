@@ -1,4 +1,4 @@
-import { and, count, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -8,7 +8,7 @@ import {
 } from "@/server/api/route-handler";
 import { getBookForUser, getOwnedBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
-import { books, bookTags, tags } from "@/server/db/schema";
+import { books, bookTags, bookTombstones, tags } from "@/server/db/schema";
 
 export const runtime = "nodejs";
 
@@ -88,7 +88,20 @@ export const PATCH = withMutationParams(
 
 export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
   const owned = await getOwnedBook(session.user.id, params.bookId);
-  if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
+  if (!owned) {
+    // Idempotent replay: a queued delete that already landed must not come back
+    // as 404, or the outbox would treat a successful write as a terminal
+    // failure. The tombstone is the durable proof it landed.
+    const [tombstone] = await db
+      .select({ bookId: bookTombstones.bookId })
+      .from(bookTombstones)
+      .where(
+        and(eq(bookTombstones.bookId, params.bookId), eq(bookTombstones.ownerId, session.user.id)),
+      )
+      .limit(1);
+    if (!tombstone) return Response.json({ error: "Not found" }, { status: 404 });
+    return Response.json({ deleted: true, alreadyDeleted: true });
+  }
 
   // Audio bytes live only on the user's devices; the client removes its local
   // copy alongside this row delete. Tags unique to this book are collected in
@@ -98,11 +111,39 @@ export const DELETE = withRawMutationParams(paramsSchema, async ({ session, para
       sql`select pg_advisory_xact_lock(hashtextextended(${`tags:${session.user.id}`}, 0))`,
     );
     await transaction.delete(books).where(eq(books.id, params.bookId));
+    // Same transaction as the delete: a deletion the user saw succeed can never
+    // exist without the tombstone that tells the user's other devices about it.
+    await transaction
+      .insert(bookTombstones)
+      .values({ bookId: params.bookId, ownerId: session.user.id })
+      .onConflictDoUpdate({
+        target: bookTombstones.bookId,
+        set: { deletedAt: new Date() },
+      });
     await deleteUnusedTags(transaction, session.user.id);
+    await pruneExpiredTombstones(transaction, session.user.id);
   });
 
   return Response.json({ deleted: true });
 });
+
+/**
+ * A device offline for longer than this has a stale cursor anyway and re-syncs
+ * from a full pull, which conveys deletions by absence from the complete book
+ * list. Matches the receipt retention horizon in `server/playback/history.ts`.
+ */
+const TOMBSTONE_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
+
+async function pruneExpiredTombstones(transaction: Transaction, userId: string): Promise<void> {
+  await transaction
+    .delete(bookTombstones)
+    .where(
+      and(
+        eq(bookTombstones.ownerId, userId),
+        lt(bookTombstones.deletedAt, new Date(Date.now() - TOMBSTONE_RETENTION_MS)),
+      ),
+    );
+}
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 

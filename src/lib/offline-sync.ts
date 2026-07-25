@@ -1,4 +1,4 @@
-import { openDB, type DBSchema } from "idb";
+import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 
 import { PROGRESS_CONFLICT_EVENT } from "@/lib/app-keys";
 import { singleFlight } from "@/lib/single-flight";
@@ -6,9 +6,39 @@ import { withKeyedLock } from "@/lib/keyed-lock";
 import { runBounded } from "@/lib/run-bounded";
 
 const DATABASE_NAME = "chapterline-sync-v1";
+export const SYNC_DATABASE_VERSION = 4;
 export const REPLAY_PAGE_SIZE = 100;
 export const REPLAY_CONCURRENCY = 4;
 const activeReplays = new Map<string, Promise<void>>();
+
+/**
+ * The outbox: every mutation this device has made but the server has not yet
+ * acknowledged. It is the only thing standing between a user write and a lost
+ * write, so nothing is ever removed from it except on a server answer that
+ * proves the write landed (or is permanently unacceptable).
+ *
+ * Design contract `docs/local-first.md` sections 5 and 7.
+ */
+
+export type MutationKind =
+  "progress" | "import" | "metadata" | "tag" | "collection" | "archive" | "delete" | "history";
+
+export type QueuedMutation = {
+  /** Coalesce identity. Two rows sharing a key are the same intent. */
+  key: string;
+  userId: string;
+  kind: MutationKind;
+  /** bookId or collectionId. */
+  entityId: string;
+  /** The intended change, already in the shape the route accepts. */
+  payload: Record<string, unknown>;
+  /** Generated once at queue time and reused on every retry. */
+  mutationId: string;
+  deviceId: string;
+  deviceSequence: number;
+  queuedAt: number;
+  attempts: number;
+};
 
 export type QueuedProgress = {
   userId: string;
@@ -21,7 +51,8 @@ export type QueuedProgress = {
   eventOccurredAt: string;
 };
 
-type ProgressMutation = {
+/** The legacy v1–v3 record, read only by the v4 upgrade. */
+type LegacyProgressMutation = {
   key: string;
   userId: string;
   kind: "progress";
@@ -31,7 +62,7 @@ type ProgressMutation = {
 interface SyncDatabase extends DBSchema {
   mutations: {
     key: string;
-    value: ProgressMutation;
+    value: QueuedMutation;
     indexes: { "by-user": string; "by-user-key": [string, string] };
   };
   sequences: {
@@ -40,9 +71,34 @@ interface SyncDatabase extends DBSchema {
   };
 }
 
+type SyncDb = IDBPDatabase<SyncDatabase>;
+
+/**
+ * Coalescing policy, exactly as the design contract states it.
+ *
+ * - `sequence`: progress for one book+device collapses to the highest
+ *   `deviceSequence`; an out-of-order arrival is dropped, never applied over a
+ *   newer one.
+ * - `replace`: the latest intent for this entity wins outright (a rename, an
+ *   archive flip, one tag edge, one collection edge).
+ * - `never`: each row is a distinct event. `import`, `delete` and `history`
+ *   carry a unique key so no two of them can ever collapse — dropping one is a
+ *   lost write, not a saved round trip.
+ */
+export const MUTATION_COALESCING: Record<MutationKind, "sequence" | "replace" | "never"> = {
+  progress: "sequence",
+  metadata: "replace",
+  archive: "replace",
+  tag: "replace",
+  collection: "replace",
+  import: "never",
+  delete: "never",
+  history: "never",
+};
+
 function database() {
-  return openDB<SyncDatabase>(DATABASE_NAME, 3, {
-    upgrade(db, oldVersion, _newVersion, transaction) {
+  return openDB<SyncDatabase>(DATABASE_NAME, SYNC_DATABASE_VERSION, {
+    async upgrade(db, oldVersion, _newVersion, transaction) {
       if (oldVersion < 1) {
         const mutations = db.createObjectStore("mutations", { keyPath: "key" });
         mutations.createIndex("by-user", "userId");
@@ -52,40 +108,194 @@ function database() {
       }
       if (oldVersion < 2) {
         const mutations = transaction.objectStore("mutations");
-        void mutations.openCursor().then(async function purgeLegacyMutation(cursor) {
-          if (!cursor) return;
-          const legacy = cursor.value as ProgressMutation | { kind: string };
+        let cursor = await mutations.openCursor();
+        while (cursor) {
+          const legacy = cursor.value as LegacyProgressMutation | { kind: string };
           if (legacy.kind !== "progress") await cursor.delete();
-          await purgeLegacyMutation(await cursor.continue());
-        });
+          cursor = await cursor.continue();
+        }
       }
       if (oldVersion < 3) {
         transaction.objectStore("mutations").createIndex("by-user-key", ["userId", "key"]);
       }
+      if (oldVersion < 4) {
+        // The first upgrade in this database that *rewrites* rows rather than
+        // only dropping them, so it is awaited: a rejection here aborts the
+        // version-change transaction and the upgrade is retried on the next
+        // open instead of committing a half-migrated outbox. Each row is a
+        // user write that has not reached the server, so losing one here is
+        // indistinguishable from losing the write itself.
+        const mutations = transaction.objectStore("mutations");
+        let cursor = await mutations.openCursor();
+        while (cursor) {
+          await cursor.update(
+            migrateLegacyMutation(
+              cursor.value as unknown as LegacyProgressMutation | QueuedMutation,
+            ),
+          );
+          cursor = await cursor.continue();
+        }
+      }
     },
   });
+}
+
+/**
+ * v3 → v4. The queued intent is preserved exactly — same book, same device,
+ * same sequence, same position — only re-expressed in the general record shape.
+ *
+ * `mutationId` is derived deterministically from the identity the legacy row
+ * already carried rather than minted fresh, so re-running the upgrade (or
+ * running it on two tabs) cannot produce two different idempotency keys for
+ * one queued write. `queuedAt` is 0 because the legacy row never recorded it;
+ * nothing orders on it, and inventing `Date.now()` would claim a fact the
+ * record does not contain.
+ */
+export function migrateLegacyMutation(
+  row: LegacyProgressMutation | QueuedMutation,
+): QueuedMutation {
+  if (!("entry" in row)) return row;
+  const { entry } = row;
+  return {
+    key: row.key,
+    userId: row.userId,
+    kind: "progress",
+    entityId: entry.bookId,
+    payload: progressPayload(entry),
+    mutationId: `legacy:${row.key}:${entry.deviceSequence}`,
+    deviceId: entry.deviceId,
+    deviceSequence: entry.deviceSequence,
+    queuedAt: 0,
+    attempts: 0,
+  };
+}
+
+function progressPayload(entry: Omit<QueuedProgress, "userId">): Record<string, unknown> {
+  return {
+    positionMs: Math.round(entry.positionMs),
+    playbackRate: entry.playbackRate,
+    completed: entry.completed,
+    eventOccurredAt: entry.eventOccurredAt,
+  };
+}
+
+export function newMutationId(): string {
+  return crypto.randomUUID();
+}
+
+// ---------------------------------------------------------------------------
+// Coalesce keys
+// ---------------------------------------------------------------------------
+
+/** Unchanged from v1 so rows queued by an older build keep their identity. */
+export function progressMutationKey(
+  entry: Pick<QueuedProgress, "userId" | "bookId" | "deviceId">,
+): string {
+  return `${entry.userId}:progress:${entry.bookId}:${entry.deviceId}`;
+}
+
+export function metadataMutationKey(userId: string, bookId: string): string {
+  return `${userId}:metadata:${bookId}`;
+}
+
+export function archiveMutationKey(userId: string, bookId: string): string {
+  return `${userId}:archive:${bookId}`;
+}
+
+/** One key per edge, so two edits to the same edge collapse and no other pair does. */
+export function tagMutationKey(userId: string, bookId: string, tagName: string): string {
+  return `${userId}:tag:${bookId}:${tagName.toLowerCase()}`;
+}
+
+export function collectionMutationKey(
+  userId: string,
+  collectionId: string,
+  bookId: string,
+): string {
+  return `${userId}:collection:${collectionId}:${bookId}`;
+}
+
+/**
+ * Distinct-event keys. The `mutationId` in the key is what makes coalescing
+ * impossible for these three kinds: no second row can ever collide with them.
+ */
+export function eventMutationKey(
+  userId: string,
+  kind: "import" | "delete" | "history",
+  entityId: string,
+  mutationId: string,
+): string {
+  return `${userId}:${kind}:${entityId}:${mutationId}`;
+}
+
+// ---------------------------------------------------------------------------
+// Queueing
+// ---------------------------------------------------------------------------
+
+export type MutationDraft = Omit<QueuedMutation, "mutationId" | "queuedAt" | "attempts"> & {
+  mutationId?: string;
+  queuedAt?: number;
+};
+
+export function buildMutation(draft: MutationDraft): QueuedMutation {
+  return {
+    ...draft,
+    mutationId: draft.mutationId || newMutationId(),
+    queuedAt: draft.queuedAt ?? Date.now(),
+    attempts: 0,
+  };
+}
+
+/**
+ * Journals one intent. Returns the row that is now durable — which is the
+ * existing row when an out-of-order progress event was dropped, so a caller can
+ * never believe it queued something the outbox refused.
+ */
+export async function queueMutation(mutation: QueuedMutation): Promise<QueuedMutation> {
+  const db = await database();
+  const transaction = db.transaction("mutations", "readwrite");
+  const existing = await transaction.store.get(mutation.key);
+  const winner = resolveCoalescing(existing, mutation);
+  if (winner !== existing) await transaction.store.put(winner);
+  await transaction.done;
+  return winner;
+}
+
+function resolveCoalescing(
+  existing: QueuedMutation | undefined,
+  next: QueuedMutation,
+): QueuedMutation {
+  if (!existing) return next;
+  // A `never` kind cannot reach here with a different row: its key embeds a
+  // unique mutationId. Re-queueing the identical id is the caller retrying the
+  // same intent, which must stay one event.
+  if (MUTATION_COALESCING[next.kind] === "never") return existing;
+  if (MUTATION_COALESCING[next.kind] === "sequence") {
+    return existing.deviceSequence <= next.deviceSequence ? next : existing;
+  }
+  return next;
+}
+
+export async function queueProgress(entry: QueuedProgress): Promise<void> {
+  await queueMutation(
+    buildMutation({
+      key: progressMutationKey(entry),
+      userId: entry.userId,
+      kind: "progress",
+      entityId: entry.bookId,
+      payload: progressPayload(entry),
+      deviceId: entry.deviceId,
+      deviceSequence: entry.deviceSequence,
+    }),
+  );
 }
 
 export function toProgressBody(entry: Omit<QueuedProgress, "userId">): string {
   return JSON.stringify({
     deviceId: entry.deviceId,
     deviceSequence: entry.deviceSequence,
-    positionMs: Math.round(entry.positionMs),
-    playbackRate: entry.playbackRate,
-    completed: entry.completed,
-    eventOccurredAt: entry.eventOccurredAt,
+    ...progressPayload(entry),
   });
-}
-
-export async function queueProgress(entry: QueuedProgress): Promise<void> {
-  const db = await database();
-  const key = progressKey(entry);
-  const transaction = db.transaction("mutations", "readwrite");
-  const existing = await transaction.store.get(key);
-  if (!existing || existing.entry.deviceSequence <= entry.deviceSequence) {
-    await transaction.store.put({ key, userId: entry.userId, kind: "progress", entry });
-  }
-  await transaction.done;
 }
 
 export function withProgressMutationLock<T>(
@@ -110,6 +320,16 @@ export async function currentDeviceSequence(bookId: string): Promise<number> {
   return (await db.get("sequences", bookId))?.value || 0;
 }
 
+export async function listQueuedMutations(userId: string): Promise<QueuedMutation[]> {
+  const db = await database();
+  return db.getAllFromIndex("mutations", "by-user", userId);
+}
+
+/**
+ * Drops one account's queue. `sequences` is deliberately untouched: those
+ * high-water marks order every future replay, and resetting them would let a
+ * stale event overwrite a newer one after the next sign-in.
+ */
 export async function clearQueuedMutationsForUser(userId: string): Promise<void> {
   const db = await database();
   const transaction = db.transaction("mutations", "readwrite");
@@ -121,12 +341,64 @@ export async function clearQueuedMutationsForUser(userId: string): Promise<void>
   await transaction.done;
 }
 
+// ---------------------------------------------------------------------------
+// Failure classification (unchanged; every kind inherits it)
+// ---------------------------------------------------------------------------
+
 export function isRetryableMutationStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 export function shouldRetainMutation(status: number): boolean {
   return status === 401 || status === 403 || isRetryableMutationStatus(status);
+}
+
+// ---------------------------------------------------------------------------
+// Replay
+// ---------------------------------------------------------------------------
+
+export type ReplayRequest = { url: string; init: RequestInit };
+
+/**
+ * The wire form of a queued mutation. `mutationId` rides along on every kind
+ * the server dedupes by receipt, and is identical on every retry — that is what
+ * makes a replay of an already-applied mutation a no-op rather than a second
+ * apply.
+ */
+export function toReplayRequest(mutation: QueuedMutation): ReplayRequest {
+  const json = (method: string, body: Record<string, unknown>, url: string): ReplayRequest => ({
+    url,
+    init: { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+  });
+  switch (mutation.kind) {
+    case "progress":
+      return json(
+        "PATCH",
+        {
+          deviceId: mutation.deviceId,
+          deviceSequence: mutation.deviceSequence,
+          ...mutation.payload,
+        },
+        `/api/books/${mutation.entityId}/progress`,
+      );
+    case "history":
+      return json(
+        "POST",
+        { ...mutation.payload, id: mutation.mutationId },
+        `/api/books/${mutation.entityId}/history`,
+      );
+    case "import":
+      return json("POST", { ...mutation.payload }, "/api/books/local");
+    case "collection":
+      return json("PATCH", { ...mutation.payload }, `/api/collections/${mutation.entityId}`);
+    case "delete":
+      return {
+        url: `/api/books/${mutation.entityId}`,
+        init: { method: "DELETE", headers: { "X-Mutation-Id": mutation.mutationId } },
+      };
+    default:
+      return json("PATCH", { ...mutation.payload }, `/api/books/${mutation.entityId}`);
+  }
 }
 
 export function replayQueuedMutations(
@@ -144,7 +416,7 @@ async function replayQueueSnapshot(userId: string, fetchFn: typeof fetch): Promi
     if (!tasks.length) return;
     await runBounded(tasks, REPLAY_CONCURRENCY, async (task) => {
       try {
-        await replayProgress(task, fetchFn);
+        await replayMutation(task, fetchFn);
       } catch {
         // Network failures remain durable in IndexedDB.
       }
@@ -154,13 +426,9 @@ async function replayQueueSnapshot(userId: string, fetchFn: typeof fetch): Promi
   }
 }
 
-async function readMutationPage(
-  db: Awaited<ReturnType<typeof database>>,
-  userId: string,
-  afterKey?: string,
-) {
-  const range = IDBKeyRange.bound([userId, afterKey || ""], [userId, "\uffff"], !!afterKey);
-  const tasks: ProgressMutation[] = [];
+async function readMutationPage(db: SyncDb, userId: string, afterKey?: string) {
+  const range = IDBKeyRange.bound([userId, afterKey || ""], [userId, "￿"], !!afterKey);
+  const tasks: QueuedMutation[] = [];
   let cursor = await db.transaction("mutations").store.index("by-user-key").openCursor(range);
   while (cursor && tasks.length < REPLAY_PAGE_SIZE) {
     tasks.push(cursor.value);
@@ -169,17 +437,41 @@ async function readMutationPage(
   return tasks;
 }
 
-async function replayProgress(task: ProgressMutation, fetchFn: typeof fetch): Promise<void> {
-  await withProgressMutationLock(task.entry.bookId, async () => {
-    const response = await fetchFn(`/api/books/${task.entry.bookId}/progress`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: toProgressBody(task.entry),
-    });
-    if (shouldRetainMutation(response.status)) return;
-    if (response.status === 409) await reconcileProgressConflict(task.entry, response);
-    await removeProgressSnapshot(task);
+function withMutationLock<T>(mutation: QueuedMutation, operation: () => Promise<T>): Promise<T> {
+  // Progress shares its lock with the live writer in `use-progress-persistence`
+  // so a replay and a heartbeat cannot interleave on one book.
+  return mutation.kind === "progress"
+    ? withProgressMutationLock(mutation.entityId, operation)
+    : withKeyedLock(`chapterline:mutation:${mutation.key}`, operation);
+}
+
+async function replayMutation(task: QueuedMutation, fetchFn: typeof fetch): Promise<void> {
+  await withMutationLock(task, async () => {
+    const { url, init } = toReplayRequest(task);
+    const response = await fetchFn(url, init);
+    if (shouldRetainMutation(response.status)) {
+      await recordAttempt(task);
+      return;
+    }
+    if (response.status === 409 && task.kind === "progress") {
+      await reconcileProgressConflict(toQueuedProgress(task), response);
+    }
+    await settleMutation(task);
   });
+}
+
+function toQueuedProgress(mutation: QueuedMutation): QueuedProgress {
+  const payload = mutation.payload as unknown as Omit<
+    QueuedProgress,
+    "userId" | "bookId" | "deviceId" | "deviceSequence"
+  >;
+  return {
+    userId: mutation.userId,
+    bookId: mutation.entityId,
+    deviceId: mutation.deviceId,
+    deviceSequence: mutation.deviceSequence,
+    ...payload,
+  };
 }
 
 export async function reconcileProgressConflict(
@@ -227,16 +519,26 @@ export async function reconcileProgressConflict(
   return true;
 }
 
-async function removeProgressSnapshot(snapshot: ProgressMutation): Promise<void> {
+/**
+ * Removes a settled row only if it is still the row that was sent. Coalescing
+ * replaces the record in place while a replay is in flight, and the replacement
+ * carries a new `mutationId`; comparing it is what stops the acknowledgement of
+ * an older intent from erasing a newer, unsent one.
+ */
+async function settleMutation(snapshot: QueuedMutation): Promise<void> {
   const db = await database();
   const transaction = db.transaction("mutations", "readwrite");
   const current = await transaction.store.get(snapshot.key);
-  if (current?.entry.deviceSequence === snapshot.entry.deviceSequence) {
-    await transaction.store.delete(snapshot.key);
-  }
+  if (current?.mutationId === snapshot.mutationId) await transaction.store.delete(snapshot.key);
   await transaction.done;
 }
 
-function progressKey(entry: Pick<QueuedProgress, "userId" | "bookId" | "deviceId">) {
-  return `${entry.userId}:progress:${entry.bookId}:${entry.deviceId}`;
+async function recordAttempt(snapshot: QueuedMutation): Promise<void> {
+  const db = await database();
+  const transaction = db.transaction("mutations", "readwrite");
+  const current = await transaction.store.get(snapshot.key);
+  if (current?.mutationId === snapshot.mutationId) {
+    await transaction.store.put({ ...current, attempts: current.attempts + 1 });
+  }
+  await transaction.done;
 }

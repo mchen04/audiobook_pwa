@@ -660,9 +660,16 @@ const CURRENT_SYNC_SCHEMA: SchemaShape = {
   sequences: { keyPath: "key", indexes: {} },
 };
 
+const QUEUED_AT = "2026-07-05T00:00:00.000Z";
+
+function progressKey(userId: string, bookId: string) {
+  return `${userId}:progress:${bookId}:device-1`;
+}
+
+/** The v1–v3 record: a `kind` and an opaque `entry`. */
 function progressMutation(userId: string, bookId: string, deviceSequence: number) {
   return {
-    key: `${userId}:progress:${bookId}:device-1`,
+    key: progressKey(userId, bookId),
     userId,
     kind: "progress",
     entry: {
@@ -673,15 +680,99 @@ function progressMutation(userId: string, bookId: string, deviceSequence: number
       positionMs: deviceSequence * 1_000,
       playbackRate: 1,
       completed: false,
-      eventOccurredAt: "2026-07-05T00:00:00.000Z",
+      eventOccurredAt: QUEUED_AT,
     },
   };
 }
 
-const SURVIVING_MUTATIONS = [
-  progressMutation(USER_A, "book-plain", 3),
-  progressMutation(USER_A, "book-covered", 41),
-  progressMutation(USER_B, "book-other", 7),
+/**
+ * The same intent after the v4 generalization. Every field the legacy row
+ * carried is still present and still exact — book, device, sequence, position,
+ * rate, completion and event time — because each of these rows is a user write
+ * that has not reached the server yet.
+ *
+ * `mutationId` is derived from the legacy identity rather than minted fresh, so
+ * the migration is deterministic and re-runnable; `queuedAt` is 0 because the
+ * legacy record never stored one and inventing a time would be a lie.
+ */
+function migratedProgressMutation(userId: string, bookId: string, deviceSequence: number) {
+  const key = progressKey(userId, bookId);
+  return {
+    key,
+    userId,
+    kind: "progress",
+    entityId: bookId,
+    payload: {
+      positionMs: deviceSequence * 1_000,
+      playbackRate: 1,
+      completed: false,
+      eventOccurredAt: QUEUED_AT,
+    },
+    mutationId: `legacy:${key}:${deviceSequence}`,
+    deviceId: "device-1",
+    deviceSequence,
+    queuedAt: 0,
+    attempts: 0,
+  };
+}
+
+const LEGACY_PROGRESS = [
+  [USER_A, "book-plain", 3],
+  [USER_A, "book-covered", 41],
+  [USER_B, "book-other", 7],
+] as const;
+
+const SURVIVING_MUTATIONS = LEGACY_PROGRESS.map(([userId, bookId, sequence]) =>
+  progressMutation(userId, bookId, sequence),
+);
+
+const MIGRATED_MUTATIONS = LEGACY_PROGRESS.map(([userId, bookId, sequence]) =>
+  migratedProgressMutation(userId, bookId, sequence),
+);
+
+/**
+ * Rows a build already running version 4 would have written: a real uuid
+ * `mutationId`, a real `queuedAt`, and the three kinds that must never coalesce
+ * (`import`, `delete`, `history`), each keyed by its own `mutationId` so no two
+ * of them can collapse into one.
+ */
+const NATIVE_V4_MUTATIONS = [
+  {
+    key: `${USER_A}:metadata:book-covered`,
+    userId: USER_A,
+    kind: "metadata",
+    entityId: "book-covered",
+    payload: { title: "Renamed while offline" },
+    mutationId: "6f1d0f22-0000-4000-8000-000000000001",
+    deviceId: "device-1",
+    deviceSequence: 0,
+    queuedAt: 1_772_000_000_000,
+    attempts: 2,
+  },
+  {
+    key: `${USER_A}:delete:book-archived:6f1d0f22-0000-4000-8000-000000000002`,
+    userId: USER_A,
+    kind: "delete",
+    entityId: "book-archived",
+    payload: {},
+    mutationId: "6f1d0f22-0000-4000-8000-000000000002",
+    deviceId: "device-1",
+    deviceSequence: 0,
+    queuedAt: 1_772_000_000_001,
+    attempts: 0,
+  },
+  {
+    key: `${USER_B}:history:book-other:6f1d0f22-0000-4000-8000-000000000003`,
+    userId: USER_B,
+    kind: "history",
+    entityId: "book-other",
+    payload: { action: "seek", positionMs: 1_000, playbackRate: 1 },
+    mutationId: "6f1d0f22-0000-4000-8000-000000000003",
+    deviceId: "device-2",
+    deviceSequence: 0,
+    queuedAt: 1_772_000_000_002,
+    attempts: 0,
+  },
 ];
 
 /**
@@ -702,7 +793,10 @@ function syncFixture(version: number): LegacyVersion {
     keyPath: "key",
     indexes: version >= 3 ? CURRENT_SYNC_SCHEMA.mutations!.indexes : BY_USER,
   };
-  const mutationRows: Record<string, unknown>[] = [...SURVIVING_MUTATIONS];
+  // v4 generalized the record shape, so a database already at v4 holds the new
+  // shape — including the kinds that only exist from v4 onward.
+  const mutationRows: Record<string, unknown>[] =
+    version >= 4 ? [...MIGRATED_MUTATIONS, ...NATIVE_V4_MUTATIONS] : [...SURVIVING_MUTATIONS];
   const rows: Record<string, Record<string, unknown>[]> = {
     mutations: mutationRows,
     sequences: [...SEQUENCE_ROWS],
@@ -731,11 +825,23 @@ function syncFixture(version: number): LegacyVersion {
   };
 }
 
-function expectedSync(): Record<string, Record<string, unknown>[]> {
-  return { mutations: [...SURVIVING_MUTATIONS], sequences: [...SEQUENCE_ROWS] };
+/**
+ * Post-upgrade expectation. Every queued progress write survives — never
+ * fewer, never reordered, never with a changed sequence — and `sequences` is
+ * byte-identical, because those high-water marks order replay and resetting one
+ * loses writes.
+ */
+function expectedSync(fixture: LegacyVersion): Record<string, Record<string, unknown>[]> {
+  return {
+    mutations:
+      fixture.version >= 4
+        ? [...MIGRATED_MUTATIONS, ...NATIVE_V4_MUTATIONS]
+        : [...MIGRATED_MUTATIONS],
+    sequences: [...SEQUENCE_ROWS],
+  };
 }
 
-const SYNC_HISTORY: LegacyVersion[] = [1, 2, 3].map(syncFixture);
+const SYNC_HISTORY: LegacyVersion[] = [1, 2, 3, 4].map(syncFixture);
 
 // ---------------------------------------------------------------------------
 // Production open helpers (the code under test)
@@ -1041,7 +1147,7 @@ describe("chapterline-sync-v1 upgrade specifics", () => {
     const mutations = (await db.getAll("mutations")) as Record<string, unknown>[];
     expect(mutations.map((row) => row.kind)).toStrictEqual(["progress", "progress", "progress"]);
     expect(mutations).toStrictEqual(
-      [...SURVIVING_MUTATIONS].sort((left, right) => left.key.localeCompare(right.key)),
+      [...MIGRATED_MUTATIONS].sort((left, right) => left.key.localeCompare(right.key)),
     );
     db.close();
   });
@@ -1069,15 +1175,73 @@ describe("chapterline-sync-v1 upgrade specifics", () => {
 
       const db = await upgradeSync();
 
-      for (const mutation of SURVIVING_MUTATIONS) {
+      for (const mutation of MIGRATED_MUTATIONS) {
         expect(
           await db.getAllFromIndex("mutations", "by-user-key", [mutation.userId, mutation.key]),
           `by-user-key -> ${mutation.key}`,
         ).toStrictEqual([mutation]);
       }
-      expect(await db.getAllFromIndex("mutations", "by-user", USER_A)).toHaveLength(2);
-      expect(await db.getAllFromIndex("mutations", "by-user", USER_B)).toHaveLength(1);
+      const nativeA = fixture.version >= 4 ? 2 : 0;
+      const nativeB = fixture.version >= 4 ? 1 : 0;
+      expect(await db.getAllFromIndex("mutations", "by-user", USER_A)).toHaveLength(2 + nativeA);
+      expect(await db.getAllFromIndex("mutations", "by-user", USER_B)).toHaveLength(1 + nativeB);
       db.close();
     },
   );
+
+  it.each(SYNC_HISTORY.filter((fixture) => fixture.version < 4))(
+    "carries progress queued at version $version through the v4 generalization",
+    async (fixture) => {
+      expect(
+        fixture.rows.mutations!.filter((row) => "entry" in row && row.kind === "progress"),
+        "fixture must actually carry legacy-shaped progress rows",
+      ).toHaveLength(3);
+      await buildFixture(SYNC_DATABASE, fixture);
+
+      const db = await upgradeSync();
+
+      expect(db.version).toBe(4);
+      // Not one queued write may be dropped: each is a user write the server
+      // has never seen, so losing it here is indistinguishable from losing it.
+      const mutations = (await db.getAll("mutations")) as Record<string, unknown>[];
+      expect(mutations).toHaveLength(3);
+      for (const migrated of MIGRATED_MUTATIONS) {
+        expect(await db.get("mutations", migrated.key), migrated.key).toStrictEqual(migrated);
+      }
+      // The legacy envelope is gone; the intent inside it is not.
+      for (const row of mutations) {
+        expect(row).not.toHaveProperty("entry");
+        expect(typeof row.mutationId, "mutationId").toBe("string");
+        expect(typeof row.attempts, "attempts").toBe("number");
+        expect(typeof row.entityId, "entityId").toBe("string");
+      }
+      // The high-water marks that order replay are untouched by the rewrite.
+      expect(await db.getAll("sequences")).toStrictEqual(
+        [...SEQUENCE_ROWS].sort((left, right) => left.key.localeCompare(right.key)),
+      );
+      db.close();
+    },
+  );
+
+  it("leaves the three never-coalescing kinds distinct at version 4", async () => {
+    await buildFixture(SYNC_DATABASE, syncFixture(4));
+
+    const db = await upgradeSync();
+
+    const kinds = ((await db.getAll("mutations")) as Record<string, unknown>[])
+      .map((row) => row.kind)
+      .sort();
+    expect(kinds).toStrictEqual([
+      "delete",
+      "history",
+      "metadata",
+      "progress",
+      "progress",
+      "progress",
+    ]);
+    for (const mutation of NATIVE_V4_MUTATIONS) {
+      expect(await db.get("mutations", mutation.key), mutation.key).toStrictEqual(mutation);
+    }
+    db.close();
+  });
 });

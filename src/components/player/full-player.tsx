@@ -50,6 +50,7 @@ export function FullPlayer({
   offlineMode = false,
   backHref = "/library",
   backLabel = "Library",
+  onBack,
   autoplay = false,
   details = null,
   nextInCollection = null,
@@ -59,6 +60,12 @@ export function FullPlayer({
   offlineMode?: boolean;
   backHref?: string;
   backLabel?: string;
+  /**
+   * Returns to the caller's own view instead of navigating. The library uses
+   * it for the player it opens in place, where a navigation is exactly what
+   * the device could not do.
+   */
+  onBack?: () => void;
   autoplay?: boolean;
   details?: BookDetails | null;
   nextInCollection?: NextInCollection | null;
@@ -156,10 +163,17 @@ export function FullPlayer({
   return (
     <div className="player-page">
       <div className="player-topbar" inert={sheetView ? true : undefined}>
-        <Link href={backHref} className="icon-text-button">
-          <ArrowLeft size={19} aria-hidden="true" />
-          <span>{backLabel}</span>
-        </Link>
+        {onBack ? (
+          <button type="button" className="icon-text-button" onClick={onBack}>
+            <ArrowLeft size={19} aria-hidden="true" />
+            <span>{backLabel}</span>
+          </button>
+        ) : (
+          <Link href={backHref} className="icon-text-button">
+            <ArrowLeft size={19} aria-hidden="true" />
+            <span>{backLabel}</span>
+          </Link>
+        )}
         <span>{currentChapter?.title || "Full audiobook"}</span>
         <div className="player-topbar-actions">
           {hasTranscript && (

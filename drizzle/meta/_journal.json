@@ -127,6 +127,13 @@
       "when": 1784959837240,
       "tag": "0017_abandoned_korath",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784961474325,
+      "tag": "0018_stiff_sharon_ventura",
+      "breakpoints": true
     }
   ]
 }

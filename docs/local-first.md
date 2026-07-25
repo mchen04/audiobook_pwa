@@ -149,9 +149,21 @@ Record shape:
 
 Rules:
 
-1. **Journal intent before acting.** The outbox row is written in the same
-   IndexedDB transaction as the optimistic mirror update. Either both land or
-   neither does. This is the pattern `deletion-journal.ts` already proves.
+1. **Journal intent before acting.** The outbox row is written **first**, and the
+   optimistic mirror update only after it. Each half is individually atomic.
+
+   An earlier draft of this note required both in one IndexedDB transaction.
+   That is not implementable: the outbox lives in `chapterline-sync-v1` and the
+   mirror in `chapterline-offline-v1`, IndexedDB has no cross-database
+   transaction, and section 4 keeps the two databases separate on purpose.
+
+   Ordering carries the guarantee instead, and it is the same ordering
+   `deletion-journal.ts` already proves. A crash between the two halves leaves
+   an outbox row whose local projection has not been applied — recoverable, and
+   the server still learns about the write. The forbidden state is the reverse:
+   a mirrored change the user can see with no queued write behind it, which
+   would be a silent lost write. Never write the mirror first.
+
 2. **Idempotent on replay.** `mutationId` is generated once, at queue time, and
    reused on every retry. The server dedupes on it. Replaying a mutation the
    server already applied is a no-op, not a double-apply.
@@ -240,8 +252,19 @@ Session handling under a cached shell:
   from the paint path.
 - The client checks `ACTIVE_USER_KEY` before rendering the mirror. No active
   user → `/login`.
-- Revalidation answering 401/403 → purge and `/login`. An expired or revoked
-  session must never strand the user on a cached library.
+- Revalidation answering 401/403 → `/login`, **without purging**. An expired or
+  revoked session must never strand the user on a cached library.
+
+  An earlier draft of this note said "purge and `/login`". That would have been a
+  data-loss bug: the purge path deletes downloads and their media, and per
+  section 10 those MP3s exist nowhere else. A session timing out overnight is a
+  routine event, and it must not cost the user every audiobook on the device.
+
+  Privacy is still closed, one step later and by the right mechanism: the mirror
+  that survives belongs to the account that is still signed in on this device,
+  and section 11's sign-in purge removes every _other_ account's data before a
+  different user can see anything. Expiry is not a trust boundary; a new sign-in
+  is.
 
 Consequences that must hold:
 
@@ -306,6 +329,19 @@ Purge runs on **both** sign-out and sign-in, and covers: every mirror store by
 `by-user` index, the outbox, Cache Storage entries for pages and media,
 localStorage keys for that user, and `ACTIVE_USER_KEY`. Purging on sign-in as
 well as sign-out is what protects against a crash between the two.
+
+The two purges have deliberately different targets:
+
+- **Sign-out** purges the account that is leaving.
+- **Sign-in** purges every account _other_ than the one signing in — never the
+  incoming account's own data.
+
+That asymmetry is load-bearing. Purging the incoming account's own data on every
+login would delete its downloaded audio, and per section 1 those MP3s exist
+nowhere else in the world — the server has never held the bytes. Wiping every
+other account still delivers the property this section exists for (B can never
+read A's rows, because the next sign-in finishes any cleanup a crash
+interrupted) without destroying the only copy of something irreplaceable.
 
 The cached shell is user-agnostic and holds no user data, so it may survive an
 account switch. Every store that does hold user data is keyed by `userId`, which

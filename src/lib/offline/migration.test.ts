@@ -92,7 +92,7 @@ describe("bookmark storage removal", () => {
     const { nextDeviceSequence } = await import("../offline-sync");
     await nextDeviceSequence("upgrade-trigger");
 
-    const upgraded = await openDB(SYNC_DATABASE, 3);
+    const upgraded = await openDB(SYNC_DATABASE, 4);
     const mutations = await upgraded.getAll("mutations");
     expect(mutations).toHaveLength(1);
     expect(mutations[0]?.kind).toBe("progress");

@@ -85,6 +85,16 @@ export type PulledListeningSession = {
   listenedMs: number;
 };
 
+/**
+ * One deleted book. Emitted from the `book_tombstones` row written in the same
+ * transaction as the delete, so a deletion is conveyed as an explicit statement
+ * rather than as absence from a page (section 6).
+ */
+export type PulledTombstone = {
+  bookId: string;
+  deletedAt: string;
+};
+
 export type PullBatch = {
   /** Echo of the requested cursor; null on a first, full sync. */
   since: string | null;
@@ -108,6 +118,19 @@ export type PullBatch = {
    * every id on every page is waste, not because it would be unsafe.
    */
   liveBookIds: string[] | null;
+  /**
+   * Per-row deletions since the requested cursor, from `book_tombstones`. This
+   * is the scalable deletion signal: it costs one indexed range scan and grows
+   * with the number of deletions rather than with the size of the library.
+   *
+   * Empty on a first, full sync (`since === null`) — there is nothing local to
+   * tombstone, and the batch itself is the complete truth.
+   *
+   * Optional on the wire so a device running a build that predates it still
+   * validates a batch, and so `liveBookIds` remains the fallback oracle until
+   * every reader consumes tombstones.
+   */
+  tombstones?: PulledTombstone[];
 };
 
 export function isPullBatch(value: unknown): value is PullBatch {
@@ -126,7 +149,17 @@ export function isPullBatch(value: unknown): value is PullBatch {
     Array.isArray(batch.listeningSessions) &&
     (batch.preferences === null || typeof batch.preferences === "object") &&
     (batch.liveBookIds === null ||
-      (Array.isArray(batch.liveBookIds) && batch.liveBookIds.every((id) => typeof id === "string")))
+      (Array.isArray(batch.liveBookIds) &&
+        batch.liveBookIds.every((id) => typeof id === "string"))) &&
+    (batch.tombstones === undefined ||
+      (Array.isArray(batch.tombstones) && batch.tombstones.every(isPulledTombstone)))
+  );
+}
+
+function isPulledTombstone(value: unknown): value is PulledTombstone {
+  const tombstone = value as PulledTombstone | null;
+  return (
+    !!tombstone && typeof tombstone.bookId === "string" && typeof tombstone.deletedAt === "string"
   );
 }
 

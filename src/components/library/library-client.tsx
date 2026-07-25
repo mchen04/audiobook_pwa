@@ -2,32 +2,39 @@
 
 import {
   BookOpenText,
+  CloudSlash,
+  DownloadSimple,
   MagnifyingGlass,
   Play,
   Rows,
   SquaresFour,
   TextAlignLeft,
+  Trash,
   UploadSimple,
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
 import Link from "next/link";
 import Image from "next/image";
-import { ChangeEvent, memo, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { ChangeEvent, memo, useCallback, useEffect, useRef, useState } from "react";
 
+import { FullPlayer } from "@/components/player/full-player";
+import { useActiveUserId } from "@/components/use-active-user";
 import type { LibraryBook } from "@/domain/library";
+import { formatBytes } from "@/lib/format-bytes";
 import { formatDurationRounded } from "@/lib/format-time";
 import { importLocalMp3 } from "@/lib/local-import";
-import { listOfflineCoverUrls } from "@/lib/offline/library";
+import type { OfflineBook } from "@/lib/offline/db";
+import { asOfflinePlayerBook } from "@/lib/offline/library";
 import { listBookIdsWithTranscripts } from "@/lib/offline/transcript-store";
-import type { LibraryPage } from "@/lib/wire";
 
 import { type SortOrder, type StatusFilter } from "./library-view";
-import { useLibraryBooks } from "./use-library-books";
+import { type DeviceIndex, useLibraryBooks } from "./use-library-books";
 
 type LibraryClientProps = {
-  userId: string;
-  initialPage: LibraryPage;
+  /** Present only when the server rendered this page; absent on a warm launch. */
+  userId?: string;
 };
 
 type UploadState = {
@@ -44,36 +51,62 @@ const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
   { id: "archived", label: "Archived" },
 ];
 
-export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
+/** One page of cards, so a thousand-book library still paints a first screen. */
+const PAGE_SIZE = 50;
+
+const MISSING_MEDIA_HINT =
+  "The audio for this book lives only on the device that imported it. Re-import the MP3 here to listen.";
+
+const BOOK_PATH = /^\/books\/([0-9a-fA-F-]{36})\/?$/;
+
+export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
+  const userId = useActiveUserId(serverUserId);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
+  // The header's Downloads link is `?device=1`, so the facet follows the URL
+  // until the user works the chip themselves — and follows it again the next
+  // time that link is used.
+  const facetFromUrl = useSearchParams().get("device") === "1";
+  const [facetChoice, setFacetChoice] = useState<{ from: boolean; on: boolean } | null>(null);
+  const onDevice = facetChoice?.from === facetFromUrl ? facetChoice.on : facetFromUrl;
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [sort, setSort] = useState<SortOrder>("activity");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [upload, setUpload] = useState<UploadState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [localCovers, setLocalCovers] = useState<Record<string, string>>({});
   const [readAlongIds, setReadAlongIds] = useState<Set<string>>(new Set());
-  const [coverRefresh, setCoverRefresh] = useState(0);
-  const { page, reload, loadMore, loading } = useLibraryBooks(initialPage, {
+  /**
+   * The service worker answers a navigation it cannot fetch with the cached
+   * library document, whatever URL was asked for. Sitting at a `/books/` URL
+   * therefore means the user asked to play a book and the network could not
+   * answer — so this device's own copy answers instead. Online the book page
+   * renders and this component never mounts at that URL, which is why opening
+   * a book needs no "am I online?" question anywhere.
+   */
+  const [fallbackBookId, setFallbackBookId] = useState(bookIdFromUrl);
+  const [pagination, setPagination] = useState({ key: "", pages: 1 });
+
+  const { snapshot, unavailable, reload, retry, removeDownload } = useLibraryBooks(userId, {
     query,
     status,
     tag: activeTag,
     sort,
+    onDevice,
   });
-  const books = page.books;
 
-  // The cover map is filter-independent; it changes only when a book is
-  // imported on this device, so searches and pagination never re-read it.
+  const books = snapshot?.books || [];
+  const device: DeviceIndex = snapshot?.device || EMPTY_DEVICE_INDEX;
+  const playing = fallbackBookId ? device.get(fallbackBookId) || null : null;
+  // A filter change resets the page window without an effect: the window is
+  // simply not carried across a different set of filters.
+  const filterKey = JSON.stringify([query, status, activeTag, sort, onDevice]);
+  const pages = pagination.key === filterKey ? pagination.pages : 1;
+
   useEffect(() => {
+    if (!userId) return;
     let active = true;
-    void listOfflineCoverUrls(userId)
-      .then((covers) => {
-        if (active) setLocalCovers(covers);
-      })
-      .catch(() => undefined);
     void listBookIdsWithTranscripts(userId)
       .then((ids) => {
         if (active) setReadAlongIds(ids);
@@ -82,18 +115,17 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
     return () => {
       active = false;
     };
-  }, [userId, coverRefresh]);
+  }, [userId]);
 
-  const allTags = page.tags;
-  const continueBook = page.continueBook;
-
-  // The launch benchmark measures the moment this attribute lands in the DOM.
-  // It is a contract: it may only be set when the user's REAL library is on
-  // screen — actual book cards, or the genuine "no books yet" state. A skeleton,
-  // a spinner, a placeholder grid, or a filtered "no matching books" view must
-  // never carry it, or the benchmark starts measuring an empty box and the
-  // sub-500ms bar stops meaning anything.
-  const launchReady = page.libraryTotal === 0 ? "empty" : books.length > 0 ? "books" : undefined;
+  const forgetDownload = useCallback(
+    async (bookId: string) => {
+      const removed = await removeDownload(bookId);
+      if (!removed) {
+        setError("The download could not be removed right now. It will retry automatically.");
+      }
+    },
+    [removeDownload],
+  );
 
   function chooseFile() {
     setError(null);
@@ -108,6 +140,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       setError("Choose an MP3 file. Other audiobook formats are not supported.");
       return;
     }
+    if (!userId) return;
 
     setError(null);
     setUpload({ filename: file.name, percent: 0, stage: "Starting" });
@@ -115,7 +148,6 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       await importLocalMp3(userId, file, (percent, stage) =>
         setUpload({ filename: file.name, percent, stage }),
       );
-      setCoverRefresh((current) => current + 1);
       await reload();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The MP3 could not be imported.");
@@ -123,6 +155,48 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       setUpload(null);
     }
   }
+
+  if (playing) {
+    return (
+      <FullPlayer
+        playerBook={asOfflinePlayerBook(playing)}
+        offlineMode
+        backLabel="Library"
+        onBack={() => {
+          window.history.replaceState(null, "", "/library");
+          setFallbackBookId(null);
+        }}
+      />
+    );
+  }
+
+  // The launch benchmark measures the moment this attribute lands in the DOM.
+  // It is a contract: it may only be set when the user's REAL library is on
+  // screen — actual book cards, or the genuine "no books yet" state. A skeleton,
+  // a spinner, a placeholder grid, or a filtered "no matching books" view must
+  // never carry it, or the benchmark starts measuring an empty box and the
+  // sub-500ms bar stops meaning anything. `snapshot` is null until this
+  // device's own library has been read, so nothing below renders before then.
+  if (!snapshot) {
+    return unavailable ? (
+      <section className="library-content">
+        <div className="no-results">
+          <WarningCircle size={30} weight="duotone" aria-hidden="true" />
+          <h2>Your library is temporarily unavailable</h2>
+          <p>Hark could not open this device&apos;s storage. Your records are intact.</p>
+          <button type="button" className="secondary-button" onClick={retry}>
+            Try again
+          </button>
+        </div>
+      </section>
+    ) : null;
+  }
+
+  const launchReady =
+    snapshot.libraryTotal === 0 ? "empty" : books.length > 0 ? "books" : undefined;
+  const shown = books.slice(0, pages * PAGE_SIZE);
+  const continueBook = snapshot.continueBook;
+  const continueRecord = continueBook ? device.get(continueBook.id) : undefined;
 
   return (
     <>
@@ -136,7 +210,7 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
         aria-label="Choose an MP3 file to import"
       />
 
-      {page.libraryTotal === 0 ? (
+      {snapshot.libraryTotal === 0 ? (
         <section
           className="empty-library"
           data-launch-ready={launchReady}
@@ -187,18 +261,26 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
               aria-label={`Continue listening ${continueBook.title}`}
             >
               <span className="book-cover continue-cover" aria-hidden="true">
-                <BookCover book={continueBook} coverUrl={localCovers[continueBook.id]} />
+                <BookCover book={continueBook} coverUrl={coverUrlFor(continueRecord)} />
               </span>
               <span className="continue-copy">
                 <small>Continue listening</small>
                 <strong>{continueBook.title}</strong>
                 <span>
                   {progressPercent(continueBook)}% · {remainingLabel(continueBook)}
+                  {continueRecord ? "" : " · Not on this device"}
                 </span>
               </span>
-              <span className="continue-play" aria-hidden="true">
-                <Play size={24} weight="fill" />
-              </span>
+              {continueRecord ? (
+                <span className="continue-play" aria-hidden="true">
+                  <Play size={24} weight="fill" />
+                </span>
+              ) : (
+                <span className="continue-play continue-unavailable" title={MISSING_MEDIA_HINT}>
+                  <CloudSlash size={22} aria-hidden="true" />
+                  <span className="visually-hidden">Not on this device</span>
+                </span>
+              )}
             </Link>
           )}
 
@@ -274,7 +356,18 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
                 {filter.label}
               </button>
             ))}
-            {allTags.map((tag) => (
+            {/* Downloads are a facet of the one library, not a second screen. */}
+            <button
+              type="button"
+              className="filter-chip filter-chip-device"
+              aria-pressed={onDevice}
+              onClick={() => setFacetChoice({ from: facetFromUrl, on: !onDevice })}
+            >
+              <DownloadSimple size={15} weight="bold" aria-hidden="true" />
+              <span>On this device</span>
+              {device.size > 0 && <span className="filter-chip-count">{device.size}</span>}
+            </button>
+            {snapshot.tags.map((tag) => (
               <button
                 key={`tag-${tag}`}
                 type="button"
@@ -289,23 +382,30 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
             ))}
           </div>
 
-          {books.length ? (
+          {shown.length ? (
             <div className={`book-grid ${view === "list" ? "book-grid-list" : ""}`}>
-              {books.map((book) => (
+              {shown.map((book) => (
                 <BookItem
                   book={book}
                   key={book.id}
                   compact={view === "list"}
-                  coverUrl={localCovers[book.id]}
+                  record={device.get(book.id)}
                   hasReadAlong={readAlongIds.has(book.id)}
+                  onRemoveDownload={forgetDownload}
                 />
               ))}
             </div>
           ) : (
             <div className="no-results">
               <MagnifyingGlass size={30} weight="duotone" aria-hidden="true" />
-              <h2>No matching books</h2>
-              <p>Try another search, status, or tag.</p>
+              <h2>
+                {onDevice && device.size === 0 ? "Nothing downloaded yet" : "No matching books"}
+              </h2>
+              <p>
+                {onDevice && device.size === 0
+                  ? "Open a book and choose Download to keep its audio on this device."
+                  : "Try another search, status, or tag."}
+              </p>
               <button
                 type="button"
                 className="secondary-button"
@@ -313,24 +413,24 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
                   setQuery("");
                   setStatus("all");
                   setActiveTag(null);
+                  setFacetChoice({ from: facetFromUrl, on: false });
                 }}
               >
                 Clear filters
               </button>
             </div>
           )}
-          {page.nextCursor && (
+          {books.length > shown.length && (
             <div className="library-more">
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => void loadMore()}
-                disabled={loading}
+                onClick={() => setPagination({ key: filterKey, pages: pages + 1 })}
               >
-                {loading ? "Loading" : "Load more books"}
+                Load more books
               </button>
               <small>
-                Showing {books.length} of {page.total} matching books.
+                Showing {shown.length} of {books.length} matching books.
               </small>
             </div>
           )}
@@ -360,6 +460,18 @@ export function LibraryClient({ userId, initialPage }: LibraryClientProps) {
       )}
     </>
   );
+}
+
+const EMPTY_DEVICE_INDEX: DeviceIndex = new Map();
+
+/** The book this document was asked for, when the URL names one. */
+function bookIdFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return BOOK_PATH.exec(window.location.pathname)?.[1] || null;
+}
+
+function coverUrlFor(record: OfflineBook | undefined): string | undefined {
+  return record ? record.offlineCoverThumbUrl || record.offlineCoverUrl || undefined : undefined;
 }
 
 function progressPercent(book: LibraryBook): number {
@@ -405,13 +517,15 @@ function BookCover({ book, coverUrl }: { book: LibraryBook; coverUrl?: string })
 const BookItem = memo(function BookItem({
   book,
   compact,
-  coverUrl,
+  record,
   hasReadAlong,
+  onRemoveDownload,
 }: {
   book: LibraryBook;
   compact: boolean;
-  coverUrl?: string;
+  record?: OfflineBook;
   hasReadAlong?: boolean;
+  onRemoveDownload: (bookId: string) => void;
 }) {
   const percent = progressPercent(book);
 
@@ -420,11 +534,17 @@ const BookItem = memo(function BookItem({
       {/* The title link is the card's accessible entry; the cover stays clickable
           without adding a duplicate tab stop. */}
       <Link href={`/books/${book.id}`} className="book-cover" tabIndex={-1} aria-hidden="true">
-        <BookCover book={book} coverUrl={coverUrl} />
+        <BookCover book={book} coverUrl={coverUrlFor(record)} />
         {hasReadAlong && (
           <span className="book-readalong">
             <TextAlignLeft size={12} aria-hidden="true" />
             Read-along
+          </span>
+        )}
+        {!record && (
+          <span className="book-offdevice">
+            <CloudSlash size={12} aria-hidden="true" />
+            Not on device
           </span>
         )}
       </Link>
@@ -440,6 +560,26 @@ const BookItem = memo(function BookItem({
           </p>
         )}
         {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}
+        {record ? (
+          <p className="book-device">
+            <DownloadSimple size={14} aria-hidden="true" />
+            <span>On this device · {formatBytes(record.byteSize)}</span>
+            <button
+              type="button"
+              className="book-device-remove"
+              aria-label={`Remove download of ${book.title}`}
+              title="Remove the audio from this device. The book, its progress and its history stay."
+              onClick={() => onRemoveDownload(book.id)}
+            >
+              <Trash size={15} aria-hidden="true" />
+            </button>
+          </p>
+        ) : (
+          <p className="book-device book-device-missing" title={MISSING_MEDIA_HINT}>
+            <CloudSlash size={14} aria-hidden="true" />
+            <span>Not on this device — re-import the MP3 to listen</span>
+          </p>
+        )}
         <div className="book-progress-copy">
           <span>
             {book.durationMs ? `${formatDurationRounded(book.durationMs)} • ` : ""}
@@ -457,15 +597,21 @@ const BookItem = memo(function BookItem({
           <span style={{ width: `${percent}%` }} />
         </div>
       </div>
-      {compact && (
-        <Link
-          href={`/books/${book.id}`}
-          className="book-play-button"
-          aria-label={`Play ${book.title}`}
-        >
-          <Play size={19} weight="fill" aria-hidden="true" />
-        </Link>
-      )}
+      {compact &&
+        (record ? (
+          <Link
+            href={`/books/${book.id}`}
+            className="book-play-button"
+            aria-label={`Play ${book.title}`}
+          >
+            <Play size={19} weight="fill" aria-hidden="true" />
+          </Link>
+        ) : (
+          <span className="book-play-button book-play-unavailable" title={MISSING_MEDIA_HINT}>
+            <CloudSlash size={19} aria-hidden="true" />
+            <span className="visually-hidden">Not on this device</span>
+          </span>
+        ))}
     </article>
   );
 });

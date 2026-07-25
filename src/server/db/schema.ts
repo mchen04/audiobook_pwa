@@ -133,6 +133,35 @@ export const books = pgTable(
   ],
 );
 
+/**
+ * Deleted books, kept as explicit tombstones.
+ *
+ * A hard delete is invisible to an incremental pull: absence from a page cannot
+ * be distinguished from "not in this page" (`docs/local-first.md` section 6).
+ * Without this table the only honest deletion signal is a complete, unpaged list
+ * of every live book id on every sync, which does not scale with a library.
+ *
+ * The row is written in the same transaction as the delete, so a deletion the
+ * user saw succeed can never exist without its tombstone. There is no foreign
+ * key to `books` — the whole point is that the book is gone — and no media
+ * column, because the audio never reached the server to begin with.
+ */
+export const bookTombstones = pgTable(
+  "book_tombstones",
+  {
+    bookId: uuid("book_id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // The pull cursor scans (owner, deletedAt, bookId) in that exact order, the
+    // same shape as the book cursor index.
+    index("book_tombstones_owner_deleted_idx").on(table.ownerId, table.deletedAt, table.bookId),
+  ],
+);
+
 export const mediaAssets = pgTable(
   "media_assets",
   {
@@ -482,6 +511,7 @@ export const schema = {
   verification,
   rateLimit,
   books,
+  bookTombstones,
   mediaAssets,
   chapters,
   playbackStates,

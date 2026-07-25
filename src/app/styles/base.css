@@ -337,8 +337,7 @@ a.icon-text-button {
   background: var(--surface-muted);
 }
 
-.empty-library h1,
-.offline-copy h1 {
+.empty-library h1 {
   margin: 0;
   font-size: clamp(1.6rem, 5vw, 2.4rem);
   font-weight: 640;
@@ -347,8 +346,7 @@ a.icon-text-button {
   text-wrap: balance;
 }
 
-.empty-library > p:not(.library-kicker),
-.offline-copy p {
+.empty-library > p:not(.library-kicker) {
   max-width: 34rem;
   margin: 1.15rem 0 1.5rem;
   color: var(--text-muted);

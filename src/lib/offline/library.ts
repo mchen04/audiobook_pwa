@@ -33,7 +33,12 @@ export async function listOfflineBooks(userId: string): Promise<OfflineBook[]> {
     .sort((left, right) => right.downloadedAt.localeCompare(left.downloadedAt));
 }
 
-async function listStoredOfflineBooks(userId: string): Promise<OfflineBook[]> {
+/**
+ * The raw download records for one account: one indexed lookup, no deletion
+ * retry and no Cache Storage reconcile. The library reads this on the paint
+ * path; `listOfflineBooks` does the reconciling read afterwards.
+ */
+export async function listStoredOfflineBooks(userId: string): Promise<OfflineBook[]> {
   const db = await database();
   return db.getAllFromIndex("downloads", "by-user", userId);
 }

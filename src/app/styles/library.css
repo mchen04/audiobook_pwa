@@ -213,7 +213,7 @@
   color: var(--accent);
 }
 
-.book-copy > p:not(.book-diagnostic) {
+.book-copy > p:not(.book-diagnostic):not(.book-device) {
   margin: 0.2rem 0 0;
   overflow: hidden;
   color: var(--text-muted);
@@ -626,4 +626,98 @@
   color: var(--accent-contrast);
   /* Fully opaque so the pill renders identically over every cover gradient. */
   background: var(--accent);
+}
+
+/* ---- Wave 7: the "on this device" facet and its honesty markers ---- */
+
+/* The download facet is a chip in the same row as the status chips: the
+   library gained a facet, it did not gain a screen. */
+.filter-chip-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.filter-chip-count {
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, currentcolor 16%, transparent);
+  padding: 0 0.4rem;
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Every card says, plainly, whether the audio is here — and, when it is, how
+   much of the device it costs and how to take it back. This line wraps rather
+   than truncating: "re-import the MP3 to listen" is the whole point of it. */
+.book-device {
+  display: flex;
+  align-items: start;
+  gap: 0.35rem;
+  margin: 0.45rem 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+.book-device > span {
+  min-width: 0;
+  padding-top: 0.05rem;
+}
+
+.book-device > svg {
+  flex: 0 0 auto;
+  margin-top: 0.1rem;
+}
+
+.book-device-missing {
+  color: var(--danger);
+}
+
+.book-device-remove {
+  display: grid;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: 0 0 auto;
+  place-items: center;
+  margin-left: auto;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.book-device-remove:hover {
+  background: var(--surface-muted);
+  color: var(--danger);
+}
+
+/* Sits where the read-along badge sits, so a card can carry either without
+   shifting its baselines. A book whose audio is gone stays browsable and
+   never wears the accent colour that means "playable". */
+.book-cover > .book-offdevice {
+  position: absolute;
+  right: 0.55rem;
+  bottom: 0.55rem;
+  max-width: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  border-radius: var(--radius-pill);
+  padding: 0.14rem 0.55rem;
+  font-size: var(--text-xs);
+  font-weight: 640;
+  line-height: 1.1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  color: var(--surface);
+  background: color-mix(in srgb, var(--danger) 88%, black);
+}
+
+/* Same footprint as the play button, deliberately not the same affordance. */
+.book-play-unavailable,
+.continue-unavailable {
+  border: 1px dashed color-mix(in srgb, var(--danger) 55%, var(--border));
+  background: transparent;
+  color: var(--danger);
 }

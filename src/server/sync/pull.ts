@@ -9,12 +9,15 @@ import type {
   PulledListeningSession,
   PulledPlaybackState,
   PulledTag,
+  PulledTombstone,
 } from "@/lib/offline/sync-protocol";
 import { db } from "@/server/db/client";
 import { planBookPage } from "@/server/sync/page-plan";
+import { planTombstoneWindow } from "@/server/sync/tombstone-window";
 import {
   books,
   bookTags,
+  bookTombstones,
   chapters,
   collectionBooks,
   collections,
@@ -61,8 +64,17 @@ export async function loadPullBatch(userId: string, since: string | null): Promi
       const floor = since || EPOCH_CURSOR;
       const page = await loadBookPage(transaction, userId, floor);
       const states = await loadPlaybackStates(transaction, userId, floor, page);
+      const window = planTombstoneWindow(since, page);
+      const tombstones = await loadTombstones(transaction, userId, window);
       const cursor = page.complete
-        ? latest(floor, page.rows.at(-1)?.cursorAt, states.at(-1)?.cursorAt)
+        ? latest(
+            floor,
+            page.rows.at(-1)?.cursorAt,
+            states.at(-1)?.cursorAt,
+            // Only a window that was not clamped may move the cursor; a clamped
+            // one has already been bounded by the page watermark below.
+            window.emit && window.advancesCursor ? tombstones.at(-1)?.deletedAt : undefined,
+          )
         : page.watermark;
 
       const [aggregates, tagRows, collectionRows, preferences, sessions, liveBookIds] =
@@ -86,6 +98,7 @@ export async function loadPullBatch(userId: string, since: string | null): Promi
         preferences,
         listeningSessions: sessions,
         liveBookIds,
+        tombstones,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -350,11 +363,44 @@ async function loadRecentSessions(
 }
 
 /**
- * The deletion oracle. Books are hard-deleted, so there is no per-row tombstone
- * to send; this complete, unpaged id list is the explicit statement of what
- * still exists, and the device turns the difference into deletes. It is
- * index-only over `books (owner_id, updated_at, id)` and rides along only on
- * the final page of a sync.
+ * Per-row deletions, from the tombstone written in the same transaction as the
+ * delete. Ordered by `deleted_at` so the last row is the window's high-water
+ * mark, and index-only over `book_tombstones (owner_id, deleted_at, book_id)`.
+ *
+ * This is the deletion signal that scales: its cost tracks the number of
+ * deletions since the device's cursor, not the size of the library.
+ */
+async function loadTombstones(
+  transaction: PullTransaction,
+  userId: string,
+  window: ReturnType<typeof planTombstoneWindow>,
+): Promise<PulledTombstone[]> {
+  if (!window.emit) return [];
+  const rows = await transaction
+    .select({
+      bookId: bookTombstones.bookId,
+      deletedAt: isoMicros(bookTombstones.deletedAt),
+    })
+    .from(bookTombstones)
+    .where(
+      and(
+        eq(bookTombstones.ownerId, userId),
+        after(bookTombstones.deletedAt, window.floor),
+        ...(window.ceiling
+          ? [sql`${bookTombstones.deletedAt} <= ${window.ceiling}::timestamptz`]
+          : []),
+      ),
+    )
+    .orderBy(asc(bookTombstones.deletedAt), asc(bookTombstones.bookId));
+  return rows;
+}
+
+/**
+ * The legacy deletion oracle, kept until every reader consumes `tombstones`.
+ * This complete, unpaged id list is an explicit statement of what still exists,
+ * and the device turns the difference into deletes. It is index-only over
+ * `books (owner_id, updated_at, id)` and rides along only on the final page of
+ * a sync.
  */
 async function loadLiveBookIds(transaction: PullTransaction, userId: string): Promise<string[]> {
   const rows = await transaction

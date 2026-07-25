@@ -45,10 +45,14 @@ export const PATCH = withMutationParams(
         if (!ownedBook) return "unavailable" as const;
       }
 
-      if (name !== undefined) {
+      // The collection is the sync unit for its membership (design contract
+      // section 3): `collection_books` carries no `updatedAt` of its own, so a
+      // membership change that does not bump the parent is a change no other
+      // device can ever observe. One bump covers both edits in this request.
+      if (name !== undefined || bookId !== undefined) {
         await transaction
           .update(collections)
-          .set({ name, updatedAt: new Date() })
+          .set({ ...(name !== undefined ? { name } : {}), updatedAt: new Date() })
           .where(eq(collections.id, params.collectionId));
       }
       if (bookId !== undefined && include === false) {
