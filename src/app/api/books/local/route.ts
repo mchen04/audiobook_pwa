@@ -1,5 +1,4 @@
 import { and, eq, sql } from "drizzle-orm";
-import { z } from "zod";
 
 import {
   isValidChapterSequence,
@@ -7,6 +6,7 @@ import {
   shouldReplaceChapterSequence,
   type ParsedChapter,
 } from "@/domain/mp3";
+import { bookRegistrationSchema } from "@/server/api/mutation-schemas";
 import { withMutation } from "@/server/api/route-handler";
 import { expectRow, getBookForUser } from "@/server/books/queries";
 import { db } from "@/server/db/client";
@@ -16,32 +16,7 @@ import { validateUploadMetadata } from "@/server/media/filename";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Reverend-Insanity-scale ceilings, not upload limits: the audio bytes never
-// reach the server, so these only bound what one registration may write.
-const MAX_CHAPTERS = 10_000;
-const MAX_DURATION_MS = 1_000 * 60 * 60 * 1_000; // 1,000 hours
-const MAX_BYTE_SIZE = 100 * 1024 * 1024 * 1024; // 100 GB
 const CHAPTER_INSERT_BATCH = 2_000;
-
-const chapterSchema = z.object({
-  position: z.number().int().min(0),
-  title: z.string().min(1).max(500),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
-});
-
-const registerSchema = z.object({
-  fileName: z.string().min(1).max(8192),
-  byteSize: z.number().int().positive().max(MAX_BYTE_SIZE),
-  durationMs: z.number().int().positive().max(MAX_DURATION_MS),
-  fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
-  fingerprintKind: z.literal("sha256-v1"),
-  title: z.string().trim().min(1).max(300),
-  author: z.string().trim().min(1).max(240),
-  narrator: z.string().trim().min(1).max(240).nullable(),
-  chapterDiagnostic: z.string().trim().min(1).max(300).nullable(),
-  chapters: z.array(chapterSchema).min(1).max(MAX_CHAPTERS),
-});
 
 /**
  * Registers a book whose MP3 stays on the user's device: the browser parsed
@@ -49,7 +24,7 @@ const registerSchema = z.object({
  * and organization — never the audio bytes.
  */
 export const POST = withMutation(
-  registerSchema,
+  bookRegistrationSchema,
   "The book registration is invalid.",
   async ({ session, data }) => {
     let filename: string;

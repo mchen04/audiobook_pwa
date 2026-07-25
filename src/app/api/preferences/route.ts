@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
-import { z } from "zod";
 
-import { DEFAULT_PREFERENCES, SKIP_BOUNDS_MS } from "@/lib/preferences";
+import { DEFAULT_PREFERENCES } from "@/lib/preferences";
+import { preferencesPatchSchema } from "@/server/api/mutation-schemas";
 import { withMutation, withQuery } from "@/server/api/route-handler";
 import { expectRow } from "@/server/books/queries";
 import { db } from "@/server/db/client";
@@ -18,19 +18,8 @@ export const GET = withQuery(async ({ session }) => {
   return Response.json({ preferences: row ? stripRow(row) : DEFAULT_PREFERENCES });
 });
 
-const skipMs = z.number().int().min(SKIP_BOUNDS_MS.min).max(SKIP_BOUNDS_MS.max);
-
-const patchSchema = z
-  .object({
-    skipBackMs: skipMs,
-    skipForwardMs: skipMs,
-    smartRewind: z.boolean(),
-    autoplayNextInCollection: z.boolean(),
-  })
-  .partial();
-
 export const PATCH = withMutation(
-  patchSchema,
+  preferencesPatchSchema,
   "Invalid preferences.",
   async ({ session, data }) => {
     const row = expectRow(

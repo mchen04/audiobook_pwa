@@ -149,13 +149,32 @@ export function commitArchiveChange(origin: Origin, bookId: string, archived: bo
   });
 }
 
-export function commitTagEdge(origin: Origin, bookId: string, tagId: string, include: boolean) {
+/**
+ * One book↔tag edge.
+ *
+ * The tag's *name* is resolved from the mirror and queued alongside its id,
+ * which is what makes the intent self-sufficient. A tag id is not stable across
+ * the gap between queueing and replay: the server garbage-collects a tag the
+ * moment no book references it, so "remove fiction, then add it back" — or
+ * another device saving a book's whole tag list in between — can delete the row
+ * this edge names. Replaying an id that no longer exists would 404, and a 4xx
+ * is terminal, so the write would be dropped. With the name aboard, the server
+ * can re-establish the vocabulary entry and the edge still lands.
+ */
+export async function commitTagEdge(
+  origin: Origin,
+  bookId: string,
+  tagId: string,
+  include: boolean,
+) {
+  const db = await database();
+  const tag = await db.get("tags", mirrorKey(origin.userId, tagId));
   return commitDraft({
     key: tagMutationKey(origin.userId, bookId, tagId),
     userId: origin.userId,
     kind: "tag",
     entityId: bookId,
-    payload: { tagId, include },
+    payload: { tagId, include, ...(tag ? { name: tag.name } : {}) },
     deviceId: origin.deviceId,
     deviceSequence: 0,
   });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { listeningSessionSchema } from "@/server/api/mutation-schemas";
 import { withMutationParams } from "@/server/api/route-handler";
 import { getOwnedBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
@@ -9,22 +10,9 @@ import { claimMutationReceipt } from "@/server/sync/mutation-receipt";
 
 export const runtime = "nodejs";
 
-const sessionSchema = z.object({
-  startedAt: z.iso.datetime(),
-  endedAt: z.iso.datetime(),
-  startPositionMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  endPositionMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  /**
-   * The outbox's idempotency key, generated once at queue time. Optional so
-   * builds that predate the generalized outbox keep working; when it is absent
-   * a replay can still double-insert, which is why the client always sends it.
-   */
-  mutationId: z.uuid().optional(),
-});
-
 export const POST = withMutationParams(
   z.object({ bookId: z.uuid() }),
-  sessionSchema,
+  listeningSessionSchema,
   "Invalid listening session.",
   async ({ session, params, data }) => {
     const startedAt = new Date(data.startedAt);

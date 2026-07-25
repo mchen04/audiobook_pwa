@@ -1,6 +1,7 @@
 import { and, count, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
+import { bookPatchSchema } from "@/server/api/mutation-schemas";
 import {
   withMutationParams,
   withQueryParams,
@@ -9,6 +10,7 @@ import {
 import { getBookForUser, getOwnedBook } from "@/server/books/queries";
 import { db } from "@/server/db/client";
 import { books, bookTags, bookTombstones, tags } from "@/server/db/schema";
+import { claimMutationReceipt } from "@/server/sync/mutation-receipt";
 
 export const runtime = "nodejs";
 
@@ -23,36 +25,16 @@ export const GET = withQueryParams(paramsSchema, async ({ session, params }) => 
   return Response.json({ book });
 });
 
-const optionalTrimmed = (max: number) =>
-  z
-    .string()
-    .trim()
-    .max(max)
-    .transform((value) => value || null)
-    .nullable();
-
-const patchSchema = z
-  .object({
-    title: z.string().trim().min(1).max(300),
-    author: z.string().trim().min(1).max(240),
-    narrator: optionalTrimmed(240),
-    description: optionalTrimmed(5000),
-    series: optionalTrimmed(240),
-    seriesPosition: z.number().min(0).max(999_999).nullable(),
-    archived: z.boolean(),
-    tags: z.array(z.string().trim().min(1).max(80)).max(20),
-  })
-  .partial();
-
 export const PATCH = withMutationParams(
   paramsSchema,
-  patchSchema,
+  bookPatchSchema,
   "Invalid book update.",
   async ({ session, params, data }) => {
-    const { tags: nextTags, archived, seriesPosition, ...fields } = data;
+    const { tags: nextTags, tagEdge, mutationId, archived, seriesPosition, ...fields } = data;
     const owned = await getOwnedBook(session.user.id, params.bookId);
     if (!owned) return Response.json({ error: "Not found" }, { status: 404 });
 
+    let unknownTag = false;
     try {
       await db.transaction(async (transaction) => {
         await transaction
@@ -70,6 +52,14 @@ export const PATCH = withMutationParams(
         if (nextTags !== undefined) {
           await replaceBookTags(transaction, session.user.id, params.bookId, nextTags);
         }
+        if (tagEdge !== undefined) {
+          unknownTag = !(await applyTagEdge(transaction, {
+            userId: session.user.id,
+            bookId: params.bookId,
+            mutationId,
+            ...tagEdge,
+          }));
+        }
       });
     } catch (error) {
       if (error instanceof TagLimitError) {
@@ -81,10 +71,114 @@ export const PATCH = withMutationParams(
       throw error;
     }
 
+    if (unknownTag) return Response.json({ error: "Unknown tag." }, { status: 404 });
+
     const book = await getBookForUser(session.user.id, params.bookId);
     return Response.json({ book });
   },
 );
+
+/**
+ * Applies one book↔tag edge.
+ *
+ * The `updatedAt` bump above is not optional bookkeeping here: `book_tags`
+ * carries no timestamp of its own, so the parent's bump is the only thing that
+ * puts this edge into another device's incremental pull (design contract
+ * section 3). It runs before this function for every PATCH, edge or not.
+ *
+ * Returns false when the tag id is not this account's, which the caller turns
+ * into a 404 — an edge naming somebody else's tag must not be silently ignored.
+ */
+async function applyTagEdge(
+  transaction: Transaction,
+  edge: {
+    userId: string;
+    bookId: string;
+    tagId: string;
+    include: boolean;
+    mutationId?: string;
+  },
+): Promise<boolean> {
+  await transaction.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`tags:${edge.userId}`}, 0))`,
+  );
+
+  if (edge.mutationId) {
+    const receipt = await claimMutationReceipt(transaction, {
+      mutationId: edge.mutationId,
+      userId: edge.userId,
+      bookId: edge.bookId,
+    });
+    // Already applied. Answering before the ownership check below is what makes
+    // a replayed *removal* a no-op: the removal may have garbage-collected the
+    // tag row, so re-checking ownership would 404 a write that did land.
+    if (!receipt.claimed) return true;
+  }
+
+  const tagId = await resolveEdgeTag(transaction, edge);
+  if (!tagId) {
+    // Nothing to remove is already the desired state; only an *add* that cannot
+    // name a tag is a failure the device needs to hear about.
+    return !edge.include;
+  }
+
+  if (edge.include) {
+    // Add-wins and idempotent: replaying "add" twice is still one edge.
+    await transaction.insert(bookTags).values({ bookId: edge.bookId, tagId }).onConflictDoNothing();
+  } else {
+    await transaction
+      .delete(bookTags)
+      .where(and(eq(bookTags.bookId, edge.bookId), eq(bookTags.tagId, tagId)));
+    // A tag no book references any more is not a filter chip anybody can use.
+    await deleteUnusedTags(transaction, edge.userId);
+  }
+  return true;
+}
+
+/**
+ * The tag this edge refers to, by id when the row still exists and by name
+ * otherwise.
+ *
+ * Ids are not stable: `deleteUnusedTags` collects a tag as soon as its last
+ * edge goes, so "remove fiction" followed by "add fiction back" replays a
+ * second id that no longer resolves. Falling back to the queued name — and
+ * re-creating the vocabulary entry for an add — is what keeps that second
+ * write from being dropped as a terminal 404.
+ */
+async function resolveEdgeTag(
+  transaction: Transaction,
+  edge: { userId: string; tagId: string; include: boolean; name?: string },
+): Promise<string | null> {
+  const [byId] = await transaction
+    .select({ id: tags.id })
+    .from(tags)
+    .where(and(eq(tags.id, edge.tagId), eq(tags.userId, edge.userId)))
+    .limit(1);
+  if (byId) return byId.id;
+  if (!edge.name) return null;
+
+  const [byName] = await transaction
+    .select({ id: tags.id })
+    .from(tags)
+    .where(and(eq(tags.userId, edge.userId), eq(sql`lower(${tags.name})`, edge.name.toLowerCase())))
+    .limit(1);
+  if (byName) return byName.id;
+  if (!edge.include) return null;
+
+  const [created] = await transaction
+    .insert(tags)
+    .values({ userId: edge.userId, name: edge.name })
+    .onConflictDoNothing()
+    .returning({ id: tags.id });
+  if (!created) return null;
+
+  const [tagCount] = await transaction
+    .select({ value: count() })
+    .from(tags)
+    .where(eq(tags.userId, edge.userId));
+  if ((tagCount?.value || 0) > MAX_ACCOUNT_TAGS) throw new TagLimitError();
+  return created.id;
+}
 
 export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
   const owned = await getOwnedBook(session.user.id, params.bookId);

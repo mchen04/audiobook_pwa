@@ -396,6 +396,27 @@ export function toReplayRequest(mutation: QueuedMutation): ReplayRequest {
         url: `/api/books/${mutation.entityId}`,
         init: { method: "DELETE", headers: { "X-Mutation-Id": mutation.mutationId } },
       };
+    case "tag":
+      // `{ tagId, include }` is NOT a shape `PATCH /api/books/:id` understands;
+      // sending it flat made zod strip both keys, the handler apply nothing,
+      // and the route answer 200 — which the outbox read as success and
+      // deleted, reverting the edge on the next pull. It travels under
+      // `tagEdge`, which the route's schema names explicitly, and carries the
+      // `mutationId` so a replayed edge is a receipted no-op.
+      return json(
+        "PATCH",
+        {
+          tagEdge: {
+            tagId: mutation.payload.tagId,
+            include: mutation.payload.include,
+            // Present whenever the device knew the name; lets the server
+            // re-establish a vocabulary entry that was collected in between.
+            ...(typeof mutation.payload.name === "string" ? { name: mutation.payload.name } : {}),
+          },
+          mutationId: mutation.mutationId,
+        },
+        `/api/books/${mutation.entityId}`,
+      );
     default:
       return json("PATCH", { ...mutation.payload }, `/api/books/${mutation.entityId}`);
   }
