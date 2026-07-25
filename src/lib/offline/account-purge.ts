@@ -1,4 +1,5 @@
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
+import { purgeDeviceSequencesForUser } from "@/lib/offline-sync";
 
 import { database } from "./db";
 import { clearLocalDataForUser } from "./library";
@@ -57,6 +58,10 @@ export async function purgeAccount(userId: string): Promise<void> {
   // retry record for media that may still be on disk, and dropping them would
   // orphan bytes nothing knows how to reclaim.
   await purgeDeletionJournal(userId);
+  // Raises the device floor as it deletes, in one transaction, so this account
+  // signing back in cannot restart its counters below what the server already
+  // recorded. See `purgeDeviceSequencesForUser`.
+  await purgeDeviceSequencesForUser(userId);
   if (pages) throw pages;
 }
 

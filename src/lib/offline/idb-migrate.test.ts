@@ -841,7 +841,14 @@ function expectedSync(fixture: LegacyVersion): Record<string, Record<string, unk
   };
 }
 
-const SYNC_HISTORY: LegacyVersion[] = [1, 2, 3, 4].map(syncFixture);
+/**
+ * v5 changed no store, keyPath or index: it re-keys `sequences` from `bookId`
+ * to `userId:bookId` so an account purge can sweep it. A v5 database on a
+ * device that was signed out when it upgraded still holds the bare-key rows —
+ * attribution is skipped rather than guessed — so the v5 fixture is the v4 one,
+ * and the dedicated cases below cover the attributed shape.
+ */
+const SYNC_HISTORY: LegacyVersion[] = [1, 2, 3, 4, 5].map(syncFixture);
 
 // ---------------------------------------------------------------------------
 // Production open helpers (the code under test)
@@ -1200,7 +1207,7 @@ describe("chapterline-sync-v1 upgrade specifics", () => {
 
       const db = await upgradeSync();
 
-      expect(db.version).toBe(4);
+      expect(db.version).toBe(5);
       // Not one queued write may be dropped: each is a user write the server
       // has never seen, so losing it here is indistinguishable from losing it.
       const mutations = (await db.getAll("mutations")) as Record<string, unknown>[];
@@ -1243,5 +1250,156 @@ describe("chapterline-sync-v1 upgrade specifics", () => {
       expect(await db.get("mutations", mutation.key), mutation.key).toStrictEqual(mutation);
     }
     db.close();
+  });
+});
+
+/**
+ * v4 → v5 re-keys `sequences` from `bookId` to `userId:bookId` so an account
+ * purge can sweep it.
+ *
+ * These values order replay. A counter that comes back lower than what the
+ * server already recorded in `playback_device_sequences` makes the server treat
+ * this device's later writes as stale and discard them silently — the exact
+ * lost-write class this project halts on. So every case here asserts the
+ * counter's EXACT value, never merely that a row exists.
+ */
+describe("chapterline-sync-v1 device sequence scoping", () => {
+  const OWNER = "user-a";
+
+  function stubActiveUser(userId: string | null): void {
+    const map = new Map<string, string>();
+    if (userId) map.set("chapterline:active-user", userId);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => map.get(key) ?? null,
+      setItem: (key: string, value: string) => void map.set(key, value),
+      removeItem: (key: string) => void map.delete(key),
+      key: (index: number) => [...map.keys()][index] ?? null,
+      get length() {
+        return map.size;
+      },
+    });
+  }
+
+  async function sequenceRows(): Promise<Record<string, unknown>[]> {
+    const db = await openDB(SYNC_DATABASE);
+    const rows = (await db.getAll("sequences")) as Record<string, unknown>[];
+    db.close();
+    return rows;
+  }
+
+  // v1→v5 … v4→v5. A database already at v5 has had its one attribution pass
+  // and is covered by the signed-out case below instead.
+  it.each(SYNC_HISTORY.filter((fixture) => fixture.version < 5))(
+    "carries every counter forward from version $version with an account signed in",
+    async (fixture) => {
+      await buildFixture(SYNC_DATABASE, fixture);
+      stubActiveUser(OWNER);
+
+      const db = await upgradeSync();
+      expect(db.version).toBe(5);
+      db.close();
+
+      // Exact values, under the scoped key, for every counter the device held.
+      for (const row of SEQUENCE_ROWS) {
+        expect(
+          await (async () => {
+            const handle = await openDB(SYNC_DATABASE);
+            const found = await handle.get("sequences", `${OWNER}:${row.key}`);
+            handle.close();
+            return found;
+          })(),
+          `sequences[${OWNER}:${row.key}]`,
+        ).toStrictEqual({
+          key: `${OWNER}:${row.key}`,
+          userId: OWNER,
+          bookId: row.key,
+          value: row.value,
+        });
+      }
+      // Re-keyed, not duplicated: the bare rows are gone and none was invented.
+      expect((await sequenceRows()).map((row) => row.key).sort()).toStrictEqual(
+        SEQUENCE_ROWS.map((row) => `${OWNER}:${row.key}`).sort(),
+      );
+    },
+  );
+
+  it.each(SYNC_HISTORY)(
+    "preserves every counter from version $version when no account is signed in",
+    async (fixture) => {
+      await buildFixture(SYNC_DATABASE, fixture);
+      stubActiveUser(null);
+
+      const db = await upgradeSync();
+      expect(db.version).toBe(5);
+      db.close();
+
+      // Nothing to attribute the rows to, so nothing is guessed AND nothing is
+      // dropped: discarding them to make the migration tidy would reset this
+      // device's counters below the server's high-water mark.
+      for (const row of SEQUENCE_ROWS) {
+        expect(await (await openDB(SYNC_DATABASE)).get("sequences", row.key)).toStrictEqual(row);
+      }
+      expect(await sequenceRows()).toHaveLength(SEQUENCE_ROWS.length);
+    },
+  );
+
+  it("keeps issuing above an unattributed counter it could not re-key", async () => {
+    await buildFixture(SYNC_DATABASE, syncFixture(4));
+    stubActiveUser(null);
+    const { nextDeviceSequence } = await import("../offline-sync");
+
+    // Signed out: falls back to the bare key and continues from 41, never 1.
+    expect(await nextDeviceSequence("book-covered")).toBe(42);
+
+    // Signing in must not restart it either — the scoped row starts above the
+    // legacy value it supersedes, and the legacy row is folded away.
+    stubActiveUser(OWNER);
+    expect(await nextDeviceSequence("book-covered")).toBe(43);
+    const rows = await sequenceRows();
+    expect(
+      rows.find((row) => row.key === "book-covered"),
+      "legacy row folded in",
+    ).toBe(undefined);
+    expect(rows.find((row) => row.key === `${OWNER}:book-covered`)).toStrictEqual({
+      key: `${OWNER}:book-covered`,
+      userId: OWNER,
+      bookId: "book-covered",
+      value: 43,
+    });
+  });
+
+  it("never reissues a sequence after an account purge deletes the counters", async () => {
+    await buildFixture(SYNC_DATABASE, syncFixture(4));
+    stubActiveUser(OWNER);
+    const { nextDeviceSequence, purgeDeviceSequencesForUser } = await import("../offline-sync");
+    expect(await nextDeviceSequence("book-covered")).toBe(42);
+
+    await purgeDeviceSequencesForUser(OWNER);
+
+    // Swept: nothing left names the departed account.
+    const afterPurge = await sequenceRows();
+    expect(afterPurge.filter((row) => String(row.key).startsWith(`${OWNER}:`))).toStrictEqual([]);
+    expect(afterPurge.every((row) => row.userId === undefined && row.bookId === undefined)).toBe(
+      true,
+    );
+
+    // And the same account signing back in resumes ABOVE the value the server
+    // already holds, instead of restarting at 1 and having its next forty-two
+    // writes discarded as stale.
+    expect(await nextDeviceSequence("book-covered")).toBe(999_999 + 1);
+  });
+
+  it("purges one account's counters without touching another's", async () => {
+    stubActiveUser(OWNER);
+    const { nextDeviceSequence, purgeDeviceSequencesForUser, currentDeviceSequence } =
+      await import("../offline-sync");
+    await nextDeviceSequence("book-1", OWNER);
+    await nextDeviceSequence("book-1", OWNER);
+    await nextDeviceSequence("book-2", USER_B);
+
+    await purgeDeviceSequencesForUser(OWNER);
+
+    expect(await currentDeviceSequence("book-1", OWNER)).toBe(0);
+    expect(await currentDeviceSequence("book-2", USER_B)).toBe(1);
   });
 });

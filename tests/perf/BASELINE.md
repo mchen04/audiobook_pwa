@@ -163,6 +163,42 @@ which uses a non-persistent WebKit context. When Playwright fixes WebKit
 persistent Cache Storage, `selectEngine()` will pick WebKit automatically on the
 next run and the header line will say so.
 
+## After — the same harness against the local-first launch path
+
+Recorded 2026-07-25, same harness, same bars, same 1000-book library, same local
+database. Nothing in the harness or the thresholds changed between the two runs;
+`git diff` on `tests/perf/` across the work is empty apart from this section.
+
+```
+profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries
+----------------------------------------------------------------------------------------------------------------
+A fast (0ms)                 131ms     132ms     132ms         0         0         0       0        0
+B slow (400ms)               123ms     132ms     132ms         0         0         0       1        0
+C cold database (3000ms)     125ms     142ms     142ms         0         0         0       0        0
+D offline                    123ms     129ms     129ms         0         0         0       0        0
+----------------------------------------------------------------------------------------------------------------
+spread of p95 across profiles: 13ms (bar 150ms)
+```
+
+| Profile         | p95 before  | p95 after | doc hits | Postgres queries |
+| --------------- | ----------- | --------- | -------- | ---------------- |
+| A fast          | 92ms        | 132ms     | 6 → 0    | 81 → 0           |
+| B slow          | 509ms       | 132ms     | 6 → 0    | 60 → 0           |
+| C cold database | 3104ms      | 142ms     | 6 → 0    | 60 → 0           |
+| D offline       | ≥15007ms    | 129ms     | 0 → 0    | 0 → 0            |
+| **spread**      | **14915ms** | **13ms**  |          |                  |
+
+Profile A is _slower_ than its baseline (92ms → 132ms) and that is the honest
+direction: at baseline it painted the empty state, because the mirror had not
+been populated. It now paints 1000 real book cards. The readiness marker was
+tightened during the work — a device that has never synced shows a first-sync
+notice that carries no marker at all — so the number is harder to earn than it
+was, not easier.
+
+The check is still able to fail. Disabling the service worker's cache-first
+branch returns it to 6 document hits per profile, 24 Postgres queries, p95
+551ms/3152ms on B/C, and a 3009ms spread.
+
 ## Reproducing
 
 ```

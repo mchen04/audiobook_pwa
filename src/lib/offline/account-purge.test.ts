@@ -3,7 +3,8 @@ import "fake-indexeddb/auto";
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
-import { listQueuedMutations } from "@/lib/offline-sync";
+import { listQueuedMutations, nextDeviceSequence } from "@/lib/offline-sync";
+import { openDB } from "idb";
 
 import { listLocalUserIds, purgeAccount, purgeOnSignIn } from "./account-purge";
 import { database, MEDIA_CACHE, mirrorKey } from "./db";
@@ -197,6 +198,8 @@ async function seedAccount(userId: string) {
   await media.put(mediaUrl, new Response("audio"));
   await media.put(`${mediaUrl}/chunk/0`, new Response("chunk"));
   storage.setItem(`chapterline:position:${userId}`, "1");
+  // A replay counter for this account, scoped `userId:bookId`.
+  await nextDeviceSequence("book", userId);
 }
 
 /**
@@ -240,6 +243,13 @@ async function rowsFor(userId: string): Promise<Record<string, number>> {
     counts[store] = rows.filter((row) => row.userId === userId).length;
   }
   counts.outbox = (await listQueuedMutations(userId)).length;
+  // The replay high-water marks live in the other database and are keyed
+  // `userId:bookId`, so they are swept by key range rather than by index.
+  const sync = await openDB("chapterline-sync-v1");
+  counts.sequences = ((await sync.getAll("sequences")) as { key: string }[]).filter((row) =>
+    row.key.startsWith(`${userId}:`),
+  ).length;
+  sync.close();
   counts.localStorage = storage.snapshot().filter((key) => key.includes(`:${userId}`)).length;
   return counts;
 }
