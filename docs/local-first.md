@@ -65,6 +65,15 @@ touches a child table must still bump the parent's `updatedAt`**, or the change
 will never propagate to another device. Any new mutation route that forgets this
 is a sync bug, and the two-device convergence test exists to catch it.
 
+That consequence is load-bearing for **books** and, today, only for books. Book
+aggregates are cursored, so `books.updatedAt` is the only thing that puts a
+chapter or tag-edge change into another device's incremental pull. Collections
+are pulled in full and uncursored, so a missing `collections.updatedAt` bump does
+not currently break propagation — which means propagation cannot be used as
+evidence that the bump happened. Assert the timestamp directly. A test that
+infers the bump from "the other device saw it" passes even when the bump is gone,
+and would stop protecting anything the moment collections became cursored.
+
 Tag vocabulary and collection lists are small and user-level, so they are pulled
 in full on every sync rather than cursored.
 
