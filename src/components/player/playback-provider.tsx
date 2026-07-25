@@ -20,6 +20,7 @@ import type {
   PlayerChapter,
 } from "@/domain/player";
 import { ACTIVE_USER_KEY, PROGRESS_CONFLICT_EVENT, UNLOAD_PLAYER_EVENT } from "@/lib/app-keys";
+import { afterLaunchPaint } from "@/lib/launch-revalidation";
 import { createListeningTracker } from "@/lib/listening-tracker";
 import {
   loadPlaybackHistory,
@@ -173,26 +174,30 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   useEffect(() => {
     localStorage.setItem(ACTIVE_USER_KEY, userId);
     let active = true;
+    const refresh = () => {
+      void fetchPreferences(userId)
+        .then((fresh) => {
+          if (active) setPreferences(fresh);
+        })
+        .catch(() => undefined);
+    };
+    // This device's own answer is applied at once; the server's is revalidation
+    // and waits for the launch to paint. `fetchPreferences` used to fire from
+    // mount, which put a network round trip and a Postgres query in front of
+    // the frame the launch is measured on for every page carrying the player.
     void Promise.resolve()
       .then(() => {
         if (active) setPreferences(readCachedPreferences(userId));
-        return fetchPreferences(userId);
-      })
-      .then((fresh) => {
-        if (active) setPreferences(fresh);
       })
       .catch(() => undefined);
-    const refresh = () => {
-      void fetchPreferences(userId).then((fresh) => {
-        if (active) setPreferences(fresh);
-      });
-    };
+    const cancelRevalidation = afterLaunchPaint(refresh);
     const replayHistory = () => void replayPlaybackHistory(userId).catch(() => undefined);
     if (navigator.onLine) replayHistory();
     window.addEventListener("online", refresh);
     window.addEventListener("online", replayHistory);
     return () => {
       active = false;
+      cancelRevalidation();
       window.removeEventListener("online", refresh);
       window.removeEventListener("online", replayHistory);
     };

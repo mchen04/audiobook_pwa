@@ -24,6 +24,7 @@ import { useActiveUserId } from "@/components/use-active-user";
 import type { LibraryBook } from "@/domain/library";
 import { formatBytes } from "@/lib/format-bytes";
 import { formatDurationRounded } from "@/lib/format-time";
+import { markLaunchPainted } from "@/lib/launch-revalidation";
 import { importLocalMp3 } from "@/lib/local-import";
 import type { OfflineBook } from "@/lib/offline/db";
 import { asOfflinePlayerBook } from "@/lib/offline/library";
@@ -59,6 +60,18 @@ const MISSING_MEDIA_HINT =
 
 const BOOK_PATH = /^\/books\/([0-9a-fA-F-]{36})\/?$/;
 
+/**
+ * Every `Link` below carries `prefetch={false}`, deliberately.
+ *
+ * Left on, a launch quietly fires an RSC request per visible card the moment
+ * hydration finishes — a server round trip with a `requireSession()` and a full
+ * book query behind each one, for pages the user never asked for. That is the
+ * network back on the launch path by the side door, competing with the one sync
+ * the design does sanction, and on a slow connection it lands in the middle of
+ * the next launch. The device already holds everything this screen needs; a
+ * book page is fetched when the user actually opens one.
+ */
+
 export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   const userId = useActiveUserId(serverUserId);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -88,13 +101,10 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   const [fallbackBookId, setFallbackBookId] = useState(bookIdFromUrl);
   const [pagination, setPagination] = useState({ key: "", pages: 1 });
 
-  const { snapshot, unavailable, reload, retry, removeDownload } = useLibraryBooks(userId, {
-    query,
-    status,
-    tag: activeTag,
-    sort,
-    onDevice,
-  });
+  const { snapshot, preparing, unavailable, reload, retry, removeDownload } = useLibraryBooks(
+    userId,
+    { query, status, tag: activeTag, sort, onDevice },
+  );
 
   const books = snapshot?.books || [];
   const device: DeviceIndex = snapshot?.device || EMPTY_DEVICE_INDEX;
@@ -103,6 +113,34 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   // simply not carried across a different set of filters.
   const filterKey = JSON.stringify([query, status, activeTag, sort, onDevice]);
   const pages = pagination.key === filterKey ? pagination.pages : 1;
+  // A first launch on a device that has never synced holds an empty mirror, and
+  // "you have no books" would simply be false there. Section 12's upgrading
+  // device is unaffected: it has downloads, so `libraryTotal` is not zero and
+  // its books render straight away.
+  const firstSync = !!snapshot && snapshot.libraryTotal === 0 && preparing;
+  // The launch benchmark measures the moment this attribute lands in the DOM.
+  // It is a contract: it may only be set when the user's REAL library is on
+  // screen — actual book cards, or the genuine "no books yet" state. A skeleton,
+  // a spinner, a placeholder grid, a filtered "no matching books" view, or the
+  // first-sync notice below must never carry it, or the benchmark starts
+  // measuring an empty box and the sub-500ms bar stops meaning anything.
+  // `snapshot` is null until this device's own library has been read, so
+  // nothing below renders before then.
+  const launchReady = !snapshot
+    ? undefined
+    : snapshot.libraryTotal === 0
+      ? firstSync
+        ? undefined
+        : "empty"
+      : books.length > 0
+        ? "books"
+        : undefined;
+
+  // Revalidation is allowed to reach for the network only once this has
+  // happened; see `lib/launch-revalidation.ts`.
+  useEffect(() => {
+    if (launchReady) markLaunchPainted();
+  }, [launchReady]);
 
   useEffect(() => {
     if (!userId) return;
@@ -170,13 +208,8 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
     );
   }
 
-  // The launch benchmark measures the moment this attribute lands in the DOM.
-  // It is a contract: it may only be set when the user's REAL library is on
-  // screen — actual book cards, or the genuine "no books yet" state. A skeleton,
-  // a spinner, a placeholder grid, or a filtered "no matching books" view must
-  // never carry it, or the benchmark starts measuring an empty box and the
-  // sub-500ms bar stops meaning anything. `snapshot` is null until this
-  // device's own library has been read, so nothing below renders before then.
+  // `snapshot` is null until this device's own library has been read, so
+  // nothing below — and no readiness marker — renders before then.
   if (!snapshot) {
     return unavailable ? (
       <section className="library-content">
@@ -192,8 +225,21 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
     ) : null;
   }
 
-  const launchReady =
-    snapshot.libraryTotal === 0 ? "empty" : books.length > 0 ? "books" : undefined;
+  // The device has nothing mirrored and has never asked for anything. Saying
+  // "bring your first audiobook" here would be a guess presented as a fact, so
+  // it says what is actually happening — and carries no readiness marker.
+  if (firstSync) {
+    return (
+      <section className="library-content" aria-labelledby="library-title" aria-busy="true">
+        <div className="no-results">
+          <BookOpenText size={30} weight="duotone" aria-hidden="true" />
+          <h2 id="library-title">Setting up your library</h2>
+          <p>Hark is bringing this account&apos;s books onto this device for the first time.</p>
+        </div>
+      </section>
+    );
+  }
+
   const shown = books.slice(0, pages * PAGE_SIZE);
   const continueBook = snapshot.continueBook;
   const continueRecord = continueBook ? device.get(continueBook.id) : undefined;
@@ -258,6 +304,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
             <Link
               href={`/books/${continueBook.id}`}
               className="continue-card"
+              prefetch={false}
               aria-label={`Continue listening ${continueBook.title}`}
             >
               <span className="book-cover continue-cover" aria-hidden="true">
@@ -533,7 +580,13 @@ const BookItem = memo(function BookItem({
     <article className="book-item">
       {/* The title link is the card's accessible entry; the cover stays clickable
           without adding a duplicate tab stop. */}
-      <Link href={`/books/${book.id}`} className="book-cover" tabIndex={-1} aria-hidden="true">
+      <Link
+        href={`/books/${book.id}`}
+        className="book-cover"
+        prefetch={false}
+        tabIndex={-1}
+        aria-hidden="true"
+      >
         <BookCover book={book} coverUrl={coverUrlFor(record)} />
         {hasReadAlong && (
           <span className="book-readalong">
@@ -549,7 +602,7 @@ const BookItem = memo(function BookItem({
         )}
       </Link>
       <div className="book-copy">
-        <Link href={`/books/${book.id}`} className="book-title">
+        <Link href={`/books/${book.id}`} className="book-title" prefetch={false}>
           {book.title}
         </Link>
         <p>{book.author}</p>
@@ -602,6 +655,7 @@ const BookItem = memo(function BookItem({
           <Link
             href={`/books/${book.id}`}
             className="book-play-button"
+            prefetch={false}
             aria-label={`Play ${book.title}`}
           >
             <Play size={19} weight="fill" aria-hidden="true" />

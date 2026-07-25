@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { LibraryBook } from "@/domain/library";
+import { afterLaunchPaint } from "@/lib/launch-revalidation";
 import { database, mirrorKeyTail, type OfflineBook } from "@/lib/offline/db";
 import { removeOfflineBook } from "@/lib/offline/deletion-journal";
 import { listOfflineBooks, listStoredOfflineBooks } from "@/lib/offline/library";
@@ -57,6 +58,19 @@ type Listing = { books: LibraryBook[]; device: DeviceIndex };
 
 const PULL_PAGE_LIMIT = 50;
 
+/**
+ * How long a device that has never synced may spend on its first pull before
+ * the library gives up waiting and shows what it has.
+ *
+ * Without a ceiling a stalled-but-alive connection would hold a first-time user
+ * on "setting up" indefinitely — the same failure the service worker's
+ * navigation budget exists to prevent.
+ */
+const FIRST_SYNC_GATE_MS = 4_000;
+
+/** Whether this device has ever completed a pull for the signed-in account. */
+type FirstSync = "unknown" | "pending" | "done";
+
 export function useLibraryBooks(userId: string | null, filters: LibraryFilters) {
   const { query, status, tag, sort, onDevice } = filters;
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -64,6 +78,7 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
   const [unavailable, setUnavailable] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [reconnects, setReconnects] = useState(0);
+  const [firstSync, setFirstSync] = useState<FirstSync>("unknown");
 
   const reread = useCallback(() => setNonce((current) => current + 1), []);
 
@@ -101,33 +116,62 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
     };
   }, [userId, query, status, tag, sort, onDevice, nonce]);
 
-  // Revalidation, after paint and never before. `requestAnimationFrame` puts
-  // this behind the frame that painted the local library; the timeout puts it
-  // behind that frame's commit.
+  // Revalidation, after paint and never before.
+  //
+  // An earlier version scheduled this on `requestAnimationFrame` from mount,
+  // which fires while the mirror is still being read — before there is any
+  // paint to be "after". `afterLaunchPaint` waits for the render that puts the
+  // user's real library on screen and then for the browser to go quiet, so the
+  // pull competes with nothing that launch is measured on.
+  //
+  // The cold start is the exception, and it is the one section 10 asks for: a
+  // device that has never completed a pull has no mirror to paint, so it would
+  // be telling someone with a library that they have no books. There is nothing
+  // to protect, so the first pull runs at once and the library waits for it.
+  // The test is the sync cursor, not "the list looks empty" — an account that
+  // genuinely owns no books has a cursor, and must not re-pull eagerly on every
+  // launch forever.
   useEffect(() => {
     if (!userId) return;
     let active = true;
-    let timer = 0;
-    const frame = requestAnimationFrame(() => {
-      timer = window.setTimeout(() => {
-        void revalidate(userId).then((outcome) => {
-          if (!active) return;
-          // An expired or revoked session must never strand the user on a
-          // cached library. Purging belongs to the sign-in/sign-out path,
-          // which owns it; doing it here would destroy the only copy of the
-          // audio over a session that has merely timed out.
-          if (outcome === "unauthorized") {
-            window.location.replace("/login");
-            return;
-          }
-          reread();
-        });
-      }, 0);
-    });
+    let cancelWait = () => {};
+    let gate = 0;
+    const settleFirstSync = () => {
+      window.clearTimeout(gate);
+      if (active) setFirstSync("done");
+    };
+    const run = () => {
+      void revalidate(userId).then((outcome) => {
+        settleFirstSync();
+        if (!active) return;
+        // An expired or revoked session must never strand the user on a
+        // cached library. Purging belongs to the sign-in/sign-out path,
+        // which owns it; doing it here would destroy the only copy of the
+        // audio over a session that has merely timed out.
+        if (outcome === "unauthorized") {
+          window.location.replace("/login");
+          return;
+        }
+        reread();
+      });
+    };
+    void getSyncMeta(userId)
+      .catch(() => undefined)
+      .then((meta) => {
+        if (!active) return;
+        if (meta?.cursor) {
+          setFirstSync("done");
+          cancelWait = afterLaunchPaint(run);
+          return;
+        }
+        setFirstSync("pending");
+        gate = window.setTimeout(settleFirstSync, FIRST_SYNC_GATE_MS);
+        run();
+      });
     return () => {
       active = false;
-      cancelAnimationFrame(frame);
-      window.clearTimeout(timer);
+      window.clearTimeout(gate);
+      cancelWait();
     };
   }, [userId, reconnects, reread]);
 
@@ -170,7 +214,19 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
 
   const snapshot: LibraryListing | null = overview && listing ? { ...listing, ...overview } : null;
 
-  return { snapshot, unavailable, reload, retry, removeDownload };
+  return {
+    snapshot,
+    /**
+     * This device has never completed a pull for this account, so an empty
+     * mirror does not mean an empty library — it means nobody has asked yet.
+     * The caller must not present that as the genuine "no books" state.
+     */
+    preparing: firstSync !== "done",
+    unavailable,
+    reload,
+    retry,
+    removeDownload,
+  };
 }
 
 // ---------------------------------------------------------------------------

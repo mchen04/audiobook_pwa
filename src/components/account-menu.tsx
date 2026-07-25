@@ -27,7 +27,7 @@ export function AccountMenu({ email }: AccountMenuProps) {
   return (
     <div className="account-menu">
       <span title={email}>{email}</span>
-      <Link href="/settings" className="icon-text-button">
+      <Link href="/settings" className="icon-text-button" prefetch={false}>
         <GearSix size={19} aria-hidden="true" />
         <span>Settings</span>
       </Link>

@@ -39,16 +39,20 @@ export function AppShell({
       <main className="app-page">
         <header className={`app-header ${onPlayerPage ? "app-header-collapsible" : ""}`}>
           <BrandMark />
+          {/* These links do not prefetch: speculatively fetching /settings and
+              a second copy of /library on every launch puts server round trips
+              and their session lookups back on the launch path for screens
+              nobody asked for. */}
           <div className="app-actions">
             {/* Downloads is a facet of the library now, not a screen of its own. */}
-            <Link href="/library?device=1" className="icon-text-button">
+            <Link href="/library?device=1" className="icon-text-button" prefetch={false}>
               <DownloadSimple size={19} aria-hidden="true" />
               <span>Downloads</span>
             </Link>
             {email ? (
               <AccountMenu email={email} />
             ) : (
-              <Link href="/settings" className="icon-text-button">
+              <Link href="/settings" className="icon-text-button" prefetch={false}>
                 <GearSix size={19} aria-hidden="true" />
                 <span>Settings</span>
               </Link>
