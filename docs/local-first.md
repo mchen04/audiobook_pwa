@@ -189,6 +189,52 @@ Rules:
    already encode it. 401/403 retain (the session may come back). 4xx other than
    409 is terminal. 409 goes to conflict reconciliation.
 
+### 5.4 A delete supersedes an unsent registration of the same file
+
+The outbox drains in key order with several rows in flight, which is NOT the
+order the user expressed their intents. `delete` sorts before `import`, so a
+delete could land, release the fingerprint, and let a registration queued
+_earlier_ find the fingerprint free and re-create the book the user had already
+deleted. The fuzz found this on seed 20260105 and called it what it is: a
+resurrection. Nothing was lost in transit — the delete was undone by an intent
+the user had already superseded.
+
+So `commitBookDeletion` drops any unsent registration of the same file, in the
+same transaction that journals the delete: no window in which both rows exist,
+and no ordering left to get right. It links them two ways, because a user can be
+looking at either kind of row — by book id (a device-only book the library
+projects from a download record) and by fingerprint (read from the mirror, never
+sent on the wire). A registration queued _after_ a delete is kept: re-importing
+something you deleted is a new intent, not a stale one.
+
+### 5.5 When the server renames a book mid-flight
+
+A registration queued offline carries the id this device minted. If the server
+already owns that fingerprint it answers 409 with the canonical id, and the local
+identity moves onto it (§10). Two consequences that are easy to miss, and both
+were bugs:
+
+- **Queued rows naming the abandoned id must be re-addressed too**, with the
+  production key builders rather than hand-built strings, or every edit, tag,
+  archive and delete queued before the merge replays against a book the server
+  has never heard of and settles as terminal. Progress is re-stamped from the
+  _target's_ sequence counter, because the server discards a sequence at or below
+  its high-water mark for (user, book, device) **and answers 200** — a carried-over
+  sequence is a write that reports success and vanishes.
+- **A 404 is not terminal while a registration for that book is still queued.**
+  `archive`, `collection`, `delete` and `history` all sort ahead of `import`, so
+  they reach the server before the merge is knowable. Dropping them there loses
+  the user's intent, including their delete.
+
+### 5.6 Preferences are the one write that is not an outbox row
+
+`savePreferences` keeps its pending revision in the localStorage envelope rather
+than the outbox. It is still journalled, drained and reported — the sign-out
+drain enumerates it alongside the outbox and the playback queue, and reports it
+if the server will not take it — but the mechanism differs, and this note would
+be lying if it claimed otherwise. Moving it onto a real outbox kind is the
+cleaner end state.
+
 ## 6. Pull
 
 `GET /api/sync/pull?since=<iso>` returns everything that changed for the signed-in
@@ -312,6 +358,34 @@ Consequences that must hold:
 - `use-library-books.ts` currently skips fetching on first render. Once the
   first paint comes from local data, that skip is a correctness bug and the
   revalidation must exist.
+
+### 8.1 Offline import needs its code cached, not just its data
+
+The import path reaches its MP3 parser through `await import("music-metadata")`,
+that package reaches the parser that does the work through a SECOND dynamic
+import which only runs when something is actually parsed, the hasher is a third,
+and the fingerprint runs in a **Worker** whose script no `import()` can reach at
+all. A code-split chunk is not referenced by the cached shell, so `precacheShell`
+never sees it, and the service worker's runtime caching only stores what has
+actually been requested — which is never, until someone picks a file.
+
+The consequence was that importing a book with no network had never worked: it
+failed with "Failed to load chunk" where the audiobook should have been, which
+also made §10's eviction recovery unreachable exactly when it is needed. So:
+
+- `pwa-register.tsx` warms the parser after paint by parsing a synthesized
+  MPEG-1 Layer 3 frame through the real `parseBlob`, so whatever chunk an MP3
+  needs is the chunk that gets fetched, with no assumption about the package's
+  internals. It marks `data-import-ready` when that and the hasher have resolved,
+  in the same spirit as `data-launch-ready` — otherwise the state is invisible
+  and a test can only guess at it with a sleep.
+- The Worker cannot be warmed, so `fingerprintMedia` falls back to hashing
+  inline when its script will not load. Slower, and better than being unable to
+  add a book.
+
+Anything new on a path that must work offline gets the same audit: every
+`await import(` and every `new Worker(` is a network dependency until proven
+otherwise.
 
 ## 9. One library UI
 

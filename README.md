@@ -48,8 +48,8 @@ contract for that is `docs/local-first.md`.
   identically with the network off — there is no "am I online?" branch on the
   read path. The `/library` document itself is served from Cache Storage without
   touching the network, so a cold database and airplane mode cost what wifi
-  costs: warm-launch p95 measures 297-367ms across fast, slow,
-  3000ms-cold-database and offline profiles — a 70ms spread — with zero server
+  costs: warm-launch p95 measures 291-370ms across fast, slow,
+  3000ms-cold-database and offline profiles — a 70-73ms spread — with zero server
   document hits and zero Postgres queries. Those figures are taken under 4x CPU
   throttling with a fresh browser process per launch, so they mean something on
   a phone rather than on a desktop. Imported audio is served by the service

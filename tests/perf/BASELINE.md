@@ -195,30 +195,30 @@ less than two that agree.
 ```
 CLEAN PASS 1
 profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries    marker    cards
-A fast (0ms)                 297ms     299ms     299ms         0         0         0       0        0     books       50
-B slow (400ms)               293ms     297ms     297ms         0         0         0       0        0     books       50
-C cold database (3000ms)     348ms     378ms     378ms         0         0         0       0        0     books       50
-D offline                    347ms     359ms     359ms         0         0         0       0        0     books       50
-spread of p95 across profiles: 81ms (bar 150ms)
-CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 17ms at 4x (3.80x observed)
+A fast (0ms)                 289ms     291ms     291ms         0         0         0       0        0     books       50
+B slow (400ms)               285ms     292ms     292ms         0         0         0       0        0     books       50
+C cold database (3000ms)     336ms     361ms     361ms         0         0         0       0        0     books       50
+D offline                    335ms     343ms     343ms         0         0         0       0        0     books       50
+spread of p95 across profiles: 70ms (bar 150ms)
+CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 16ms at 4x (4.00x observed)
 
 CLEAN PASS 2
 profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries    marker    cards
-A fast (0ms)                 294ms     298ms     298ms         0         0         0       0        0     books       50
-B slow (400ms)               294ms     295ms     295ms         0         0         0       0        0     books       50
-C cold database (3000ms)     348ms     366ms     366ms         0         0         0       0        0     books       50
-D offline                    343ms     357ms     357ms         0         0         0       0        0     books       50
-spread of p95 across profiles: 71ms (bar 150ms)
-CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 16ms at 4x (3.70x observed)
+A fast (0ms)                 291ms     298ms     298ms         0         0         0       0        0     books       50
+B slow (400ms)               286ms     297ms     297ms         0         0         0       0        0     books       50
+C cold database (3000ms)     339ms     370ms     370ms         0         0         0       0        0     books       50
+D offline                    341ms     346ms     346ms         0         0         0       0        0     books       50
+spread of p95 across profiles: 73ms (bar 150ms)
+CPU throttle: a fixed 8M-iteration loop ran in 5ms at 17ms at 4x (3.67x observed)
 ```
 
 | Profile         | p95 before  | p95 after (pass 1 / pass 2) | doc hits | Postgres queries |
 | --------------- | ----------- | --------------------------- | -------- | ---------------- |
-| A fast          | 92ms        | 299ms / 298ms               | 6 → 0    | 81 → 0           |
-| B slow          | 509ms       | 297ms / 295ms               | 6 → 0    | 60 → 0           |
-| C cold database | 3104ms      | 378ms / 366ms               | 6 → 0    | 60 → 0           |
-| D offline       | ≥15007ms    | 359ms / 357ms               | 0 → 0    | 0 → 0            |
-| **spread**      | **14915ms** | **81ms / 71ms**             |          |                  |
+| A fast          | 92ms        | 291ms / 298ms               | 6 → 0    | 81 → 0           |
+| B slow          | 509ms       | 292ms / 297ms               | 6 → 0    | 60 → 0           |
+| C cold database | 3104ms      | 361ms / 370ms               | 6 → 0    | 60 → 0           |
+| D offline       | ≥15007ms    | 343ms / 346ms               | 0 → 0    | 0 → 0            |
+| **spread**      | **14915ms** | **70ms / 73ms**             |          |                  |
 
 Profile A is _slower_ than its baseline (92ms → ~298ms), and every part of that
 is the honest direction. At baseline it painted the empty state, because the
