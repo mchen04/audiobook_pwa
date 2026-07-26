@@ -10,7 +10,7 @@ import {
   type Route,
 } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
@@ -171,6 +171,31 @@ const account = {
 };
 
 let bookCount = 0;
+
+/**
+ * The library's own first-page size, read out of the component rather than
+ * copied here.
+ *
+ * The card assertion below used to be `> 0`, which a single card on a
+ * thousand-book account satisfies — it would catch a launch that painted
+ * nothing and miss one that painted almost nothing. A full first page is the
+ * real bar, and reading the constant from source means the two cannot drift
+ * apart silently the way two hand-maintained copies do.
+ */
+const LIBRARY_PAGE_SIZE = (() => {
+  const source = readFileSync(
+    path.resolve(process.cwd(), "src/components/library/library-client.tsx"),
+    "utf8",
+  );
+  const match = source.match(/const PAGE_SIZE = (\d+);/);
+  if (!match) {
+    throw new Error(
+      "library-client.tsx no longer declares `const PAGE_SIZE = <n>;`, so the launch benchmark " +
+        "cannot tell how many cards a full first page holds. Update this reader deliberately.",
+    );
+  }
+  return Number(match[1]);
+})();
 let engineNote = "";
 let cpuThrottleEvidence = "(not measured)";
 
@@ -1012,14 +1037,15 @@ test("library paints real content in under 500ms on every network profile", asyn
             "launch that paints an empty box is not a fast launch.",
         )
         .toBe("books");
+      const fullPage = Math.min(LIBRARY_PAGE_SIZE, bookCount);
       expect
         .soft(
           launch.cards ?? 0,
           `${label}: a launch painted ${launch.cards ?? 0} book cards on an account that owns ` +
-            `${bookCount} books. The marker landed but nothing of the owner's library was on ` +
-            "screen.",
+            `${bookCount} books, where a full first page is ${fullPage}. The marker landed but ` +
+            "the owner's library was not on screen.",
         )
-        .toBeGreaterThan(0);
+        .toBe(fullPage);
       expect
         .soft(
           launch.readyKind,
@@ -1060,6 +1086,14 @@ test("library paints real content in under 500ms on every network profile", asyn
       )
       .toBe(0);
 
+    // Read this column with the profile in mind. The proxy applies its delay
+    // BEFORE forwarding upstream, so on B and C a request the browser makes
+    // during the measurement window has not reached the app server yet when the
+    // counter is sampled — a late query would land after the sample and go
+    // uncounted. On those two profiles the column is corroboration, not
+    // evidence. The instrument that carries "the network was not on the path"
+    // on ALL FOUR profiles is the document-hit count above, which increments on
+    // arrival at the proxy and therefore cannot be outrun by a delay.
     const queries = result.launches.reduce((total, l) => total + l.queries, 0);
     expect
       .soft(
