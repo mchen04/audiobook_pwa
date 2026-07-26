@@ -169,6 +169,8 @@ export type DeviceStorage = {
   databases: string[];
   stores: Record<string, StoreDump>;
   caches: Record<string, string[]>;
+  /** Cached shell documents whose BYTES name the account, not merely their URL. */
+  shellBodiesMentioningTarget: string[];
   localStorageKeys: string[];
   localStorageMentioningTarget: string[];
   activeUser: string | null;
@@ -184,111 +186,138 @@ export type DeviceStorage = {
  * might have forgotten. This enumerates them from the database itself, so a
  * store the purge skips is still counted.
  */
-export function readDeviceStorage(page: Page, targetUserId: string): Promise<DeviceStorage> {
-  return page.evaluate(async (userId) => {
-    const openExisting = (name: string) =>
-      new Promise<IDBDatabase | null>((resolve) => {
-        const request = indexedDB.open(name);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => resolve(null);
-        request.onblocked = () => resolve(null);
-      });
-
-    const all = <T>(request: IDBRequest<T>) =>
-      new Promise<T>((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-
-    const safeStringify = (value: unknown): string => {
-      try {
-        return JSON.stringify(value, (_key, inner) => {
-          if (inner instanceof ArrayBuffer) return "[ArrayBuffer]";
-          if (typeof Blob !== "undefined" && inner instanceof Blob) return "[Blob]";
-          return inner as unknown;
+export function readDeviceStorage(
+  page: Page,
+  targetUserId: string,
+  targetEmail?: string,
+): Promise<DeviceStorage> {
+  return page.evaluate(
+    async ([userId, email]) => {
+      const openExisting = (name: string) =>
+        new Promise<IDBDatabase | null>((resolve) => {
+          const request = indexedDB.open(name);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => resolve(null);
+          request.onblocked = () => resolve(null);
         });
-      } catch {
-        return String(value);
-      }
-    };
 
-    // Every database this app writes user data into. `hark-playback-history-v1`
-    // is easy to forget — it is opened by a lazily-imported module and named
-    // nothing like the others — and it holds one row per play, pause and seek.
-    const known = ["chapterline-offline-v1", "chapterline-sync-v1", "hark-playback-history-v1"];
-    const names = ((await indexedDB.databases?.()) ?? []).map((entry) => entry.name ?? "");
-    const databases = [...new Set([...names.filter(Boolean), ...known])].filter((name) =>
-      known.includes(name),
-    );
+      const all = <T>(request: IDBRequest<T>) =>
+        new Promise<T>((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
 
-    const stores: Record<
-      string,
-      { count: number; keys: string[]; ownedByTarget: number; mentionsTarget: number }
-    > = {};
+      const safeStringify = (value: unknown): string => {
+        try {
+          return JSON.stringify(value, (_key, inner) => {
+            if (inner instanceof ArrayBuffer) return "[ArrayBuffer]";
+            if (typeof Blob !== "undefined" && inner instanceof Blob) return "[Blob]";
+            return inner as unknown;
+          });
+        } catch {
+          return String(value);
+        }
+      };
 
-    for (const name of databases) {
-      const db = await openExisting(name);
-      if (!db) continue;
-      const storeNames = [...db.objectStoreNames];
-      if (!storeNames.length) {
+      // Every database this app writes user data into. `hark-playback-history-v1`
+      // is easy to forget — it is opened by a lazily-imported module and named
+      // nothing like the others — and it holds one row per play, pause and seek.
+      const known = ["chapterline-offline-v1", "chapterline-sync-v1", "hark-playback-history-v1"];
+      const names = ((await indexedDB.databases?.()) ?? []).map((entry) => entry.name ?? "");
+      const databases = [...new Set([...names.filter(Boolean), ...known])].filter((name) =>
+        known.includes(name),
+      );
+
+      const stores: Record<
+        string,
+        { count: number; keys: string[]; ownedByTarget: number; mentionsTarget: number }
+      > = {};
+
+      for (const name of databases) {
+        const db = await openExisting(name);
+        if (!db) continue;
+        const storeNames = [...db.objectStoreNames];
+        if (!storeNames.length) {
+          db.close();
+          continue;
+        }
+        const transaction = db.transaction(storeNames, "readonly");
+        for (const storeName of storeNames) {
+          const store = transaction.objectStore(storeName);
+          const [records, keys] = await Promise.all([all(store.getAll()), all(store.getAllKeys())]);
+          let ownedByTarget = 0;
+          let mentionsTarget = 0;
+          for (let index = 0; index < records.length; index += 1) {
+            const record = records[index] as Record<string, unknown> | undefined;
+            const key = keys[index];
+            const owner =
+              typeof record?.userId === "string"
+                ? record.userId
+                : typeof key === "string"
+                  ? key.split(":")[0]
+                  : null;
+            if (owner === userId) ownedByTarget += 1;
+            if (safeStringify(record).includes(userId) || String(key).includes(userId)) {
+              mentionsTarget += 1;
+            }
+          }
+          stores[`${name}/${storeName}`] = {
+            count: records.length,
+            keys: keys.map((key) => String(key)),
+            ownedByTarget,
+            mentionsTarget,
+          };
+        }
         db.close();
-        continue;
       }
-      const transaction = db.transaction(storeNames, "readonly");
-      for (const storeName of storeNames) {
-        const store = transaction.objectStore(storeName);
-        const [records, keys] = await Promise.all([all(store.getAll()), all(store.getAllKeys())]);
-        let ownedByTarget = 0;
-        let mentionsTarget = 0;
-        for (let index = 0; index < records.length; index += 1) {
-          const record = records[index] as Record<string, unknown> | undefined;
-          const key = keys[index];
-          const owner =
-            typeof record?.userId === "string"
-              ? record.userId
-              : typeof key === "string"
-                ? key.split(":")[0]
-                : null;
-          if (owner === userId) ownedByTarget += 1;
-          if (safeStringify(record).includes(userId) || String(key).includes(userId)) {
-            mentionsTarget += 1;
+
+      const cacheDump: Record<string, string[]> = {};
+      // Any cached DOCUMENT whose bytes name the departing account. Allowlisting
+      // a shell page by pathname only ever asserted which URL survived, never
+      // what was in it — so this reads the bodies of every surviving shell entry
+      // and looks for the account. That is the property section 11 actually
+      // promises, and it is what makes keeping a page defensible rather than
+      // merely permitted.
+      const shellBodiesMentioningTarget: string[] = [];
+      for (const cacheName of await caches.keys()) {
+        const cache = await caches.open(cacheName);
+        const requests = await cache.keys();
+        cacheDump[cacheName] = requests.map((request) => new URL(request.url).pathname);
+        if (!cacheName.startsWith("chapterline-shell-")) continue;
+        for (const request of requests) {
+          const { pathname, search } = new URL(request.url);
+          if (pathname.startsWith("/_next/static/") || pathname.startsWith("/icons/")) continue;
+          const response = await cache.match(request);
+          if (!response) continue;
+          const body = await response.clone().text();
+          if (body.includes(userId) || (email && body.includes(email))) {
+            shellBodiesMentioningTarget.push(pathname + search);
           }
         }
-        stores[`${name}/${storeName}`] = {
-          count: records.length,
-          keys: keys.map((key) => String(key)),
-          ownedByTarget,
-          mentionsTarget,
-        };
       }
-      db.close();
-    }
 
-    const cacheDump: Record<string, string[]> = {};
-    for (const cacheName of await caches.keys()) {
-      const cache = await caches.open(cacheName);
-      cacheDump[cacheName] = (await cache.keys()).map((request) => new URL(request.url).pathname);
-    }
+      const localStorageKeys: string[] = [];
+      const localStorageMentioningTarget: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (!key) continue;
+        localStorageKeys.push(key);
+        const value = localStorage.getItem(key) ?? "";
+        if (key.includes(userId) || value.includes(userId)) localStorageMentioningTarget.push(key);
+      }
 
-    const localStorageKeys: string[] = [];
-    const localStorageMentioningTarget: string[] = [];
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (!key) continue;
-      localStorageKeys.push(key);
-      const value = localStorage.getItem(key) ?? "";
-      if (key.includes(userId) || value.includes(userId)) localStorageMentioningTarget.push(key);
-    }
-
-    return {
-      databases,
-      stores,
-      caches: cacheDump,
-      localStorageKeys,
-      localStorageMentioningTarget,
-      activeUser: localStorage.getItem("chapterline:active-user"),
-    };
-  }, targetUserId);
+      return {
+        databases,
+        stores,
+        caches: cacheDump,
+        shellBodiesMentioningTarget,
+        localStorageKeys,
+        localStorageMentioningTarget,
+        activeUser: localStorage.getItem("chapterline:active-user"),
+      };
+    },
+    [targetUserId, targetEmail ?? ""] as const,
+  );
 }
 
 /** Every store that still holds a record belonging to, or naming, the account. */
@@ -317,6 +346,12 @@ export function accountBearingPageEntries(storage: DeviceStorage): string[] {
     .filter(
       (pathname) =>
         pathname !== "/offline" &&
+        // The launch shell: the SAME document as /offline, stored under the
+        // start_url so the service worker's static route can answer a cold
+        // launch without booting the worker. Its BYTES are checked by
+        // `shellBodiesMentioningTarget`, which is a stronger claim than this
+        // pathname allowlist has ever made about /offline.
+        pathname !== "/library" &&
         !pathname.startsWith("/icons/") &&
         !pathname.startsWith("/_next/static/"),
     );

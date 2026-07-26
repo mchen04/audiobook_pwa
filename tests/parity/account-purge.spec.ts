@@ -253,7 +253,7 @@ async function expectNothingOfAccountARemains(
     })
     .toStrictEqual([]);
 
-  const after = await readDeviceStorage(page, account.userId);
+  const after = await readDeviceStorage(page, account.userId, account.email);
   expect(
     mediaEntries(after),
     "account A's audio is still in Cache Storage after the switch",
@@ -262,6 +262,17 @@ async function expectNothingOfAccountARemains(
     accountBearingPageEntries(after),
     "an account-bearing page is still cached after the switch; only the user-agnostic shell " +
       "of section 8 may survive one",
+  ).toStrictEqual([]);
+  // The stronger half of that claim. The check above says which URLs survived;
+  // this one opens them and reads the bytes. `/offline` and `/library` are the
+  // same cached document, kept so a cold launch is answered without booting the
+  // service worker — and "it holds no identity" is the entire reason keeping
+  // them is allowed, so it is asserted rather than assumed.
+  expect(
+    after.shellBodiesMentioningTarget,
+    "a cached shell document still contains account A's id or email in its bytes. The shell is " +
+      "only safe to keep across accounts because it renders no identity; if it does, it must be " +
+      "purged like any other page",
   ).toStrictEqual([]);
   expect(
     after.localStorageMentioningTarget,
