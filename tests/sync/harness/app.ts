@@ -333,6 +333,11 @@ export function mediaCacheEntries(page: Page) {
   return page.evaluate(() => window.__harkSync.mediaCacheEntries());
 }
 
+/** Whether this device holds a download record for the book AND the bytes it names. */
+export function playable(page: Page, bookId: string) {
+  return page.evaluate((id) => window.__harkSync.playable(id), bookId);
+}
+
 /** Creates a collection through the shipping route and returns its server id. */
 export async function createCollection(page: Page, name: string): Promise<string> {
   const created = await page.evaluate(

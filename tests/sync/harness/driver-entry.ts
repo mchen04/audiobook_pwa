@@ -304,6 +304,29 @@ class Driver {
     return this.conflicts;
   }
 
+  /**
+   * Can this device actually play that book right now?
+   *
+   * The same two reads the player's gate makes (`local-media-gate.tsx`): the
+   * download record for the id, then the media the record's own token points
+   * at. Non-destructive on purpose — `getOfflineBook` reconciles a record whose
+   * bytes are gone by deleting it, and an observer that repaired what it was
+   * measuring would be useless here.
+   */
+  async playable(
+    bookId: string,
+  ): Promise<{ record: boolean; media: boolean; byteSize: number | null }> {
+    const records = await listStoredOfflineBooks(this.origin.userId);
+    const record = records.find((row) => row.book.id === bookId);
+    if (!record) return { record: false, media: false, byteSize: null };
+    const cache = await caches.open(MEDIA_CACHE);
+    return {
+      record: true,
+      media: !!(await cache.match(record.offlineMediaUrl)),
+      byteSize: record.byteSize,
+    };
+  }
+
   async mediaCacheEntries(): Promise<number> {
     if (!(await caches.keys()).includes(MEDIA_CACHE)) return 0;
     return (await (await caches.open(MEDIA_CACHE)).keys()).length;

@@ -327,8 +327,51 @@ export async function queueMutation(mutation: QueuedMutation): Promise<QueuedMut
   const existing = await transaction.store.get(mutation.key);
   const winner = resolveCoalescing(existing, mutation);
   if (winner !== existing) await transaction.store.put(winner);
+  if (winner === mutation && mutation.kind === "delete") {
+    await dropSupersededImports(transaction.store, mutation);
+  }
   await transaction.done;
   return winner;
+}
+
+type MutationStore = IDBPTransaction<SyncDatabase, ["mutations"], "readwrite">["store"];
+
+/**
+ * A delete supersedes an UNSENT import of the same file.
+ *
+ * Deleting a book and re-picking its MP3 are two intents about one file, and
+ * the outbox replays rows in key order with four in flight — not in the order
+ * the user expressed them. So a registration queued before the delete lands
+ * after it, finds the fingerprint free because the delete just released it, and
+ * creates the book again. The user's delete is not lost in transit; it is
+ * undone by an intent they had already superseded, and the book comes back.
+ *
+ * Resolving it here rather than at replay is what makes it deterministic: this
+ * runs inside the SAME transaction that journals the delete, so there is no
+ * window in which both rows exist and no ordering to get right afterwards.
+ *
+ * Two ways a queued registration is recognised as being about the deleted book,
+ * because there are two ways the user can be looking at one. `payload.bookId`
+ * matches the row the import itself created on this device — the "device-only"
+ * book the library projects from a download record before any pull mentions it.
+ * The fingerprint matches the other case: a re-import of a book this device
+ * already knows, where the registration carries an id the server will discard.
+ */
+async function dropSupersededImports(
+  store: MutationStore,
+  deletion: QueuedMutation,
+): Promise<void> {
+  const fingerprint =
+    typeof deletion.payload.fingerprint === "string" ? deletion.payload.fingerprint : null;
+  let cursor = await store.index("by-user").openCursor(deletion.userId);
+  while (cursor) {
+    const row = cursor.value;
+    const supersedes =
+      row.kind === "import" &&
+      (row.payload.bookId === deletion.entityId || (!!fingerprint && row.entityId === fingerprint));
+    if (supersedes) await cursor.delete();
+    cursor = await cursor.continue();
+  }
 }
 
 function resolveCoalescing(
@@ -667,11 +710,245 @@ async function replayMutation(task: QueuedMutation, fetchFn: typeof fetch): Prom
       await recordAttempt(task);
       return;
     }
-    if (response.status === 409 && task.kind === "progress") {
-      await reconcileProgressConflict(toQueuedProgress(task), response);
+    if (response.status === 404 && (await awaitsRegistration(task))) {
+      // "That book does not exist" — YET. A book imported with no network is on
+      // this device's screen before the server has heard of it, so the writes
+      // the user makes against it are queued naming an id only this device
+      // knows. The outbox replays in key order, and `archive`, `collection`,
+      // `delete` and `history` all sort ahead of `import`, so they arrive
+      // first, are told the book does not exist, and would be dropped as
+      // terminal — the delete of a book the user really did delete among them.
+      // The registration is still in this queue, and the book is one of the two
+      // things it can produce: the id it names, or the canonical id a 409
+      // re-points these rows onto. Either way this row is deliverable, and it
+      // stays. Bounded by the registration's own life: once it leaves the queue
+      // — settled, merged, or dropped as superseded — a 404 here is terminal
+      // again on the very next drain.
+      await recordAttempt(task);
+      return;
+    }
+    if (response.status === 409) {
+      if (task.kind === "progress") {
+        await reconcileProgressConflict(toQueuedProgress(task), response);
+      } else if (task.kind === "import" && !(await reattachDuplicateImport(task, response))) {
+        // The merge is understood but could not be applied to this device yet.
+        // Settling here would delete the only record of it, so the row stays
+        // and the next drain asks again — the fingerprint is still taken, so
+        // the answer, and the canonical id in it, are the same.
+        await recordAttempt(task);
+        return;
+      }
     }
     await settleMutation(task);
   });
+}
+
+/**
+ * The offline half of the re-import path (`docs/local-first.md` section 10).
+ *
+ * A queued registration carries the id this device minted, and the audio, the
+ * download record and the transcript were written under it while the network
+ * was down. 409 means the server matched the fingerprint to a book it already
+ * has: the registration is settled — there is nothing left to send — but the
+ * bytes on this device are filed under an id that now exists nowhere, and
+ * dropping the answer here is what would leave the user with the same audiobook
+ * twice. `local-import.ts` reaches the same outcome online by learning the
+ * canonical id before storing anything; this reaches it afterwards, by moving
+ * the identity rather than the data.
+ *
+ * True means "settle this row". A 409 that names no other book — a chapter
+ * repair the server refused, or a registration that never carried an id —
+ * settles too: those are terminal answers with nothing local to move.
+ */
+async function reattachDuplicateImport(task: QueuedMutation, response: Response): Promise<boolean> {
+  const payload = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { existingBookId?: unknown; playerBook?: unknown } | null;
+  const canonicalId = typeof payload?.existingBookId === "string" ? payload.existingBookId : null;
+  const importedId = typeof task.payload.bookId === "string" ? task.payload.bookId : null;
+  if (!canonicalId || !importedId || canonicalId === importedId) return true;
+  try {
+    // The queue first, the bytes second. Both halves are idempotent and the
+    // registration is only settled once both have run, so an interruption
+    // between them is retried whole — but in the order that leaves the user's
+    // queued edits addressed to a book that EXISTS if the process stops here.
+    await repointQueuedMutations(task.userId, importedId, canonicalId);
+    // Imported lazily: `offline/library.ts` imports this module for the account
+    // purge, so a static edge here would close the cycle.
+    const { reattachLocalBookIdentity } = await import("@/lib/offline/library");
+    await reattachLocalBookIdentity(task.userId, importedId, canonicalId, payload?.playerBook);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Re-pointing a book id the server refused
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the book this row names still waiting to be registered by this device?
+ *
+ * True only while a registration naming that very id is in the queue, which is
+ * what keeps the retention bounded: nothing here waits on a book the server
+ * will never be told about.
+ */
+async function awaitsRegistration(task: QueuedMutation): Promise<boolean> {
+  const bookId = queuedBookId(task);
+  if (!bookId) return false;
+  const db = await database();
+  const queued = await db.getAllFromIndex("mutations", "by-user", task.userId);
+  return queued.some((row) => row.kind === "import" && row.payload.bookId === bookId);
+}
+
+/**
+ * Which book does this queued row act on?
+ *
+ * `collection` names the COLLECTION in `entityId` and the book in its payload.
+ * `import` names a FINGERPRINT and no book at all — and it is the row whose own
+ * answer triggers the move, so re-pointing it would be re-pointing the message
+ * that carries the news.
+ */
+function queuedBookId(row: QueuedMutation): string | null {
+  if (row.kind === "import") return null;
+  if (row.kind === "collection") {
+    return typeof row.payload.bookId === "string" ? row.payload.bookId : null;
+  }
+  return row.entityId;
+}
+
+/**
+ * The same intent, addressed to another book.
+ *
+ * Every key comes from the production builder, called exactly as its own call
+ * site in `offline/outbox.ts` calls it — including `tagMutationKey`, whose third
+ * argument the tag path fills with the tag ID. A key assembled by hand here
+ * would put two spellings of one intent in the outbox and coalesce neither.
+ */
+function addressedTo(row: QueuedMutation, bookId: string): QueuedMutation {
+  switch (row.kind) {
+    case "progress":
+      return {
+        ...row,
+        entityId: bookId,
+        key: progressMutationKey({ userId: row.userId, bookId, deviceId: row.deviceId }),
+      };
+    case "metadata":
+      return { ...row, entityId: bookId, key: metadataMutationKey(row.userId, bookId) };
+    case "archive":
+      return { ...row, entityId: bookId, key: archiveMutationKey(row.userId, bookId) };
+    case "tag":
+      return {
+        ...row,
+        entityId: bookId,
+        key: tagMutationKey(row.userId, bookId, String(row.payload.tagId ?? "")),
+      };
+    case "collection":
+      return {
+        ...row,
+        payload: { ...row.payload, bookId },
+        key: collectionMutationKey(row.userId, row.entityId, bookId),
+      };
+    case "delete":
+    case "history":
+      return {
+        ...row,
+        entityId: bookId,
+        key: eventMutationKey(row.userId, row.kind, bookId, row.mutationId),
+      };
+    case "import":
+      return row;
+  }
+}
+
+/**
+ * Re-addresses every queued row that still names the id a merge just abandoned.
+ *
+ * A book imported with no network is minted an id by this device, and the
+ * library shows it — so the user can rename it, tag it, play it and delete it
+ * long before the server has heard of it, and every one of those writes is
+ * queued against that id. When the registration finally replays and the server
+ * answers "those bytes are already book Y", the id they all name stops existing:
+ * each row would replay into a 404, which is terminal, and be dropped as
+ * settled. The user's rename is gone, their tag is gone, and their DELETE is
+ * gone while the book quietly survives as Y.
+ *
+ * Two rows can become one intent here — a queued rename for the phantom and a
+ * queued rename for Y are now the same edit. The later one wins, decided by
+ * `queuedAt` and then handed to the shipping `resolveCoalescing`, rather than
+ * one silently overwriting the other. `queuedAt` is the only ordering the pair
+ * share: their device sequences were minted from two different books' counters.
+ *
+ * Progress is re-stamped with a sequence minted from the TARGET book's counter.
+ * The server discards a progress write whose `deviceSequence` is not above what
+ * it holds for (user, book, device) — and answers 200 while doing it — so a
+ * sequence carried over from the phantom's counter is a write that reports
+ * success and vanishes.
+ *
+ * Idempotent: a second run finds nothing naming the old id. That is what makes
+ * it safe to do in a different database from the identity move it accompanies —
+ * an interruption between the two halves leaves the registration queued, and
+ * the next drain gets the same deterministic 409 and finishes the other half.
+ */
+export async function repointQueuedMutations(
+  userId: string,
+  fromBookId: string,
+  toBookId: string,
+): Promise<number> {
+  if (!fromBookId || !toBookId || fromBookId === toBookId) return 0;
+  const db = await database();
+  const affected = (await db.getAllFromIndex("mutations", "by-user", userId)).filter(
+    (row) => queuedBookId(row) === fromBookId,
+  );
+  if (!affected.length) return 0;
+  // Minted before the transaction opens, because `nextDeviceSequence` owns the
+  // `sequences` store and its own transaction. Burning a number costs nothing —
+  // the server only requires the next one to be higher — while re-implementing
+  // its floor arithmetic here would be exactly the hand-rolled duplicate the
+  // rest of this module refuses.
+  const sequence = affected.some((row) => row.kind === "progress")
+    ? await nextDeviceSequence(toBookId, userId)
+    : 0;
+
+  const transaction = db.transaction("mutations", "readwrite");
+  const store = transaction.store;
+  let moved = 0;
+  for (const snapshot of affected) {
+    const current = await store.get(snapshot.key);
+    // Settled or replaced while this was being read. `settleMutation` compares
+    // the same id for the same reason: an acknowledgement of an older intent
+    // must not carry a newer one along with it.
+    if (!current || current.mutationId !== snapshot.mutationId) continue;
+    const candidate = addressedTo(current, toBookId);
+    // `never` kinds cannot collide: their key embeds a mutationId no other row
+    // has. Everything else can, and is resolved rather than overwritten.
+    const existing = await store.get(candidate.key);
+    const winner = existing ? pickRepointWinner(existing, candidate) : candidate;
+    await store.delete(current.key);
+    await store.put(
+      winner === candidate && winner.kind === "progress"
+        ? { ...winner, key: candidate.key, deviceSequence: sequence }
+        : { ...winner, key: candidate.key },
+    );
+    moved += 1;
+  }
+  await transaction.done;
+  return moved;
+}
+
+function pickRepointWinner(existing: QueuedMutation, candidate: QueuedMutation): QueuedMutation {
+  const candidateIsNewer = candidate.queuedAt > existing.queuedAt;
+  // Highest-sequence-wins is meaningless across two books' counters, so for
+  // progress the later intent is simply the one that stands — which is what
+  // "sequence" coalescing means for two events from one device on one book.
+  if (MUTATION_COALESCING[candidate.kind] === "sequence") {
+    return candidateIsNewer ? candidate : existing;
+  }
+  return candidateIsNewer
+    ? resolveCoalescing(existing, candidate)
+    : resolveCoalescing(candidate, existing);
 }
 
 function toQueuedProgress(mutation: QueuedMutation): QueuedProgress {

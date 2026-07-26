@@ -16,6 +16,32 @@ const MEDIA_CHUNK_BYTES = 4 * 1024 * 1024;
 const MEDIA_WRITE_CONCURRENCY = 3;
 
 /**
+ * One book's media slot, held across a caller-owned sequence.
+ *
+ * An import writes three things under the id this device minted — the bytes,
+ * the download record and the transcript — and a replay that learns the server
+ * settled on a *different* id has to move all three
+ * (`library.ts#reattachLocalBookIdentity`). Holding the slot for the whole
+ * sequence is what stops the move from landing in the middle of it and leaving
+ * whatever was written afterwards behind under a dead id.
+ *
+ * The handle is the proof of possession: `storeLocalBookMedia` re-acquires the
+ * lock unless it is handed the slot for the very key it is about to write, so a
+ * nested call cannot deadlock on a lock its own caller holds and an unrelated
+ * caller cannot skip it by accident.
+ */
+export type MediaSlot = { readonly key: string };
+
+export function withLocalMediaSlot<T>(
+  userId: string,
+  bookId: string,
+  operation: (slot: MediaSlot) => Promise<T>,
+): Promise<T> {
+  const key = offlineBookKey(userId, bookId);
+  return withMediaWriteLock(key, () => operation({ key }));
+}
+
+/**
  * Stores an imported MP3 in bounded chunks. iOS WebKit has a much smaller
  * memory budget than desktop browsers, so neither import nor a later Range
  * request may materialize a whole audiobook-sized Blob.
@@ -26,16 +52,18 @@ export async function storeLocalBookMedia(
   file: File,
   artwork: { data: Uint8Array; mimeType: string } | null,
   onProgress?: (fraction: number) => void,
+  slot?: MediaSlot,
 ): Promise<OfflineBook> {
   const key = offlineBookKey(userId, book.id);
   const startedAt = Date.now();
-  return withMediaWriteLock(key, async () => {
+  const write = async () => {
     const pending = await (await database()).get("deletions", key);
     if (pending?.completedAt && pending.completedAt >= startedAt) {
       throw new Error("This download was removed while it was being saved.");
     }
     return storeLocalBookMediaUnlocked(userId, book, file, artwork, onProgress);
-  });
+  };
+  return slot?.key === key ? write() : withMediaWriteLock(key, write);
 }
 
 async function storeLocalBookMediaUnlocked(

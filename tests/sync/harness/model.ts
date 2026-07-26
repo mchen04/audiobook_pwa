@@ -141,12 +141,25 @@ export class LibraryModel {
 // Comparison
 // ---------------------------------------------------------------------------
 
+export type BookRow = {
+  bookId: string;
+  title: string;
+  author: string;
+  archived: boolean;
+  chapterCount: number;
+};
+
 /** What the server actually holds, read over SQL by the test process. */
 export type ServerState = {
-  booksByFingerprint: Map<
-    string,
-    { bookId: string; title: string; author: string; archived: boolean; chapterCount: number }
-  >;
+  /** The first row for each fingerprint. `bookRowsByFingerprint` holds them all. */
+  booksByFingerprint: Map<string, BookRow>;
+  /**
+   * EVERY row, grouped. One fingerprint may only ever have one — a duplicate
+   * registration is a merge, never a second book (sections 7 and 10) — and this
+   * is the only place that can say so, because a fingerprint-keyed map of
+   * single rows silently collapses the failure it is meant to catch.
+   */
+  bookRowsByFingerprint: Map<string, BookRow[]>;
   /** fingerprint → tag names */
   tagsByFingerprint: Map<string, Set<string>>;
   /** collection name → fingerprints */
@@ -159,13 +172,15 @@ export type ServerState = {
 
 /** What the device will show on the next launch, read from the mirror. */
 export type DeviceState = {
-  booksByFingerprint: Map<
-    string,
-    { bookId: string; title: string; author: string; archived: boolean; chapterCount: number }
-  >;
+  booksByFingerprint: Map<string, BookRow>;
+  bookRowsByFingerprint: Map<string, BookRow[]>;
   tagsByFingerprint: Map<string, Set<string>>;
   collectionMembers: Map<string, Set<string>>;
   progressByFingerprint: Map<string, { positionMs: number; completed: boolean }>;
+  /** Book ids this device holds audio for, from the download records. */
+  downloadedBookIds: string[];
+  /** Downloads naming a book the mirror does not have: audio filed under a dead id. */
+  orphanedDownloadIds: string[];
 };
 
 export type Divergence = {
@@ -211,6 +226,17 @@ export function compare(
     }
   }
   for (const book of model.live()) {
+    const rows = server.bookRowsByFingerprint.get(book.fingerprint) || [];
+    if (rows.length > 1) {
+      note(
+        `import ${book.fingerprint}`,
+        "server",
+        `${rows.length} books share this fingerprint (${rows
+          .map((duplicate) => duplicate.bookId)
+          .join(", ")}); a duplicate registration must merge onto the book that already owns ` +
+          "these bytes, never create a second one",
+      );
+    }
     const row = server.booksByFingerprint.get(book.fingerprint);
     if (!row) {
       note(`import ${book.fingerprint}`, "server", "the imported book never reached the server");
@@ -298,7 +324,25 @@ export function compare(
       note(`book ${fingerprint}`, "device", "still in the mirror after the user deleted it");
     }
   }
+  for (const bookId of device.orphanedDownloadIds) {
+    note(
+      `import ${bookId}`,
+      "device",
+      "this device holds the audio for a book the mirror does not have, so the library projects " +
+        "it as a second row of the same audiobook and no other device can ever see it",
+    );
+  }
   for (const book of model.live()) {
+    const rows = device.bookRowsByFingerprint.get(book.fingerprint) || [];
+    if (rows.length > 1) {
+      note(
+        `import ${book.fingerprint}`,
+        "device",
+        `${rows.length} mirrored books share this fingerprint (${rows
+          .map((duplicate) => duplicate.bookId)
+          .join(", ")})`,
+      );
+    }
     const row = device.booksByFingerprint.get(book.fingerprint);
     if (!row) {
       note(`import ${book.fingerprint}`, "device", "missing from the mirror after a full pull");

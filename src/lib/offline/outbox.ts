@@ -286,8 +286,22 @@ export function commitImport(
   return commitDistinctEvent(origin, "import", fingerprint, payload);
 }
 
-export function commitBookDeletion(origin: Origin, bookId: string) {
-  return commitDistinctEvent(origin, "delete", bookId, {});
+/**
+ * The delete carries the deleted book's media fingerprint when this device
+ * knows it, which is what lets `queueMutation` drop an unsent registration of
+ * the SAME FILE — a re-import the user has just superseded by deleting the
+ * book, and which would otherwise replay after the delete and bring it back.
+ *
+ * Read from the mirror, exactly as `commitTagEdge` reads a tag's name, and it
+ * never leaves the device: `toReplayRequest` sends a delete as a bodiless
+ * DELETE, so no payload of this kind is ever serialized onto the wire.
+ */
+export async function commitBookDeletion(origin: Origin, bookId: string) {
+  const db = await database();
+  const book = await db.get("books", mirrorKey(origin.userId, bookId));
+  return commitDistinctEvent(origin, "delete", bookId, {
+    ...(book?.media ? { fingerprint: book.media.fingerprint } : {}),
+  });
 }
 
 export function commitHistoryEvent(origin: Origin, bookId: string, event: Record<string, unknown>) {

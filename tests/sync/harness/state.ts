@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 
 import { mirror, sql } from "./app";
 import type { MirrorSnapshot } from "./driver-entry";
-import type { DeviceState, ServerState } from "./model";
+import type { BookRow, DeviceState, ServerState } from "./model";
 
 /**
  * The two observations the oracle is checked against.
@@ -15,7 +15,33 @@ import type { DeviceState, ServerState } from "./model";
  * Both are keyed by the media FINGERPRINT rather than by book id, because the
  * fingerprint is the identity the TEST chose before the server assigned a uuid.
  * Keying on the server's id would quietly make the comparison circular.
+ *
+ * They are keyed by fingerprint but not COLLAPSED onto it. Every book row is
+ * kept in `bookRowsByFingerprint`, because a duplicate is precisely what a
+ * fingerprint-keyed `Map` cannot express: N rows sharing one fingerprint used
+ * to become one entry here, which made "the re-import created a second book"
+ * unobservable by construction — the exact failure design contract section 10
+ * exists to prevent. `booksByFingerprint` is the first row of each list, kept
+ * for the readers that only ever ask about one.
  */
+
+function byFingerprint(rows: Array<{ fingerprint: string } & BookRow>): {
+  rowsByFingerprint: Map<string, BookRow[]>;
+  firstByFingerprint: Map<string, BookRow>;
+} {
+  const rowsByFingerprint = new Map<string, BookRow[]>();
+  for (const { fingerprint, ...row } of rows) {
+    const bucket = rowsByFingerprint.get(fingerprint);
+    if (bucket) bucket.push(row);
+    else rowsByFingerprint.set(fingerprint, [row]);
+  }
+  return {
+    rowsByFingerprint,
+    firstByFingerprint: new Map(
+      [...rowsByFingerprint].map(([fingerprint, bucket]) => [fingerprint, bucket[0]!]),
+    ),
+  };
+}
 
 export async function readServerState(userId: string): Promise<ServerState> {
   const client = sql();
@@ -61,19 +87,20 @@ export async function readServerState(userId: string): Promise<ServerState> {
     `,
   ]);
 
+  const books = byFingerprint(
+    bookRows.map((row) => ({
+      fingerprint: row.fingerprint,
+      bookId: row.book_id,
+      title: row.title,
+      author: row.author,
+      archived: row.archived_at !== null,
+      chapterCount: Number(row.chapter_count),
+    })),
+  );
+
   return {
-    booksByFingerprint: new Map(
-      bookRows.map((row) => [
-        row.fingerprint,
-        {
-          bookId: row.book_id,
-          title: row.title,
-          author: row.author,
-          archived: row.archived_at !== null,
-          chapterCount: Number(row.chapter_count),
-        },
-      ]),
-    ),
+    booksByFingerprint: books.firstByFingerprint,
+    bookRowsByFingerprint: books.rowsByFingerprint,
     tagsByFingerprint: groupSet(
       tagRows,
       (row) => row.fingerprint,
@@ -167,24 +194,36 @@ export function toDeviceState(snapshot: MirrorSnapshot): DeviceState {
     });
   }
 
+  const books = byFingerprint(
+    snapshot.books
+      .filter((book) => book.media)
+      .map((book) => ({
+        fingerprint: book.media!.fingerprint,
+        bookId: book.bookId,
+        title: book.title,
+        author: book.author,
+        archived: book.archivedAt !== null,
+        chapterCount: chapterCounts.get(book.bookId) || 0,
+      })),
+  );
+
+  // The download records, which the mirror snapshot above cannot speak for.
+  // A book whose audio is on this device under an id the mirror has never
+  // heard of is the phantom second copy of design contract section 10: the
+  // library projects it as a row of its own (`use-library-books.ts`), so the
+  // user sees the same audiobook twice.
+  const mirrored = new Set(snapshot.books.map((book) => book.bookId));
   return {
-    booksByFingerprint: new Map(
-      snapshot.books
-        .filter((book) => book.media)
-        .map((book) => [
-          book.media!.fingerprint,
-          {
-            bookId: book.bookId,
-            title: book.title,
-            author: book.author,
-            archived: book.archivedAt !== null,
-            chapterCount: chapterCounts.get(book.bookId) || 0,
-          },
-        ]),
-    ),
+    booksByFingerprint: books.firstByFingerprint,
+    bookRowsByFingerprint: books.rowsByFingerprint,
     tagsByFingerprint,
     collectionMembers,
     progressByFingerprint,
+    downloadedBookIds: snapshot.downloads.map((record) => record.bookId).sort(),
+    orphanedDownloadIds: snapshot.downloads
+      .map((record) => record.bookId)
+      .filter((bookId) => !mirrored.has(bookId))
+      .sort(),
   };
 }
 

@@ -17,7 +17,12 @@ const storeBookTranscript = vi.hoisted(() => vi.fn(async () => undefined));
 const storeLocalBookMedia = vi.hoisted(() => vi.fn(async () => ({}) as never));
 
 vi.mock("./offline/transcript-store", () => ({ storeBookTranscript }));
-vi.mock("./offline/media-store", () => ({ storeLocalBookMedia }));
+// Only the byte-writing half is stubbed; `withLocalMediaSlot` stays real, so
+// the import still runs inside the media slot the product holds.
+vi.mock("./offline/media-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./offline/media-store")>()),
+  storeLocalBookMedia,
+}));
 
 function fixtureFile(): File {
   const bytes = readFileSync(FIXTURE);

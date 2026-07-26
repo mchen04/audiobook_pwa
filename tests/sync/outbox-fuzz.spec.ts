@@ -118,6 +118,10 @@ test.afterAll(async () => {
 // ------------------------------------------------------------------ payloads
 function importPayload(fingerprint: string, title: string, author: string) {
   return {
+    // The device names the book, exactly as `local-import.ts` does: the id has
+    // to exist before the audio can be written under it, so a registration
+    // without one is not the shape the product ever sends.
+    bookId: crypto.randomUUID(),
     fileName: encodeURIComponent(`${fingerprint.slice(0, 12)}.mp3`),
     byteSize: 4_194_304,
     durationMs: DURATION_MS,
@@ -289,8 +293,7 @@ async function maybeDisturb(world: SeedWorld, index: number): Promise<void> {
       // without changing who delivers it.
       await goOnline(world.context, world.page);
       world.online = true;
-      await drainOutbox(world.page);
-      await refreshServerIds(world);
+      await resync(world);
     }
     return;
   }
@@ -314,14 +317,44 @@ async function maybeDisturb(world: SeedWorld, index: number): Promise<void> {
     world.reloads += 1;
     world.queuedAcrossReload = Math.max(world.queuedAcrossReload, queuedBefore);
     void index;
-    await drainOutbox(world.page);
-    await refreshServerIds(world);
+    await resync(world);
     return;
   }
   if (roll < 0.4 && world.online) {
     await replay(world.page);
     await refreshServerIds(world);
   }
+}
+
+/**
+ * Back in step with the server: the queue delivered, and the MIRROR caught up.
+ *
+ * The pull is not an extra thing the harness does to the device — it is what
+ * the device does to itself, at both of the moments this is called from:
+ *
+ *  - on reconnect, because `use-library-books` pulls on the `online` event
+ *    (design contract section 6; the listener is in that file);
+ *  - after an import lands, because `library-client.tsx` awaits `reload()` when
+ *    `importLocalMp3` returns, and `reload` is "after an import: pull it back
+ *    down, then re-read".
+ *
+ * Awaiting it here only makes the moment deterministic, exactly as the drain
+ * makes the moment the queue empties deterministic.
+ *
+ * It is load-bearing, and not only for realism. The app resolves a deleted
+ * book's file identity from the mirror, so a device that had never pulled would
+ * be asked to delete a book it knows nothing about — a state no UI can reach,
+ * since a user can only delete a row they can see, and every row they can see
+ * came from the mirror or from a download record. A generated op must not be
+ * able to reach a state the product cannot.
+ *
+ * This changes no random draw, so the sequence of generated operations for a
+ * given seed is byte for byte what it was.
+ */
+async function resync(world: SeedWorld): Promise<void> {
+  await drainOutbox(world.page);
+  expect(await pull(world.page), "the reconnect pull did not complete").toBe("applied");
+  await refreshServerIds(world);
 }
 
 async function refreshServerIds(world: SeedWorld): Promise<void> {
@@ -352,8 +385,7 @@ async function step(world: SeedWorld, seed: number, index: number): Promise<void
   // and pass while testing nothing. When the pool is thin and the network is
   // up, the queue is flushed so the other nine operation kinds have targets.
   if (candidates.length < 3 && world.online) {
-    await drainOutbox(world.page);
-    await refreshServerIds(world);
+    await resync(world);
     candidates = eligible(world);
   }
 
@@ -487,9 +519,26 @@ async function step(world: SeedWorld, seed: number, index: number): Promise<void
   }
 }
 
+/**
+ * An import, and one in five of them is the SAME FILE AGAIN.
+ *
+ * A fingerprint the library already holds is not an edge case: it is what the
+ * recovery in design contract section 10 looks like from the route's side, and
+ * it is the only way a registration ever meets `media_assets`' uniqueness on
+ * (owner, kind, fingerprint). The duplicate must merge onto the book that
+ * already owns those bytes — the model folds it that way, and the duplicate
+ * check in `compare` is what notices a second book appearing instead.
+ *
+ * A fuzz that minted a fresh fingerprint every time, as this one did, could
+ * never generate the case at all.
+ */
+const DUPLICATE_IMPORT_CHANCE = 0.2;
+
 async function doImport(world: SeedWorld, seed: number, index: number): Promise<void> {
-  const fingerprint = fingerprintFor(seed, world.imported);
-  world.imported += 1;
+  const known = world.model.liveFingerprints();
+  const reimport = known.length > 0 && world.random.chance(DUPLICATE_IMPORT_CHANCE);
+  const fingerprint = reimport ? world.random.pick(known) : fingerprintFor(seed, world.imported);
+  if (!reimport) world.imported += 1;
   const title = `Imported ${seed}-${index}`;
   const author = `Importer ${seed}`;
   await commit(world.page, {
