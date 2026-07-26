@@ -28,6 +28,7 @@ import {
   commitMetadataEdit,
   commitMutation,
   commitTagEdge,
+  mirrorProgress,
 } from "./outbox";
 
 const USER = "user-a";
@@ -58,6 +59,11 @@ function draft(overrides: Partial<MutationDraft> & Pick<MutationDraft, "key" | "
 
 async function keys(): Promise<string[]> {
   return (await listQueuedMutations(USER)).map((row) => row.key).sort();
+}
+
+async function mirroredState() {
+  const db = await database();
+  return db.get("playbackStates", mirrorKey(USER, BOOK));
 }
 
 async function seedBook(overrides: Record<string, unknown> = {}) {
@@ -97,6 +103,52 @@ describe("outbox coalescing", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0]!.deviceSequence).toBe(3);
     expect(queued[0]!.payload.positionMs).toBe(3_000);
+  });
+
+  /**
+   * `deviceSequence` is a per-(user, book, DEVICE) counter. The mirror guard
+   * used to compare it across devices, which is comparing two unrelated
+   * integers: a phone that has opened a book forty times outranked a laptop
+   * opening it for the first time, so the laptop's genuinely newer position was
+   * dropped from the shelf on the way past. Across devices the only ordering
+   * the two share is the event time the server stamps.
+   */
+  it("projects a newer event over another device's higher sequence", async () => {
+    await mirrorProgress({
+      ...progress(9, 15_245),
+      deviceId: "device-2",
+      eventOccurredAt: "2026-07-05T00:00:00.000Z",
+    });
+    await mirrorProgress({
+      ...progress(1, 3_231),
+      deviceId: "device-1",
+      eventOccurredAt: "2026-07-05T00:05:00.000Z",
+    });
+
+    expect((await mirroredState())?.positionMs).toBe(3_231);
+  });
+
+  it("still refuses an older event from another device", async () => {
+    await mirrorProgress({
+      ...progress(1, 3_231),
+      deviceId: "device-2",
+      eventOccurredAt: "2026-07-05T00:05:00.000Z",
+    });
+    await mirrorProgress({
+      ...progress(9, 15_245),
+      deviceId: "device-1",
+      eventOccurredAt: "2026-07-05T00:00:00.000Z",
+    });
+
+    expect((await mirroredState())?.positionMs).toBe(3_231);
+  });
+
+  it("still orders one device's own events by its sequence", async () => {
+    await mirrorProgress(progress(3, 3_000));
+    // Same device, lower sequence: out of order, and the clock is not consulted.
+    await mirrorProgress({ ...progress(2, 2_000), eventOccurredAt: "2026-07-06T00:00:00.000Z" });
+
+    expect((await mirroredState())?.positionMs).toBe(3_000);
   });
 
   it("keeps a second device's progress for the same book separate", async () => {

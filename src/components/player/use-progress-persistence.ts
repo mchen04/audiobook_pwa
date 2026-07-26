@@ -240,12 +240,33 @@ export function useProgressPersistence(
      *
      * `pagehide` was the only terminal hook in this app, and on iOS the
      * app-switcher kill does not deliver it — the page is simply gone, and the
-     * measured cost was 4.4 s of lost position on every backgrounding. The
-     * write is unconditional on `visibilityState` rather than gated on
-     * `"hidden"`: the edge back to visible writes the position the element is
-     * already at, which is a no-op the user cannot observe, and gating on a
-     * state read costs the whole flush on any path where the state has already
-     * moved on by the time the handler runs.
+     * measured cost was 4.4 s of lost position on every backgrounding.
+     *
+     * ONE EDGE, NOT BOTH. This handler used to be unconditional on
+     * `visibilityState`, on the reasoning that the edge back to VISIBLE just
+     * rewrites the position the element is already at — "a no-op the user
+     * cannot observe". That is true of one device and false of this app, which
+     * is multi-device and ships `tests/sync/two-device-convergence.spec.ts`. A
+     * tab left open at 04:00 and foregrounded at 09:00 has an audio element
+     * still sitting where it was, and the visible edge republished that
+     * position: local with `occurredAt: Date.now()`, so it beats the server's
+     * newer record through `localWinsOver`, and a PATCH with
+     * `eventOccurredAt: now`, which `decideProgressUpdate` accepts because it
+     * only refuses events OLDER than what it holds. The result is a jump of
+     * arbitrary size, in either direction, over a position another device
+     * earned — with no user input at all. Skipping content the user paid for
+     * is the worst failure this player has.
+     *
+     * Nothing is lost by not writing on the visible edge: becoming visible
+     * destroys nothing, and the position has not moved since the last cadence
+     * write. The flush exists for the edge where the page is about to stop
+     * existing.
+     *
+     * The `hidden` read is safe here specifically because
+     * `visibilitychange` is defined to fire AFTER `document.visibilityState`
+     * has been updated — there is no path on which a hiding page reports
+     * `"visible"` to this handler. `pagehide` stays unconditional: it is
+     * terminal whatever the visibility is, including a foreground navigation.
      */
     const flush = () => {
       const audio = audioRef.current;
@@ -254,13 +275,17 @@ export function useProgressPersistence(
       saveDurableState(positionMs);
       void sendProgress(positionMs);
     };
-    document.addEventListener("visibilitychange", flush);
+    const flushIfHiding = () => {
+      if (document.visibilityState !== "hidden") return;
+      flush();
+    };
+    document.addEventListener("visibilitychange", flushIfHiding);
     window.addEventListener("pagehide", flush);
     const replay = () => void replayQueuedMutations(userId);
     if (navigator.onLine) replay();
     window.addEventListener("online", replay);
     return () => {
-      document.removeEventListener("visibilitychange", flush);
+      document.removeEventListener("visibilitychange", flushIfHiding);
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("online", replay);
     };

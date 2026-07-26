@@ -7,6 +7,7 @@ import {
 } from "idb";
 
 import { ACTIVE_USER_KEY, PROGRESS_CONFLICT_EVENT } from "@/lib/app-keys";
+import { readLocalProgress } from "@/lib/playback-core";
 import { singleFlight } from "@/lib/single-flight";
 import { withKeyedLock } from "@/lib/keyed-lock";
 import { runBounded } from "@/lib/run-bounded";
@@ -709,8 +710,87 @@ function withMutationLock<T>(mutation: QueuedMutation, operation: () => Promise<
     : withKeyedLock(`chapterline:mutation:${mutation.key}`, operation);
 }
 
-async function replayMutation(task: QueuedMutation, fetchFn: typeof fetch): Promise<void> {
-  await withMutationLock(task, async () => {
+/**
+ * A queued progress row must not be the last word when this device already
+ * knows a newer position for the same book.
+ *
+ * MEASURED, WebKit, hard kill: Postgres left holding 15245 ms against a true
+ * position of 3231 ms. The 15 s server heartbeat queued the pre-rewind
+ * position, the SIGKILL killed the write that would have followed the rewind,
+ * and replay then delivered the queued value verbatim — carrying its ORIGINAL
+ * `eventOccurredAt`, which the server's staleness policy compares against what
+ * it holds rather than against what the device knows. The user was protected
+ * only by `localWinsOver` on a ~1 s timestamp margin; a fresh install, a second
+ * device or cleared storage makes the server authoritative and the user skips
+ * ~12 seconds of a book they paid for.
+ *
+ * The outbox's own coalescing would have collapsed the two events into one had
+ * the newer position ever been journalled. It was not — it only ever reached
+ * the synchronous local write, which is the ONLY write a terminating iOS page
+ * is guaranteed to complete, and is therefore the freshest thing this device
+ * has. So the collapse is applied here instead, from that record, and the row
+ * is rewritten in place: same intent ("where this user is in this book"), same
+ * device, later moment. Nothing is invented — every field comes from a write
+ * the app already made durable.
+ *
+ * A fresh `deviceSequence` is minted for the same reason `repointQueuedMutations`
+ * mints one: the server discards a progress write whose sequence is not above
+ * the last it recorded for (user, book, device), and answers 200 while doing
+ * it, so re-using the stale row's number risks reporting success and vanishing.
+ * It is minted at most once per row — the rewritten row's `eventOccurredAt` is
+ * the local record's own, so the next pass finds nothing newer to fold in.
+ */
+async function supersedeStaleProgress(task: QueuedMutation): Promise<QueuedMutation> {
+  if (task.kind !== "progress") return task;
+  const queuedAt = Date.parse(String(task.payload.eventOccurredAt ?? ""));
+  const local = readLocalProgress(task.userId, task.entityId);
+  // `occurredAt: 0` is a pre-v2 record that claims no moment at all, so it
+  // cannot claim a later one — the same rule `localWinsOver` applies.
+  if (!local || !local.occurredAt || !Number.isFinite(queuedAt)) return task;
+  if (local.occurredAt <= queuedAt) return task;
+  if (Math.round(local.positionMs) === Number(task.payload.positionMs)) return task;
+
+  // Raised past the row being replaced, not merely minted. `nextDeviceSequence`
+  // counts what THIS device has issued, and a queued row can outrank that
+  // counter — a v4→v5 migration that could not attribute its rows, or an
+  // account purge that reset them, both leave the outbox holding a number the
+  // counter no longer knows about. Handing the server a sequence at or below
+  // the one it may already have recorded for this row is a write it answers 200
+  // to and discards, which is the exact failure this whole function exists to
+  // stop, arrived at from the other side.
+  const deviceSequence = Math.max(
+    await nextDeviceSequence(task.entityId, task.userId),
+    task.deviceSequence + 1,
+  );
+  const superseded: QueuedMutation = {
+    ...task,
+    deviceSequence,
+    payload: {
+      ...task.payload,
+      positionMs: Math.round(local.positionMs),
+      ...(typeof local.playbackRate === "number" ? { playbackRate: local.playbackRate } : {}),
+      ...(typeof local.completed === "boolean" ? { completed: local.completed } : {}),
+      eventOccurredAt: new Date(local.occurredAt).toISOString(),
+    },
+  };
+
+  const db = await database();
+  const transaction = db.transaction("mutations", "readwrite");
+  const current = await transaction.store.get(task.key);
+  // Replaced or settled while this was being assembled: that row is newer than
+  // anything decided here, and `settleMutation` guards the same way.
+  if (current?.mutationId !== task.mutationId) {
+    await transaction.done;
+    return current ?? task;
+  }
+  await transaction.store.put(superseded);
+  await transaction.done;
+  return superseded;
+}
+
+async function replayMutation(snapshot: QueuedMutation, fetchFn: typeof fetch): Promise<void> {
+  await withMutationLock(snapshot, async () => {
+    const task = await supersedeStaleProgress(snapshot);
     const { url, init } = toReplayRequest(task);
     const response = await fetchFn(url, init);
     if (shouldRetainMutation(response.status)) {

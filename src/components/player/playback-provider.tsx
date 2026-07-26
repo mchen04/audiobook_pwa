@@ -317,8 +317,16 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
             // away a seek the user made while paused.
             const previousPositionMs = audio.currentTime * 1000;
             if (!audio.paused) suppressNextPauseRef.current = true;
+            // `completed` is deliberately NOT passed. A literal `false` here
+            // un-finished the book the user had just finished — locally and on
+            // the server — and it fired by itself on the autoplay-next path,
+            // where the finished book is ALWAYS the previous one. Left
+            // undefined, both writes fall through to the completion this book
+            // actually has (`completionRef`, then `previousBook.completed`), so
+            // switching books records where the user was without ever making a
+            // claim about whether they finished it.
             saveDurableState(previousPositionMs, undefined, previousBook);
-            void persistProgress(previousPositionMs, false, previousBook);
+            void persistProgress(previousPositionMs, undefined, previousBook);
             cancelSeekPersist();
             if (!audio.paused) audio.pause();
             trackerRef.current.end(previousBook.id, previousPositionMs);

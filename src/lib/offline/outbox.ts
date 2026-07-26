@@ -415,7 +415,7 @@ export function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
         const store = transaction.objectStore("playbackStates");
         const key = mirrorKey(userId, entityId);
         const existing = await store.get(key);
-        if (existing && existing.deviceSequence > mutation.deviceSequence) return;
+        if (existing && mirrorHoldsSomethingNewer(existing, mutation)) return;
         const state: MirrorPlaybackState = {
           key,
           userId,
@@ -435,6 +435,39 @@ export function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
     default:
       return null;
   }
+}
+
+/**
+ * Does the mirror already hold a LATER playback state than the one being
+ * projected?
+ *
+ * The guard used to be `existing.deviceSequence > mutation.deviceSequence` with
+ * no regard for who wrote the row, and `deviceSequence` is a per-(user, book,
+ * DEVICE) counter — the server orders on it that way and `nextDeviceSequence`
+ * mints it that way. Comparing this device's counter against a row a *different*
+ * device wrote compares two unrelated integers: the phone that has opened a book
+ * forty times outranks the laptop opening it for the first time, so a genuinely
+ * newer laptop write is discarded, and the reverse lets a stale phone write
+ * through. Neither answer is about time.
+ *
+ * So the comparison is only made where it means something. Same device: the
+ * sequence is the ordering, and it is monotonic by construction, which is why it
+ * is preferred over any clock. Different devices: the sequences share no origin
+ * and the only ordering the two have in common is the event time the server
+ * stamps and hands back on a pull, so that is what is compared — and an
+ * unparseable or absent stamp on either side is not evidence of anything, so the
+ * projection proceeds rather than being dropped on a guess.
+ */
+function mirrorHoldsSomethingNewer(
+  existing: MirrorPlaybackState,
+  mutation: QueuedMutation,
+): boolean {
+  if (existing.deviceId === mutation.deviceId) {
+    return existing.deviceSequence > mutation.deviceSequence;
+  }
+  const held = Date.parse(existing.eventOccurredAt);
+  const incoming = Date.parse(String(mutation.payload.eventOccurredAt ?? ""));
+  return Number.isFinite(held) && Number.isFinite(incoming) && held > incoming;
 }
 
 function bookFieldsFrom(payload: Record<string, unknown>): Partial<MirrorBook> {
