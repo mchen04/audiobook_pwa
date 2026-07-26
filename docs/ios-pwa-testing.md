@@ -12,7 +12,7 @@ Install WebKit once, start the local test database, then run the scenario:
 
 ```sh
 pnpm exec playwright install webkit
-cp .env.test.example .env.test
+cp .env.test.example .env.test   # the bootstrap below generates its secrets
 node scripts/test-db.mjs
 pnpm test:e2e:ios
 ```

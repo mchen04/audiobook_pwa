@@ -17,7 +17,9 @@
 // --env-file=<path>) and refuses to touch anything but a local database.
 
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 import postgres from "postgres";
 
@@ -36,9 +38,59 @@ const command = positional[0] ?? "up";
 
 const envFile = resolveEnvFile({ argv });
 loadEnvFile(envFile);
+ensureGeneratedSecrets(envFile);
 
 const databaseUrl = process.env.DATABASE_URL;
 const host = assertLocalDatabase(databaseUrl, { context: "The test-database bootstrap" });
+
+/**
+ * Fills in the values `.env.test.example` deliberately ships empty.
+ *
+ * The session signing key and the test account's password used to be literals
+ * in the committed example file, and a secret scanner flagged them — correctly.
+ * They are not real secrets, which is exactly the problem: a committed string
+ * that looks like a credential teaches everyone to wave the scanner through, and
+ * then the one that matters looks the same.
+ *
+ * Only ever fills a BLANK value, and never rewrites one that is already set, so
+ * running this against an existing `.env.test` cannot invalidate the sessions or
+ * the seeded account a working setup already has.
+ *
+ * @param {string} file
+ */
+function ensureGeneratedSecrets(file) {
+  const generators = {
+    BETTER_AUTH_SECRET: () => randomBytes(32).toString("hex"),
+    // Upper, lower, digits and a symbol, comfortably past the 12-character
+    // minimum the register route enforces.
+    HARK_TEST_ACCOUNT_PASSWORD: () => `Hk-${randomBytes(12).toString("base64url")}-1!`,
+  };
+
+  const missing = Object.keys(generators).filter((key) => !process.env[key]);
+  if (!missing.length) return;
+
+  let contents = "";
+  try {
+    contents = readFileSync(file, "utf8");
+  } catch {
+    console.error(
+      `▸ ${path.relative(process.cwd(), file)} does not exist yet.\n` +
+        "  Copy it from .env.test.example first: cp .env.test.example .env.test",
+    );
+    process.exit(1);
+  }
+
+  for (const key of missing) {
+    const value = generators[key]();
+    process.env[key] = value;
+    const assignment = `${key}=${value}`;
+    contents = new RegExp(`^${key}=.*$`, "m").test(contents)
+      ? contents.replace(new RegExp(`^${key}=.*$`, "m"), assignment)
+      : `${contents.replace(/\n*$/, "\n")}${assignment}\n`;
+  }
+  writeFileSync(file, contents, "utf8");
+  console.log(`▸ Generated ${missing.join(", ")} into ${path.relative(process.cwd(), file)}`);
+}
 
 /**
  * @param {string} file

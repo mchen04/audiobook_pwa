@@ -93,8 +93,8 @@ server's major version and locale (builtin `C.UTF-8`), with the `pg_trgm`
 extension migration 0009 needs, published on `127.0.0.1:54329`.
 
 ```sh
-cp .env.test.example .env.test   # local-only credentials, gitignored
-node scripts/test-db.mjs         # start, migrate, and seed the test database
+cp .env.test.example .env.test   # local-only, gitignored
+node scripts/test-db.mjs         # generates the secrets, then starts, migrates and seeds
 ```
 
 Everything test-related reads `.env.test`, never `.env.local`. Override the file
