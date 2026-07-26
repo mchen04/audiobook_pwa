@@ -139,35 +139,80 @@ export function useProgressPersistence(
           eventOccurredAt: new Date().toISOString(),
         };
 
+        /**
+         * ONLY the fetch is inside the try.
+         *
+         * `mirrorProgress` and `commitProgress` are both IndexedDB writes, and
+         * with them under the same `catch` a storage fault was read as a
+         * network fault: a failing `mirrorProgress` — Safari evicting the
+         * database, a full quota, a blocked store — landed in the catch and
+         * journalled an outbox row for an event the server had ALREADY
+         * accepted, which the next replay then re-sent. A failing
+         * `commitProgress` was worse: the catch ran `commitProgress` again, so
+         * the one path that exists to make an unsent write durable retried
+         * itself once, inside the lock, and then threw anyway.
+         */
+        let response: Response;
         try {
-          const response = await fetch(`/api/books/${activeBook.id}/progress`, {
+          response = await fetch(`/api/books/${activeBook.id}/progress`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: toProgressBody(event),
             keepalive: true,
           });
-          if (response.status === 409) {
-            await reconcileProgressConflict({ userId, ...event }, response);
-          } else if (shouldRetainMutation(response.status)) {
-            await commitProgress({ userId, ...event });
-          } else {
-            // Accepted by the server, so there is no intent to journal — but
-            // this device's own shelf still has to show it before the next pull.
-            await mirrorProgress({ userId, ...event });
-          }
         } catch {
+          // The request never reached a server, so the intent is unsent and has
+          // to survive in the outbox.
+          await commitProgress({ userId, ...event });
+          return;
+        }
+
+        if (response.status === 409) {
+          await reconcileProgressConflict({ userId, ...event }, response);
+        } else if (response.ok) {
+          // Accepted by the server, so there is no intent to journal — but
+          // this device's own shelf still has to show it before the next pull.
+          await mirrorProgress({ userId, ...event });
+        } else if (shouldRetainMutation(response.status)) {
           await commitProgress({ userId, ...event });
         }
+        /**
+         * Everything else — 400, 404, 410, 413, 422 — is a REFUSAL, and the
+         * `else` used to treat it as an acceptance. `shouldRetainMutation` only
+         * claims a status is worth retrying; it never claimed the rest were
+         * applied, and reading it that way mirrored writes the server had
+         * rejected into the store the shelf renders from, with no outbox row to
+         * ever correct them. A 404 for a book deleted on another device is the
+         * live case: the card came back holding a position for a book that no
+         * longer exists, and nothing would remove it.
+         *
+         * So a permanent refusal projects nothing and journals nothing. The
+         * position is not lost — `saveDurableState` has already written it to
+         * `localStorage`, which is this device's own record; what is dropped is
+         * only the claim that the SERVER holds it.
+         */
       });
     },
     [activeBookRef, audioRef, userId],
   );
 
-  /** The durable write, then the server write. In that order, always. */
+  /**
+   * The durable write, then the server write. In that order, always.
+   *
+   * The returned promise never rejects. Every caller reaches this through
+   * `void persistProgress(...)` from an event handler — a tap, a tick, a
+   * lifecycle edge — and the server half is explicitly allowed to fail: it sits
+   * behind a lock, a `fetch` and two IndexedDB writes, any of which can throw on
+   * a device with storage evicted or blocked. Leaving those to escape turned a
+   * best-effort background write into an unhandled rejection on the window,
+   * which is a reported error for a case the design already calls survivable.
+   * The durable local write has happened by the time this settles, so there is
+   * nothing here for a caller to recover from.
+   */
   const persistProgress = useCallback(
     (positionMs: number, completed?: boolean, bookOverride?: PlayerBook) => {
       saveDurableState(positionMs, completed, bookOverride);
-      return sendProgress(positionMs, completed, bookOverride);
+      return sendProgress(positionMs, completed, bookOverride).catch(() => undefined);
     },
     [saveDurableState, sendProgress],
   );
@@ -271,9 +316,10 @@ export function useProgressPersistence(
     const flush = () => {
       const audio = audioRef.current;
       if (!audio || !activeBookRef.current) return;
-      const positionMs = audio.currentTime * 1000;
-      saveDurableState(positionMs);
-      void sendProgress(positionMs);
+      // `persistProgress` IS the synchronous-durable-write-then-server-write
+      // order this handler needs, and it is the one place that keeps the server
+      // half from rejecting onto a page that is already going away.
+      void persistProgress(audio.currentTime * 1000);
     };
     const flushIfHiding = () => {
       if (document.visibilityState !== "hidden") return;
@@ -289,7 +335,7 @@ export function useProgressPersistence(
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("online", replay);
     };
-  }, [activeBookRef, audioRef, saveDurableState, sendProgress, userId]);
+  }, [activeBookRef, audioRef, persistProgress, userId]);
 
   useEffect(() => {
     const reconcile = (event: Event) => {

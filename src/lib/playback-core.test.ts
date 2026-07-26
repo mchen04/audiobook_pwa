@@ -5,9 +5,12 @@ import type { PlayerChapter } from "@/domain/player";
 import {
   freshestPosition,
   isChapterEnding,
+  localWinsOver,
   readLocalPosition,
+  readLocalProgress,
   resolveStartPosition,
   rewindForAbsence,
+  saveLocalPlaybackState,
   saveLocalPosition,
   selectCurrentChapter,
 } from "./playback-core";
@@ -145,5 +148,70 @@ describe("local playback state", () => {
         serverOccurredAt: new Date(3_000).toISOString(),
       }),
     ).toBe(8_000);
+  });
+
+  /**
+   * The unit-level statement of `tests/resume/uncovered-axes.spec.ts` X3.
+   *
+   * The e2e row is the one that grades the product, in WebKit, on two real
+   * devices. This is the same rule expressed where it is cheap to run and
+   * impossible to misread: a durable write that carries no new position must
+   * not claim a newer moment, because `occurredAt` is the only thing
+   * `localWinsOver` compares and a fresher stamp on an unmoved position is how
+   * a stale tab overrules another device's real listening.
+   */
+  it("does not re-stamp a durable write that carries no new position", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(10_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_793 });
+      expect(readLocalProgress("user-a", "book-1")).toMatchObject({
+        positionMs: 6_793,
+        occurredAt: 10_000,
+      });
+
+      // Another device moves the book forward while this one sits paused.
+      const serverOccurredAt = new Date(20_000).toISOString();
+
+      // The terminal flush: same position, 15 seconds later.
+      vi.setSystemTime(new Date(25_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_793 });
+      const afterFlush = readLocalProgress("user-a", "book-1")!;
+      expect(afterFlush.occurredAt).toBe(10_000);
+      expect(localWinsOver(afterFlush, serverOccurredAt)).toBe(false);
+      expect(
+        freshestPosition({
+          local: afterFlush,
+          serverPositionMs: 15_666,
+          serverOccurredAt,
+        }),
+      ).toBe(15_666);
+
+      // A write that DOES move the position still claims the new moment.
+      vi.setSystemTime(new Date(30_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_794 });
+      const afterListening = readLocalProgress("user-a", "book-1")!;
+      expect(afterListening.occurredAt).toBe(30_000);
+      expect(localWinsOver(afterListening, serverOccurredAt)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A record that claims no moment cannot lend one to the write that follows. */
+  it("re-stamps when the stored record is a legacy value with no moment", () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("chapterline:position:user-a:book-1", "6793");
+      expect(readLocalProgress("user-a", "book-1")).toMatchObject({ occurredAt: 0 });
+      vi.setSystemTime(new Date(25_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_793 });
+      expect(readLocalProgress("user-a", "book-1")).toMatchObject({
+        positionMs: 6_793,
+        occurredAt: 25_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

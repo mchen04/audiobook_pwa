@@ -71,16 +71,28 @@ export function useTransportActions({
       const bounded = Math.min(Math.max(positionMs, 0), activeBook.durationMs);
       const previousPositionMs = audio.currentTime * 1000;
       audio.currentTime = bounded / 1000;
-      timeStore.write(bounded);
+      // What the element ACCEPTED, not what it was asked for. `bounded` is
+      // clamped to `activeBook.durationMs`, which is metadata computed at import
+      // from the file's frame headers; the element clamps to the media it
+      // actually decoded. When the first is longer than the second — an
+      // estimated MP3 duration, a truncated download — a seek to the end
+      // durably records a position past the real end of the audio, and nothing
+      // corrects it while the user is paused because the cadence only runs
+      // during playback. `resolveStartPosition` reads that record back, decides
+      // the book is at its very end and restarts it from zero: a seek that
+      // lands the user near the end of a book they have not finished throws
+      // their place away on the next open.
+      const settledMs = settledPositionMs(audio, bounded);
+      timeStore.write(settledMs);
       // Durable at once, not in 800 ms. The debounce coalesces SERVER writes,
       // which is all it was ever for; leaving the local position behind it lost
       // the seek outright whenever the next thing to happen was
       // `cancelSeekPersist` — seek while paused, then leave the player, and
       // there was no `pause` event coming to save it either.
       markPositionChanged();
-      saveDurableState(bounded);
+      saveDurableState(settledMs);
       persistSeekSoon();
-      recordAction(action, bounded, previousPositionMs, description);
+      recordAction(action, settledMs, previousPositionMs, description);
     };
 
     return {
@@ -154,6 +166,22 @@ export function useTransportActions({
     suppressNextPauseRef,
     timeStore,
   ]);
+}
+
+/**
+ * Where the element ended up after being told to seek.
+ *
+ * Read back rather than assumed, but only once there is something to read.
+ * Before `HAVE_METADATA` the element has no duration to clamp against and, in
+ * WebKit, no media player object to ask — `currentTime` answers 0 — so writing
+ * the read-back at that point would turn a seek into a jump to the start of the
+ * book, which is a far worse failure than the one this exists to prevent. Until
+ * then the request is the best information anyone has.
+ */
+function settledPositionMs(audio: HTMLAudioElement, requestedMs: number): number {
+  if (audio.readyState < audio.HAVE_METADATA) return requestedMs;
+  const settled = audio.currentTime * 1000;
+  return Number.isFinite(settled) && settled >= 0 ? settled : requestedMs;
 }
 
 // Autoplay can be blocked before the first user activation; a rejected play()

@@ -103,9 +103,10 @@ export function saveLocalPlaybackState(
   bookId: string,
   state: { positionMs: number; playbackRate?: number; completed?: boolean; occurredAt?: number },
 ): boolean {
+  const positionMs = Math.round(state.positionMs);
   const record: LocalPosition = {
-    positionMs: Math.round(state.positionMs),
-    occurredAt: state.occurredAt ?? Date.now(),
+    positionMs,
+    occurredAt: state.occurredAt ?? momentThisPositionWasReached(userId, bookId, positionMs),
   };
   if (typeof state.playbackRate === "number" && Number.isFinite(state.playbackRate)) {
     record.playbackRate = state.playbackRate;
@@ -119,6 +120,42 @@ export function saveLocalPlaybackState(
   }
 }
 
+/**
+ * When did this device reach this position? Not: when did it last say so.
+ *
+ * `occurredAt` is the only thing `localWinsOver` compares, so it is a CLAIM
+ * ABOUT LISTENING, not a write timestamp — and a write that carries no new
+ * position has no new listening to claim. Re-stamping one is how a device
+ * silently overrules another device that really did move the book forward.
+ *
+ * The path that proved it (`tests/resume/uncovered-axes.spec.ts` X3, measured in
+ * WebKit): device A is paused at 6793 ms and its tab is left open; device B
+ * takes the book to 15666 ms; A's tab is then navigated away from. `pagehide` is
+ * terminal at any visibility so it flushes unconditionally — correctly, it is
+ * the last task a killed iOS page gets — and the flush rewrote A's own record as
+ * the SAME 6793 ms with an `occurredAt` 15.4 s newer. Nothing about the user's
+ * position changed; only the clock did. `localWinsOver` then read that fresher
+ * stamp, preferred it over the server's newer cross-device value, and A came
+ * back 8873 ms behind, throwing away listening the user had really done, with no
+ * user input anywhere in the sequence.
+ *
+ * Keeping the earlier moment fixes it at the source and leaves the flush alone,
+ * which matters: the same unconditional flush is what saves the position in the
+ * single-device crash cases, and removing it to fix this would trade one lost
+ * position for another. A write that moves the position by even a millisecond
+ * still stamps `Date.now()`, because then there IS new listening to claim.
+ *
+ * A caller that passes `occurredAt` explicitly is stating the moment itself and
+ * is left alone. A stored record with `occurredAt: 0` (every pre-v2 value)
+ * claims no moment at all, so it cannot lend one.
+ */
+function momentThisPositionWasReached(userId: string, bookId: string, positionMs: number): number {
+  const previous = readLocalProgress(userId, bookId);
+  return previous && previous.positionMs === positionMs && previous.occurredAt > 0
+    ? previous.occurredAt
+    : Date.now();
+}
+
 export function saveLocalPosition(
   userId: string,
   bookId: string,
@@ -126,6 +163,36 @@ export function saveLocalPosition(
   occurredAt = Date.now(),
 ): void {
   saveLocalPlaybackState(userId, bookId, { positionMs, occurredAt });
+}
+
+/**
+ * Forget everything this device remembers about where the user was in a book.
+ *
+ * Deleting a book has to take the position with it, and it did not. The delete
+ * flow dispatches `UNLOAD_PLAYER_EVENT`, and `unloadBook` writes the position
+ * one last time on the way out — so a delete ENDED by recording a fresh
+ * `chapterline:position:*` record for the book it had just destroyed, stamped
+ * later than anything in the mirror.
+ *
+ * `healMirrorPlaybackFromLocal` then sweeps exactly those keys on every launch
+ * and writes back any whose moment beats the mirror's. The delete removed the
+ * book aggregate from IndexedDB; the next launch put a playback row for it
+ * straight back, and the launch after that did it again, because nothing ever
+ * removed the localStorage record that was feeding it. One orphan row per
+ * deleted book, forever, on a store the shelf reads.
+ *
+ * The pause marker goes with it. It is the same book's state, it is what smart
+ * rewind reads, and a re-import of the same file is matched to the same book id
+ * by fingerprint — so a stale marker would hand a freshly imported book a
+ * rewind earned by a copy the user deleted months ago.
+ */
+export function clearLocalPlaybackState(userId: string, bookId: string): void {
+  try {
+    localStorage.removeItem(localPositionKey(userId, bookId));
+    localStorage.removeItem(lastPausedKey(userId, bookId));
+  } catch {
+    // A device with storage blocked has nothing stored to remove.
+  }
 }
 
 export function readLocalPosition(userId: string, bookId: string): number | null {
