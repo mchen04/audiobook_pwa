@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
-import { authClient } from "@/lib/auth-client";
+import { authClient, whenAccountPurgeGateOpen } from "@/lib/auth-client";
 
 type AuthFormProps = {
   mode: "login" | "register";
@@ -39,6 +39,13 @@ export function AuthForm({ mode }: AuthFormProps) {
       setPending(false);
       return;
     }
+
+    // Nothing renders this account's library until every OTHER account's data
+    // has been swept off the device — or the sweep's bound has expired, in
+    // which case the next sign-in picks up what was left. The auth hook awaits
+    // the same promise, so this is a confirmation rather than a second wait,
+    // and it keeps the ordering readable at the navigation itself.
+    await whenAccountPurgeGateOpen();
 
     router.replace("/library");
     router.refresh();

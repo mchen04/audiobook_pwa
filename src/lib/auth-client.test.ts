@@ -20,6 +20,8 @@ const purge = vi.hoisted(() => ({
   order: [] as string[],
   undelivered: [] as Array<{ kind: string; entityId: string; queuedAt: number }>,
   failure: null as unknown,
+  /** A storage layer that has wedged: the sweep starts and never settles. */
+  wedged: false,
 }));
 
 vi.mock("@/lib/offline/account-purge", () => ({
@@ -40,6 +42,7 @@ vi.mock("@/lib/offline/account-purge", () => ({
     return { undelivered: options?.alreadyDrained ?? [], failure: purge.failure };
   },
   purgeOnSignIn: async () => {
+    if (purge.wedged) await new Promise(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 5));
     purge.order.push("purged-on-sign-in");
     return [];
@@ -72,6 +75,7 @@ beforeEach(async () => {
   purge.order = [];
   purge.undelivered = [];
   purge.failure = null;
+  purge.wedged = false;
   storage = fakeLocalStorage();
   vi.stubGlobal("window", globalThis);
   vi.stubGlobal("localStorage", storage);
@@ -150,5 +154,57 @@ describe("sign-out hooks", () => {
     await whenAccountPurgeSettled();
 
     expect(purge.order).toStrictEqual(["purged-on-sign-in"]);
+  });
+});
+
+/**
+ * The sign-in sweep is the CRASH-RECOVERY path: it is what finishes a purge an
+ * earlier sign-out never completed. Running it unawaited meant the incoming
+ * account's library painted while the previous account's mirror and downloaded
+ * MP3s were still being deleted, and a tab closed mid-sweep abandoned the only
+ * thing that would ever have finished the job.
+ */
+describe("sign-in waits for the sweep", () => {
+  const SIGN_IN = "https://hark.test/api/auth/sign-in/email";
+
+  async function signInThroughHooks(): Promise<void> {
+    const { authFetchHooks } = await import("@/lib/auth-client");
+    await authFetchHooks.onRequest({ url: SIGN_IN, method: "POST" });
+    await authFetchHooks.onSuccess({ request: { url: SIGN_IN }, data: { user: { id: "user-b" } } });
+  }
+
+  it("does not hand control back while the previous account is still on the device", async () => {
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+
+    await signInThroughHooks();
+    purge.order.push("sign-in-returned");
+
+    expect(
+      purge.order,
+      "the incoming account was let in mid-sweep, over the departing account's data",
+    ).toStrictEqual(["purged-on-sign-in", "sign-in-returned"]);
+  });
+
+  it("still lets the user in when the sweep wedges, leaving it for the next sign-in", async () => {
+    storage.setItem(ACTIVE_USER_KEY, USER_A);
+    purge.wedged = true;
+    vi.useFakeTimers();
+    try {
+      const { SIGN_IN_PURGE_TIMEOUT_MS } = await import("@/lib/auth-client");
+      let letIn = false;
+      const signIn = signInThroughHooks().then(() => {
+        letIn = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(SIGN_IN_PURGE_TIMEOUT_MS - 1);
+      expect(letIn, "the bound opened early, before the sweep had had its chance").toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await signIn;
+      expect(letIn, "a wedged storage layer locked the user out of their own account").toBe(true);
+      expect(purge.order, "the wedged sweep somehow reported success").toStrictEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

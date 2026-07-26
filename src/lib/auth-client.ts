@@ -28,6 +28,12 @@ import type { UndeliveredWrite } from "@/lib/offline/account-purge";
  *     only the page cache, and left the mirror, the downloaded MP3s, the
  *     outbox, the history and the deletion journal on the device. And firing it
  *     unawaited let the caller navigate away mid-sweep.
+ *
+ * SIGN-IN IS ALSO AWAITED, with a bound. It is the crash-recovery path — the
+ * thing that finishes a purge an earlier sign-out never completed — so running
+ * it unawaited meant the incoming account's library painted over a sweep still
+ * in progress, and a closed tab abandoned it entirely. See
+ * `SIGN_IN_PURGE_TIMEOUT_MS` for why the wait is bounded rather than absolute.
  */
 
 type AuthSuccessContext = {
@@ -78,6 +84,37 @@ let signOutDrain: { ran: boolean; undelivered: UndeliveredWrite[] } = {
 };
 let signOutReport: SignOutReport | null = null;
 let purgeInFlight: Promise<void> = Promise.resolve();
+let purgeGate: Promise<void> = Promise.resolve();
+
+/**
+ * How long a sign-in will wait for the crash-recovery sweep before it lets the
+ * user in anyway.
+ *
+ * Bounded for the same reason `SIGN_OUT_DRAIN_TIMEOUT_MS` is: a storage layer
+ * that has wedged — a blocked IndexedDB upgrade held by another tab, a Cache
+ * Storage call that never settles — must not lock somebody out of their own
+ * account. Unbounded is not safer here, because the sweep is idempotent and
+ * records no progress: `purgeOnSignIn` re-enumerates every local account from
+ * the three databases each time it runs, so whatever this bound abandons is
+ * found again by the next sign-in. Waiting forever would trade a recoverable
+ * delay for an unrecoverable lockout.
+ *
+ * Five seconds rather than the drain's eight: this sweep is local storage work
+ * with no network in it, so anything slower than this is wedged rather than
+ * slow, and unlike the drain there is nothing here that a few more seconds of
+ * patience could still deliver.
+ */
+export const SIGN_IN_PURGE_TIMEOUT_MS = 5_000;
+
+function bounded(work: Promise<void>, timeoutMs: number): Promise<void> {
+  let expire: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => {
+    expire = setTimeout(resolve, timeoutMs);
+  });
+  // Raced, not aborted: the sweep keeps deleting after the bound expires, and
+  // the caller can still await the real thing via `whenAccountPurgeSettled`.
+  return Promise.race([work, bound]).finally(() => clearTimeout(expire));
+}
 
 /**
  * Reads and clears the report. Consuming it is deliberate: the caller that
@@ -90,9 +127,22 @@ export function takeSignOutReport(): SignOutReport | null {
   return report;
 }
 
-/** The sign-in sweep, which is not awaited by the auth request itself. */
+/** The sweep itself: resolves only once it has actually finished. */
 export function whenAccountPurgeSettled(): Promise<void> {
   return purgeInFlight;
+}
+
+/**
+ * What a caller may navigate on. Sign-out waits for the whole sweep; sign-in
+ * waits for it too, but gives up after `SIGN_IN_PURGE_TIMEOUT_MS` rather than
+ * refusing to let the user into their account.
+ *
+ * The auth hook already awaits this before its request resolves, so awaiting
+ * it again at a call site costs nothing — it is the same promise, not a second
+ * bound — and keeps the guarantee visible where the navigation is written.
+ */
+export function whenAccountPurgeGateOpen(): Promise<void> {
+  return purgeGate;
 }
 
 /**
@@ -158,12 +208,23 @@ export const authFetchHooks = {
   },
   onSuccess: async (context: AuthSuccessContext) => {
     purgeInFlight = runAccountPurge(context).catch(() => undefined);
-    // Sign-out is awaited so `signOut()` cannot resolve — and the caller cannot
-    // navigate, or clear `ACTIVE_USER_KEY` — while the departing account's
-    // library is still on the device. A storage failure must never turn a
-    // successful sign-out into a failed one, so it is reported through
+    // BOTH directions are awaited, and better-fetch awaits this hook before the
+    // auth call resolves, so no call site can navigate mid-sweep.
+    //
+    // Sign-out waits for the whole thing: `signOut()` must not resolve — and
+    // the caller must not clear `ACTIVE_USER_KEY` — while the departing
+    // account's library is still on the device. A storage failure must never
+    // turn a successful sign-out into a failed one, so it is reported through
     // `takeSignOutReport()` rather than thrown; the next launch retries.
-    if (isSignOut(pathOf(context))) await purgeInFlight;
+    //
+    // Sign-in waits BOUNDED. It was fire-and-forget, which meant account B's
+    // library painted while account A's mirror and downloaded MP3s were still
+    // being deleted, and closing the tab abandoned the sweep — in the one path
+    // whose entire job is finishing a purge an earlier crash interrupted.
+    purgeGate = isSignOut(pathOf(context))
+      ? purgeInFlight
+      : bounded(purgeInFlight, SIGN_IN_PURGE_TIMEOUT_MS);
+    await purgeGate;
   },
 };
 

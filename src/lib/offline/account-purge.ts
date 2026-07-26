@@ -11,6 +11,7 @@ import {
   listPlaybackHistoryUserIds,
   replayPlaybackHistory,
 } from "@/lib/playback-history";
+import { flushPendingPreferences, listPendingPreferenceWrites } from "@/lib/preferences";
 
 import { database } from "./db";
 import { clearLocalDataForUser } from "./library";
@@ -38,9 +39,17 @@ const SHELL_CACHE_PREFIX = "chapterline-shell-";
  */
 export const SIGN_OUT_DRAIN_TIMEOUT_MS = 8_000;
 
-/** A user write that was still on the device when the account left it. */
+/**
+ * A user write that was still on the device when the account left it.
+ *
+ * `"preferences"` is here for the one write that is not an outbox row: the
+ * player preference cache in localStorage, whose only record of an
+ * unacknowledged change is a flag inside the key `clearLocalDataForUser` is
+ * about to remove. A drain that enumerated only the outbox and the playback
+ * queue destroyed that write and told nobody.
+ */
 export type UndeliveredWrite = {
-  kind: MutationKind | "playback-action";
+  kind: MutationKind | "playback-action" | "preferences";
   entityId: string;
   queuedAt: number;
 };
@@ -292,7 +301,12 @@ export async function drainBeforeSignOut(
     listQueuedMutations(userId).catch(() => []),
     listPendingPlaybackActions(userId).catch(() => []),
   ]);
-  if (!queued.length && !actions.length) return [];
+  // Preferences are read synchronously from localStorage rather than from a
+  // store, and are enumerated here for exactly the reason the outbox is: this
+  // is the last moment the session cookie their PATCH needs is still valid,
+  // and the purge below deletes the key that holds them.
+  const preferences = listPendingPreferenceWrites(userId);
+  if (!queued.length && !actions.length && !preferences.length) return [];
 
   const timeoutMs = options.drainTimeoutMs ?? SIGN_OUT_DRAIN_TIMEOUT_MS;
   let expire: ReturnType<typeof setTimeout> | undefined;
@@ -305,6 +319,9 @@ export async function drainBeforeSignOut(
       : Promise.resolve(),
     actions.length
       ? replayPlaybackHistory(userId, options.fetchFn).catch(() => undefined)
+      : Promise.resolve(),
+    preferences.length
+      ? flushPendingPreferences(userId, options.fetchFn).catch(() => undefined)
       : Promise.resolve(),
   ]).then(() => undefined);
   try {
@@ -328,6 +345,7 @@ export async function drainBeforeSignOut(
       entityId: action.bookId,
       queuedAt: Date.parse(action.occurredAt) || 0,
     })),
+    ...listPendingPreferenceWrites(userId),
   ];
 }
 

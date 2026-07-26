@@ -504,6 +504,64 @@ describe("sign-out drains before it purges", () => {
     expect(await listQueuedMutations(USER_A)).toStrictEqual([]);
   });
 
+  /**
+   * A preference change is the one user write that is not an outbox row: its
+   * only record on the device is a flag in `chapterline:preferences:<userId>`,
+   * a key `clearLocalDataForUser` deletes as part of this very sweep. A drain
+   * that enumerated only the outbox and the playback queue therefore destroyed
+   * it and reported nothing.
+   */
+  function seedPendingPreference(userId: string, skipBackMs: number) {
+    storage.setItem(
+      `chapterline:preferences:${userId}`,
+      JSON.stringify({
+        preferences: {
+          skipBackMs,
+          skipForwardMs: 30_000,
+          smartRewind: true,
+          autoplayNextInCollection: false,
+        },
+        revision: 3,
+        pendingRevision: 3,
+        pendingSince: 1_772_000_000_000,
+      }),
+    );
+  }
+
+  it("delivers a pending preference change, which is journaled in no outbox", async () => {
+    const userId = "user-prefs-drain";
+    seedPendingPreference(userId, 45_000);
+    const sent: string[] = [];
+    const fetchFn = (async (url: RequestInfo | URL) => {
+      sent.push(String(url));
+      return ok();
+    }) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn });
+
+    expect(
+      sent,
+      "the pending preference change was never sent before its only record was deleted",
+    ).toContain("/api/preferences");
+    expect(outcome.undelivered).toStrictEqual([]);
+  });
+
+  it("reports a preference change the server would not take", async () => {
+    const userId = "user-prefs-lost";
+    seedPendingPreference(userId, 45_000);
+    const fetchFn = (async () => new Response(null, { status: 503 })) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn });
+
+    expect(
+      outcome.undelivered.map((write) => `${write.kind}:${write.entityId}`),
+      "a preference change was deleted from the device without a word to the user",
+    ).toStrictEqual([`preferences:${userId}`]);
+    // The privacy bar does not move to make room for the report: the key names
+    // the account, so it goes either way. Reporting it is the whole point.
+    expect(storage.getItem(`chapterline:preferences:${userId}`)).toBe(null);
+  });
+
   it("cannot be hung by a network that never answers", async () => {
     const userId = "user-hangs";
     await commitMetadataEdit({ userId, deviceId: "device-1" }, "book", { title: "Renamed" });
