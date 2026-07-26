@@ -231,13 +231,33 @@
   font-size: var(--text-xs);
 }
 
+/* One meta line per card: how long, how far in, and what it costs this device.
+   The status truncates before the size does — the number is the part that
+   cannot be inferred from anything else on the card. */
 .book-progress-copy {
   display: flex;
-  justify-content: space-between;
-  gap: 0.6rem;
+  align-items: center;
+  gap: 0.45rem;
   margin-top: 0.5rem;
   color: var(--text-muted);
   font-size: var(--text-2xs);
+}
+
+.book-progress-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-device-size {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .book-progress {
@@ -646,9 +666,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Every card says, plainly, whether the audio is here — and, when it is, how
-   much of the device it costs and how to take it back. This line wraps rather
-   than truncating: "re-import the MP3 to listen" is the whole point of it. */
+/* A card whose audio is missing still says so in words, and still says what to
+   do about it — the cover badge is clipped by the 4.5rem cover in list view, so
+   it cannot be the only marker. It wraps rather than truncating, because
+   "re-import the MP3 to listen" is the whole point of it. A card whose audio IS
+   here needs no sentence: its size sits in the meta line above. */
 .book-device {
   display: flex;
   align-items: start;
@@ -675,11 +697,10 @@
 
 .book-device-remove {
   display: grid;
-  width: 1.9rem;
-  height: 1.9rem;
+  width: 1.6rem;
+  height: 1.6rem;
   flex: 0 0 auto;
   place-items: center;
-  margin-left: auto;
   border: 0;
   border-radius: var(--radius-pill);
   background: transparent;

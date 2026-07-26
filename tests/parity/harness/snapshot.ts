@@ -14,8 +14,10 @@ export type BookCardSnapshot = {
   title: string;
   author: string;
   tags: string;
-  /** The literal sentence the card shows about this device holding the audio. */
+  /** The card's missing-audio sentence; empty when the audio IS on this device. */
   deviceLine: string;
+  /** The card's meta-line size marker, e.g. "5.4 GB on this device". */
+  deviceSize: string;
   onDevice: boolean;
   /** The "Not on device" badge over the cover. */
   offDeviceBadge: boolean;
@@ -125,15 +127,16 @@ export function readLibrary(page: Page): Promise<LibrarySnapshot> {
         title: text(card.querySelector(".book-title")),
         author: text(card.querySelector(".book-copy > p:not([class])")),
         tags: text(card.querySelector(".book-tags")),
+        // Only a card whose audio is MISSING carries a device sentence now; a
+        // card that has the audio states its size in the meta line instead.
         deviceLine: text(card.querySelector(".book-device")),
-        onDevice:
-          !!card.querySelector(".book-device") &&
-          !card.querySelector(".book-device.book-device-missing"),
+        deviceSize: text(card.querySelector(".book-device-size")),
+        onDevice: !!card.querySelector(".book-device-size"),
         offDeviceBadge: !!card.querySelector(".book-offdevice"),
         removeDownloadButton: !!card.querySelector(".book-device-remove"),
         playLink: !!card.querySelector("a.book-play-button"),
         playUnavailable: !!card.querySelector("span.book-play-unavailable"),
-        progress: text(card.querySelector(".book-progress-copy span")),
+        progress: text(card.querySelector(".book-progress-status")),
       })),
       noResults: noResults
         ? {

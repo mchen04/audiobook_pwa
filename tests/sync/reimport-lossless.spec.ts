@@ -122,7 +122,9 @@ test("re-importing an evicted book reconnects to the same book and restores ever
     // route answers 409 with `existingBookId`, and the media reattaches.
     await importThroughUi(page, path.basename(FIXTURE), bytes);
     await expect(
-      page.locator(".book-item", { hasText: FIXTURE_TITLE }).getByText(/On this device · /),
+      page
+        .locator(".book-item", { hasText: FIXTURE_TITLE })
+        .getByText(/^[\d.]+ (B|KB|MB|GB) on this device$/),
       "the re-import did not reattach the audio to this device",
     ).toBeVisible({ timeout: 60_000 });
 
@@ -435,7 +437,9 @@ test("an evicted book is recovered by re-import when the app chunks cannot be fe
       "the library lists the same audiobook more than once",
     ).toHaveCount(1);
     await expect(
-      page.locator(".book-item", { hasText: FIXTURE_TITLE }).getByText(/On this device · /),
+      page
+        .locator(".book-item", { hasText: FIXTURE_TITLE })
+        .getByText(/^[\d.]+ (B|KB|MB|GB) on this device$/),
       "the surviving row does not have the audio",
     ).toBeVisible({ timeout: 30_000 });
   } finally {

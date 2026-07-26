@@ -99,6 +99,8 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
    * a book needs no "am I online?" question anywhere.
    */
   const [fallbackBookId, setFallbackBookId] = useState(bookIdFromUrl);
+  /** Whether the library is one history entry back; see `leavePlayer`. */
+  const [cameFromLibrary] = useState(openedFromLibrary);
   const [pagination, setPagination] = useState({ key: "", pages: 1 });
 
   const { snapshot, preparing, firstSyncStatus, unavailable, reload, retry, removeDownload } =
@@ -144,6 +146,38 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   useEffect(() => {
     if (launchReady) markLaunchPainted();
   }, [launchReady]);
+
+  /**
+   * The URL, not a click, is what decides whether the player or the grid is on
+   * screen here — so every way it can change has to be followed, and the back
+   * button changes it without a click. `AppShell` and `MiniPlayer` already
+   * follow it through `usePathname()`; a book id read only at mount would
+   * leave the player up under a header and a mini player that had gone back to
+   * library chrome.
+   */
+  useEffect(() => {
+    const follow = () => setFallbackBookId(bookIdFromUrl());
+    window.addEventListener("popstate", follow);
+    return () => window.removeEventListener("popstate", follow);
+  }, []);
+
+  /**
+   * Leaving the player is a real `back()` whenever there is something to go
+   * back to: the entry is popped rather than overwritten, so the book stays
+   * ahead in history, forward still works, and this button and the system back
+   * button agree about where the library is. The `popstate` above is what then
+   * puts the grid on screen. A document opened straight at a book URL — a
+   * shared link, a bookmark — has only the browser behind it, so there the URL
+   * is rewritten in place rather than walking the user out of the app.
+   */
+  const leavePlayer = useCallback(() => {
+    if (cameFromLibrary) {
+      window.history.back();
+      return;
+    }
+    window.history.replaceState(null, "", "/library");
+    setFallbackBookId(null);
+  }, [cameFromLibrary]);
 
   useEffect(() => {
     if (!userId) return;
@@ -203,10 +237,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
         playerBook={asOfflinePlayerBook(playing)}
         offlineMode
         backLabel="Library"
-        onBack={() => {
-          window.history.replaceState(null, "", "/library");
-          setFallbackBookId(null);
-        }}
+        onBack={leavePlayer}
       />
     );
   }
@@ -544,6 +575,25 @@ function bookIdFromUrl(): string | null {
   return BOOK_PATH.exec(window.location.pathname)?.[1] || null;
 }
 
+/**
+ * Whether the library itself is the entry behind this document.
+ *
+ * Deliberately narrower than "came from this origin": the mini player links to
+ * a book from every screen that carries it, so a document opened from
+ * `/settings` has Settings one entry back, and a button labelled Library that
+ * went back would land somewhere it did not name.
+ */
+function openedFromLibrary(): boolean {
+  if (typeof document === "undefined" || !document.referrer) return false;
+  try {
+    const referrer = new URL(document.referrer);
+    if (referrer.origin !== window.location.origin) return false;
+    return referrer.pathname === "/" || referrer.pathname === "/library";
+  } catch {
+    return false;
+  }
+}
+
 function coverUrlFor(record: OfflineBook | undefined): string | undefined {
   return record ? record.offlineCoverThumbUrl || record.offlineCoverUrl || undefined : undefined;
 }
@@ -640,31 +690,43 @@ const BookItem = memo(function BookItem({
           </p>
         )}
         {book.tags.length > 0 && <p className="book-tags">{book.tags.join(" · ")}</p>}
-        {record ? (
-          <p className="book-device">
-            <DownloadSimple size={14} aria-hidden="true" />
-            <span>On this device · {formatBytes(record.byteSize)}</span>
-            <button
-              type="button"
-              className="book-device-remove"
-              aria-label={`Remove download of ${book.title}`}
-              title="Remove the audio from this device. The book, its progress and its history stay."
-              onClick={() => onRemoveDownload(book.id)}
-            >
-              <Trash size={15} aria-hidden="true" />
-            </button>
-          </p>
-        ) : (
+        {!record && (
           <p className="book-device book-device-missing" title={MISSING_MEDIA_HINT}>
             <CloudSlash size={14} aria-hidden="true" />
             <span>Not on this device — re-import the MP3 to listen</span>
           </p>
         )}
+        {/* Duration, progress and what the audio costs this device are one
+            line, not three. On a two-column phone grid the old standalone
+            "On this device · 5.4 GB" row wrapped and pushed the progress bar
+            most of a card-height further down; the facet chip and the icon
+            here already say what "on this device" meant, so only the number
+            it carried is worth the room. */}
         <div className="book-progress-copy">
-          <span>
+          <span className="book-progress-status">
             {book.durationMs ? `${formatDurationRounded(book.durationMs)} • ` : ""}
             {book.completed ? "Finished" : percent ? `${percent}%` : "Not started"}
           </span>
+          {record && (
+            <>
+              <span className="book-device-size">
+                <DownloadSimple size={13} aria-hidden="true" />
+                <span>{formatBytes(record.byteSize)}</span>
+                {/* The number alone means nothing read aloud, and the leading
+                    space keeps the element's text reading as one phrase. */}
+                <span className="visually-hidden">{" on this device"}</span>
+              </span>
+              <button
+                type="button"
+                className="book-device-remove"
+                aria-label={`Remove download of ${book.title}`}
+                title="Remove the audio from this device. The book, its progress and its history stay."
+                onClick={() => onRemoveDownload(book.id)}
+              >
+                <Trash size={14} aria-hidden="true" />
+              </button>
+            </>
+          )}
         </div>
         <div
           className="book-progress"

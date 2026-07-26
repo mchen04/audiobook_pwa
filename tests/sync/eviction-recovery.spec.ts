@@ -140,7 +140,7 @@ test("mirror evicted: the library metadata re-pulls from Postgres and comes back
     expect(recovered.chapters.length, "the book's chapters did not come back").toBeGreaterThan(0);
     // The audio was never involved, so the book is still playable here.
     await expect(
-      bookCard(page, "Renamed Before Eviction").getByText(/On this device · /),
+      bookCard(page, "Renamed Before Eviction").getByText(/^[\d.]+ (B|KB|MB|GB) on this device$/),
       "the audio was never evicted here, so the book must still be playable on this device",
     ).toBeVisible();
     expect(await mediaCacheEntries(page)).toBeGreaterThan(0);
@@ -190,7 +190,7 @@ test("audio evicted: the book stays visible, never looks playable, and says to r
       bookCard(page).getByRole("button", { name: /Remove download/ }),
       "the card still offers to remove a download that no longer exists",
     ).toHaveCount(0);
-    await expect(bookCard(page).getByText(/On this device · /)).toHaveCount(0);
+    await expect(bookCard(page).getByText(/^[\d.]+ (B|KB|MB|GB) on this device$/)).toHaveCount(0);
 
     // 5. The stale download record is reconciled away rather than left to make
     //    the book look playable on the next launch.
