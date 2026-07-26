@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
 
+import { awaitSignInBudget } from "../../shared/sign-in-budget";
 import { assertLocalDatabase } from "../../../scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "../../../scripts/lib/env-file.mjs";
 
@@ -120,6 +121,9 @@ export async function sharedSession(
     return { account: sharedAccount, storageState: sharedStorageState };
   }
 
+  // The limiter is in the server and does not care which suite spent the
+  // attempts, so this shares one on-disk window with the parity suite.
+  await awaitSignInBudget("sync");
   const context = await browser.newContext({ serviceWorkers: "allow" });
   try {
     const page = await context.newPage();

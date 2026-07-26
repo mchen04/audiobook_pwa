@@ -241,6 +241,23 @@ number as wifi.
 
 Icon tap → painted content:
 
+0. The install handler declares a **static route** for the manifest's
+   `start_url` (`/library?source=pwa`), so the browser answers that one
+   navigation straight from Cache Storage **without starting the service worker
+   at all**. This exists because booting a worker to ask it about a navigation
+   makes Chromium hedge the wait by speculatively fetching the same document:
+   the paint never waits for it, but the server renders `/library` and runs its
+   queries on every cold launch and the answer is discarded.
+
+   Two details are load-bearing, because a routing **miss goes to the network**
+   rather than falling back to the `fetch` handler. The condition matches the
+   start_url exactly — pathname *and* search — so every other navigation is left
+   to `serveNavigation`, which is not query-sensitive; and `precacheShell`
+   stores the shell under that exact key so the lookup hits. Writing the rule
+   for a bare `/library` put the whole launch document back on the wire
+   (measured: 5.4 KB per launch, cold-database p95 3426ms). `addRoutes` is
+   Chromium-only and guarded; elsewhere step 1 is unchanged and authoritative.
+
 1. The service worker serves the `/library` document **from Cache Storage,
    cache-first**. No network on the critical path, so no network profile can
    change this step's cost.
@@ -278,7 +295,16 @@ Session handling under a cached shell:
 Consequences that must hold:
 
 - **Zero Postgres queries on the warm-launch critical paint path.** Proven by a
-  query counter around the postgres client, not by argument.
+  query counter around the postgres client, not by argument. The benchmark also
+  asserts zero server document requests of any kind during a launch, which is
+  stricter: it catches a request the paint does not wait for but the server
+  still pays for, which is exactly how the speculative preload above was found.
+- **The launch must paint the user's real library, not merely something.** The
+  benchmark asserts the readiness marker says `books`, counts the rendered
+  cards, and requires the document to arrive as `cache-storage` with an empty
+  transfer. Without that last part a device whose mirror had been evicted
+  painted "Bring your first audiobook" to an account owning 1000 books and
+  scored the best numbers ever recorded.
 - First install has no cache, so it must race the network against a bounded
   timeout rather than hanging on a fetch that a weak-but-alive connection will
   never reject. The current unbounded `fetch(request).catch(...)` is exactly the

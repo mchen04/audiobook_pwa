@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { awaitSignInBudget, burnSignInWindow } from "../../shared/sign-in-budget";
 import { assertLocalDatabase } from "../../../scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "../../../scripts/lib/env-file.mjs";
 // Reused, not re-implemented: the sync suite already owns the local-database
@@ -135,59 +136,6 @@ export const ACCOUNT_B: AccountSpec = {
  *     will not clear is still surfaced explicitly, so a throttled run reads as a
  *     harness problem and never as a product failure.
  */
-const SIGN_IN_WINDOW_MS = 60_000;
-/**
- * Five, against the limiter's eight. The remaining three are headroom for the
- * other suites that share this server — and for the retry below.
- */
-const SIGN_IN_BUDGET = 5;
-/**
- * The window is kept ON DISK, not in memory.
- *
- * Playwright starts a fresh worker after every failing test and re-runs this
- * module from scratch, and back-to-back runs share one app process. An
- * in-memory counter forgets both, while `better-auth`'s limiter — which lives
- * in the server, not here — remembers. Persisting it is what stops a second run
- * inside a minute from being throttled and reported as product failure.
- */
-const SIGN_IN_LOG = path.join(tmpdir(), "hark-parity-signins.json");
-
-function readSignInLog(): number[] {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(SIGN_IN_LOG, "utf8"));
-    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "number") : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeSignInLog(times: number[]): void {
-  try {
-    writeFileSync(SIGN_IN_LOG, JSON.stringify(times), "utf8");
-  } catch {
-    // Losing the log only costs a throttled attempt, which retries below.
-  }
-}
-
-async function awaitSignInBudget(): Promise<void> {
-  for (;;) {
-    const now = Date.now();
-    const times = readSignInLog().filter((at) => now - at <= SIGN_IN_WINDOW_MS);
-    if (times.length < SIGN_IN_BUDGET) {
-      writeSignInLog([...times, now]);
-      return;
-    }
-    const waitMs = SIGN_IN_WINDOW_MS - (now - times[0]!) + 750;
-    console.log(`[parity] pausing ${Math.ceil(waitMs / 1000)}s to stay inside the sign-in limit`);
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-  }
-}
-
-/** Marks the window as spent, so the next attempt waits a full one out. */
-function burnSignInWindow(): void {
-  const now = Date.now();
-  writeSignInLog(Array.from({ length: SIGN_IN_BUDGET }, () => now));
-}
 
 export async function findUserId(email: string): Promise<string | null> {
   const [row] = await sql()<{ id: string }[]>`
@@ -252,7 +200,7 @@ export async function signInThroughUi(page: Page, account: Account): Promise<voi
   const net = await network();
   const attempts = 3;
   for (let attempt = 1; ; attempt += 1) {
-    await awaitSignInBudget();
+    await awaitSignInBudget("parity");
     await page.goto(`${net.origin}/login`, { waitUntil: "domcontentloaded" });
     await page.getByLabel("Email").fill(account.email);
     await page.getByLabel("Password").fill(account.password);
