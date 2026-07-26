@@ -230,6 +230,13 @@ export type Row = {
   hiddenTransition: HiddenTransition;
   /** What the page's OWN handler read from `document.visibilityState`. */
   visibilityAtCallback: string | null;
+  /**
+   * Lifecycle registrations the harness DROPPED before the app could make them
+   * (see `LIFECYCLE_BLOCK_SCRIPT`). Empty on every ordinary row. A backstop row
+   * whose list is empty measured an app with all its handlers intact and proves
+   * nothing about the no-callback world.
+   */
+  lifecycleBlocked: string[];
   settleMs: number;
   settleTrail: number[];
   playbackRateBefore: number;
@@ -508,6 +515,55 @@ function poisonScript(): string | null {
   }
   throw new Error(`unknown HARK_RESUME_POISON value: ${process.env.HARK_RESUME_POISON}`);
 }
+
+/**
+ * Kills every lifecycle callback the app can subscribe to, so what is left is
+ * the 200 ms cadence and nothing else.
+ *
+ * WHY THIS EXISTS. T1 asks "does the app survive being backgrounded?" and this
+ * instrument cannot answer it: Playwright/WebKit exposes no way to make a page
+ * genuinely report `visibilityState === "hidden"` (measured — no
+ * `setActivityState` in `playwright-core`, and a second page plus
+ * `bringToFront` leaves the first at `"visible"`), so `assertHiddenIsReal`
+ * records that cell as an engine GAP and it stays one.
+ *
+ * But the user-facing question underneath T1 is not "does the handler fire?".
+ * It is "if the handler never fires at all, how much do I lose?" — and THAT is
+ * answerable here, because the answer does not depend on the platform
+ * delivering anything. Deleting every handler and measuring what the cadence
+ * alone preserves bounds the residual from above: on a real iPhone the callback
+ * either arrives (in which case the drift is the one T1 already measures with
+ * the handler alive) or it does not (in which case it is this one). Neither
+ * branch is unmeasured.
+ *
+ * WHAT IT DOES NOT COVER, and must never be read as covering: iOS may also
+ * freeze the timer when it freezes the page. This bounds "no callback"; it does
+ * not bound "no callback and no timer". That cell stays UNCOVERED.
+ *
+ * HOW IT STAYS HONEST. It patches `EventTarget.prototype.addEventListener`, so
+ * it drops registrations made AFTER it runs. The oracle's own probe registers
+ * in `PROBE_SCRIPT`, which is added to the context first and therefore runs
+ * first — so the journal still records that the platform DELIVERED the
+ * callback, while the app never sees it. Every dropped type is pushed onto
+ * `window.__lifecycleBlocked`, which every row carries: a run where the app
+ * registered nothing would mean the poison bit nothing, and a green from it
+ * would be vacuous.
+ */
+const LIFECYCLE_BLOCK_SCRIPT = `
+(() => {
+  const doomed = new Set(["visibilitychange", "pagehide", "beforeunload", "unload", "freeze"]);
+  const blocked = [];
+  window.__lifecycleBlocked = blocked;
+  const original = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (typeof type === "string" && doomed.has(type)) {
+      blocked.push(type);
+      return undefined;
+    }
+    return original.call(this, type, listener, options);
+  };
+})();
+`;
 
 // ---------------------------------------------------------------------------
 // Account, network, golden profile
@@ -1031,6 +1087,24 @@ export async function closeResumeFixture(): Promise<void> {
  */
 let deviceMediaBroken = false;
 
+/**
+ * Wall-clock instant the SIGKILL was actually issued, in the driving process.
+ *
+ * The true position is a sample carried forward across an interval, so which
+ * instant the interval ENDS at is part of the measurement, not bookkeeping.
+ * `hardKill` shells out to `/bin/ps -Ao pid=,command=` to find the renderer,
+ * and on a loaded machine that scan is not free — MEASURED, during a full
+ * 19-row pass: a row extrapolated to the moment the kill was REQUESTED read
+ * 900 ms AHEAD of where the app came back, because the audio went on playing,
+ * and the 200 ms cadence went on writing, for the whole length of that scan.
+ * The same row standalone read 16 ms.
+ *
+ * "Resumed ahead" is the most serious verdict this suite has, and it was being
+ * manufactured by the instrument's own latency. So the extrapolation ends where
+ * the process really died: here, one statement before the signal.
+ */
+let lastKillAtMs = 0;
+
 function hardKill(): string[] {
   const pids = renderPids().filter((pid) => !foreignRenderPids.has(pid));
   expect(
@@ -1038,6 +1112,7 @@ function hardKill(): string[] {
     `no ${ENGINE} renderer process started by this run was found, so nothing was hard-killed and ` +
       "the measurement below would be grading a graceful shutdown",
   ).toBeGreaterThan(0);
+  lastKillAtMs = Date.now();
   for (const pid of pids) {
     try {
       process.kill(Number(pid), "SIGKILL");
@@ -1359,6 +1434,217 @@ async function readLifecycle(page: Page): Promise<string[]> {
   }, LIFECYCLE_KEY);
 }
 
+/** The audio element's own position, in milliseconds. -1 when there is none. */
+async function readAudioPositionMs(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const audio = document.querySelector("audio");
+    return audio ? audio.currentTime * 1000 : -1;
+  });
+}
+
+/** One unsent progress row as it sits in the outbox. */
+export type QueuedProgressRow = {
+  positionMs: number | null;
+  eventOccurredAt: string | null;
+  completed: boolean | null;
+  deviceId: string | null;
+  deviceSequence: number | null;
+};
+
+/**
+ * What the outbox is holding for one book, read straight out of
+ * `chapterline-sync-v1`.
+ *
+ * `indexedDB.databases()` is asked FIRST rather than opening blind: a bare
+ * `indexedDB.open(name)` CREATES an empty version-1 database when the name does
+ * not exist yet, and the app would then run its v1→v5 upgrade against a
+ * database this test invented. Reading must not be able to change what is being
+ * read.
+ */
+async function readQueuedProgress(
+  page: Page,
+  userId: string,
+  bookId: string,
+): Promise<QueuedProgressRow[]> {
+  return page.evaluate(
+    ([user, book]) =>
+      new Promise<QueuedProgressRow[]>((resolve) => {
+        void (async () => {
+          const names = (await indexedDB.databases?.().catch(() => [])) ?? [];
+          if (!names.some((entry) => entry.name === "chapterline-sync-v1")) return resolve([]);
+          const request = indexedDB.open("chapterline-sync-v1");
+          request.onerror = () => resolve([]);
+          request.onsuccess = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains("mutations")) return resolve([]);
+            const all = db.transaction("mutations").objectStore("mutations").getAll();
+            all.onerror = () => resolve([]);
+            all.onsuccess = () => {
+              const rows = (all.result as Array<Record<string, never>>)
+                .filter(
+                  (row) =>
+                    (row as { userId?: string }).userId === user &&
+                    (row as { kind?: string }).kind === "progress" &&
+                    (row as { entityId?: string }).entityId === book,
+                )
+                .map((row) => {
+                  const payload = ((row as { payload?: Record<string, unknown> }).payload ??
+                    {}) as Record<string, unknown>;
+                  return {
+                    positionMs: typeof payload.positionMs === "number" ? payload.positionMs : null,
+                    eventOccurredAt:
+                      typeof payload.eventOccurredAt === "string" ? payload.eventOccurredAt : null,
+                    completed: typeof payload.completed === "boolean" ? payload.completed : null,
+                    deviceId: (row as { deviceId?: string }).deviceId ?? null,
+                    deviceSequence: (row as { deviceSequence?: number }).deviceSequence ?? null,
+                  };
+                });
+              resolve(rows);
+            };
+          };
+        })();
+      }),
+    [userId, bookId] as const,
+  );
+}
+
+/** This device's durable local record for one book, exactly as written. */
+export type LocalRecord = {
+  positionMs: number | null;
+  occurredAt: number | null;
+  completed: boolean | null;
+  playbackRate: number | null;
+};
+
+async function readLocalRecord(page: Page, userId: string, bookId: string): Promise<LocalRecord> {
+  return page.evaluate(
+    ([user, book]) => {
+      const empty = {
+        positionMs: null,
+        occurredAt: null,
+        completed: null,
+        playbackRate: null,
+      };
+      try {
+        const raw = localStorage.getItem(`chapterline:position:${user}:${book}`);
+        if (!raw) return empty;
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        return {
+          positionMs: typeof parsed.positionMs === "number" ? parsed.positionMs : null,
+          occurredAt: typeof parsed.occurredAt === "number" ? parsed.occurredAt : null,
+          completed: typeof parsed.completed === "boolean" ? parsed.completed : null,
+          playbackRate: typeof parsed.playbackRate === "number" ? parsed.playbackRate : null,
+        };
+      } catch {
+        return empty;
+      }
+    },
+    [userId, bookId] as const,
+  );
+}
+
+/** The mirror's own completion flag for one book — the shelf's witness. */
+async function readMirrorCompleted(
+  page: Page,
+  userId: string,
+  bookId: string,
+): Promise<boolean | null> {
+  return page.evaluate(
+    ([user, book]) =>
+      new Promise<boolean | null>((resolve) => {
+        const request = indexedDB.open("chapterline-offline-v1");
+        request.onerror = () => resolve(null);
+        request.onsuccess = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains("playbackStates")) return resolve(null);
+          const all = db.transaction("playbackStates").objectStore("playbackStates").getAll();
+          all.onerror = () => resolve(null);
+          all.onsuccess = () => {
+            const match = (all.result as Array<Record<string, unknown>>).find(
+              (row) => row.bookId === book && (row.userId === undefined || row.userId === user),
+            );
+            resolve(match && typeof match.completed === "boolean" ? match.completed : null);
+          };
+        };
+      }),
+    [userId, bookId] as const,
+  );
+}
+
+/**
+ * Puts one book back to "never opened", everywhere this device or the server
+ * could remember it.
+ *
+ * This is ISOLATION, not a relaxed fixture: `measure()` already deletes the
+ * server row for the same reason. The rows share three ~24 s books and each one
+ * starts wherever the last left off, so a scenario that needs sixteen seconds
+ * of headroom has to be given a book at zero or it silently measures the end of
+ * the fixture instead of the thing it is named after. Every witness is cleared
+ * together — server row, this device's durable local record, the mirror the
+ * shelf renders from, the pause marker the rewind ladder reads, and any unsent
+ * outbox row — because leaving one behind is how a "reset" book comes back
+ * carrying a position from two scenarios ago.
+ */
+async function resetBookEverywhere(page: Page, userId: string, bookId: string): Promise<void> {
+  await sql()`DELETE FROM playback_states WHERE book_id = ${bookId}`;
+  await page.evaluate(
+    ([user, book]) =>
+      new Promise<void>((resolve) => {
+        void (async () => {
+          try {
+            localStorage.removeItem(`chapterline:position:${user}:${book}`);
+            localStorage.removeItem(`chapterline:last-paused-at:${user}:${book}`);
+          } catch {
+            /* storage blocked; the stores below are still worth clearing */
+          }
+          const names = (await indexedDB.databases?.().catch(() => [])) ?? [];
+          const clear = (dbName: string, store: string, matches: (row: unknown) => boolean) =>
+            new Promise<void>((done) => {
+              if (!names.some((entry) => entry.name === dbName)) return done();
+              const request = indexedDB.open(dbName);
+              request.onerror = () => done();
+              request.onsuccess = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains(store)) return done();
+                const transaction = db.transaction(store, "readwrite");
+                const cursorRequest = transaction.objectStore(store).openCursor();
+                cursorRequest.onerror = () => done();
+                cursorRequest.onsuccess = () => {
+                  const cursor = cursorRequest.result;
+                  if (!cursor) return;
+                  if (matches(cursor.value)) cursor.delete();
+                  cursor.continue();
+                };
+                transaction.oncomplete = () => done();
+                transaction.onerror = () => done();
+                transaction.onabort = () => done();
+              };
+            });
+          await clear("chapterline-offline-v1", "playbackStates", (row) => {
+            const entry = row as { bookId?: string; userId?: string };
+            return entry.bookId === book && (entry.userId === undefined || entry.userId === user);
+          });
+          await clear("chapterline-sync-v1", "mutations", (row) => {
+            const entry = row as { userId?: string; kind?: string; entityId?: string };
+            return entry.userId === user && entry.kind === "progress" && entry.entityId === book;
+          });
+          resolve();
+        })();
+      }),
+    [userId, bookId] as const,
+  );
+}
+
+/** Postgres' view of one book's progress. The row the server would serve. */
+async function readServerProgress(
+  bookId: string,
+): Promise<{ positionMs: number; completed: boolean } | null> {
+  const [row] = await sql()<{ position_ms: number; completed: boolean }[]>`
+    SELECT position_ms, completed FROM playback_states WHERE book_id = ${bookId}
+  `;
+  return row ? { positionMs: Number(row.position_ms), completed: row.completed } : null;
+}
+
 /**
  * `rewindForAbsence` from `src/lib/playback-core.ts`, restated so the oracle
  * grades against the CONTRACT rather than against the implementation.
@@ -1474,12 +1760,32 @@ export type ScenarioSpec = {
   rewindBeforeTermination?: boolean;
   /** Open the player from the library grid instead of by URL. */
   openFromLibrary?: boolean;
+  /**
+   * Delete every lifecycle callback the app could subscribe to on the session
+   * that is about to be terminated, so the row measures what the 200 ms cadence
+   * preserves ON ITS OWN. See `LIFECYCLE_BLOCK_SCRIPT`.
+   */
+  killLifecycleHandlers?: boolean;
+  /**
+   * Put the book back to "never opened" on every witness before the row runs.
+   *
+   * `measure()` clears the SERVER row for isolation but deliberately leaves this
+   * device's local position alone — a row starting where the last one stopped is
+   * also what a real phone does, and it is recorded as `startedAtMs`. That is
+   * fine for a row that needs 8.5 s of a 24 s book and it is NOT fine for a row
+   * that needs the position it ends at to be meaningful: in a full pass the
+   * shared books are worn down and the row measures the end of the fixture.
+   * Rows that need known headroom ask for it here.
+   */
+  resetBookFirst?: boolean;
 };
 
 const LEDGER =
   process.env.HARK_RESUME_LEDGER ?? path.join(tmpdir(), "hark-resume-oracle", "rows.jsonl");
 
-export function recordRow(row: Row | CumulativeRow | CrossBookRow): void {
+export function recordRow(
+  row: Row | CumulativeRow | CrossBookRow | StaleAheadRow | CompletionRow | TwoDeviceRow,
+): void {
   mkdirSync(path.dirname(LEDGER), { recursive: true });
   appendFileSync(LEDGER, `${JSON.stringify(row)}\n`, "utf8");
   console.log(`[resume-oracle] ${JSON.stringify(row)}`);
@@ -1611,6 +1917,24 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
   let session = await launch();
   let killed = false;
   try {
+    // Before the first navigation, so the app's own registrations are the ones
+    // dropped and the probe's (added to the context, and therefore run first)
+    // are not.
+    if (spec.killLifecycleHandlers) {
+      await session.page.addInitScript({ content: LIFECYCLE_BLOCK_SCRIPT });
+    }
+    if (spec.resetBookFirst) {
+      await session.page.goto(`${origin}/library`, {
+        waitUntil: "domcontentloaded",
+        timeout: 90_000,
+      });
+      await session.page.waitForSelector("[data-launch-ready]", {
+        state: "attached",
+        timeout: 90_000,
+      });
+      await resetBookEverywhere(session.page, userId, bookId);
+      notes.push("the book was reset on every witness before this row ran");
+    }
     if (spec.openFromLibrary) {
       await session.page.goto(`${origin}/library`, { waitUntil: "domcontentloaded" });
       await session.page.waitForSelector("[data-launch-ready]", { state: "attached" });
@@ -1667,6 +1991,10 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
         positionMs: audio ? audio.currentTime * 1000 : -1,
         paused: audio?.paused ?? true,
         ticks: probe?.ticks ?? 0,
+        // Read from the page that is about to die, so a backstop row carries
+        // proof that the app really did try to register the handlers this run
+        // took away from it.
+        blocked: (window as unknown as { __lifecycleBlocked?: string[] }).__lifecycleBlocked ?? [],
         // The page's own clock, so a position can be carried forward to an
         // instant the PAGE timestamped (its unload) rather than to one this
         // process timestamped.
@@ -1715,8 +2043,12 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       // pagehide the page had demonstrably handled. Reading before the kill is
       // what keeps "the callback fired" an observation rather than a coin flip.
       lifecycle = await readLifecycle(session.page);
-      truePositionMs = sample.positionMs + (Date.now() - sampleReturnedAt) * rate;
-      await expectPageDead(session.page, hardKill());
+      // Killed FIRST, then extrapolated to the instant the signal went out.
+      // `hardKill` scans the process table to find the renderer, and the audio
+      // plays on for the whole length of that scan — see `lastKillAtMs`.
+      const killedPids = hardKill();
+      truePositionMs = sample.positionMs + (lastKillAtMs - sampleReturnedAt) * rate;
+      await expectPageDead(session.page, killedPids);
       killed = true;
     } else if (spec.termination === "hard-kill") {
       // Read the live page BEFORE the kill for the same reason as above: an
@@ -1724,8 +2056,9 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       // did not survive". This read is what makes the 1000 ms bar's precondition
       // an observation rather than an assumption.
       lifecycle = await readLifecycle(session.page);
-      truePositionMs = sample.positionMs + (Date.now() - sampledAt) * rate;
-      await expectPageDead(session.page, hardKill());
+      const killedPids = hardKill();
+      truePositionMs = sample.positionMs + (lastKillAtMs - sampledAt) * rate;
+      await expectPageDead(session.page, killedPids);
       killed = true;
     } else if (
       spec.termination === "nav-then-hard-kill" ||
@@ -1770,14 +2103,35 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
         };
       });
       if (!playingAtTermination.present || playingAtTermination.paused) {
-        // Use what the element really reached rather than extrapolating past it.
-        truePositionMs = playingAtTermination.present ? playingAtTermination.at : sample.positionMs;
+        // The element stopped. Its own last value is the honest true position —
+        // BUT only while it still has one.
+        //
+        // MEASURED, full 19-row pass: leaving the player tore the element down
+        // instead of leaving it playing (`currentSrc: ""`, `src` attribute gone),
+        // which zeroes `currentTime`. Reading that zero as "where the user was"
+        // gave T7 `truePositionMs: 0` against a resume of 18651 ms and reported
+        // an 18-second drift for a build that had done nothing wrong. A torn-down
+        // element is the ABSENCE of evidence, so it is treated as absent: the
+        // fallback is the position sampled while the audio was demonstrably
+        // playing, which is a lower bound, and the row says so.
+        const tornDown =
+          playingAtTermination.present && playingAtTermination.at < sample.positionMs - 1_000;
+        truePositionMs =
+          playingAtTermination.present && !tornDown ? playingAtTermination.at : sample.positionMs;
         notes.push(
-          "the audio was not playing at the moment of termination, so the true position is the " +
-            "element's own last value rather than an extrapolation",
+          tornDown
+            ? "the audio element was TORN DOWN by the navigation (its currentTime collapsed to " +
+                `${Math.round(playingAtTermination.at)}ms from a sampled ` +
+                `${Math.round(sample.positionMs)}ms), so its value is not evidence of anything. ` +
+                "The true position here is the last position observed while it was demonstrably " +
+                "playing, which is a LOWER bound: the element may have run on for up to the " +
+                "length of the navigation before it was destroyed."
+            : "the audio was not playing at the moment of termination, so the true position is " +
+                "the element's own last value rather than an extrapolation",
         );
       }
-      await expectPageDead(session.page, hardKill());
+      const killedPids = hardKill();
+      await expectPageDead(session.page, killedPids);
       killed = true;
     } else if (spec.termination === "reload") {
       await session.page.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
@@ -1961,6 +2315,7 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       lifecycle,
       hiddenTransition,
       visibilityAtCallback,
+      lifecycleBlocked: sample.blocked,
       settleMs: settled.settleMs,
       settleTrail: settled.trail,
       playbackRateBefore: rate,
@@ -2259,5 +2614,912 @@ export async function measureCrossBookAbsence(spec: {
     net.restore();
     await session.page.close().catch(() => undefined);
     await healDevice(origin, media);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// S1 — the stale queued position that outlives the write meant to replace it
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the skip-ahead trap, graded on the SERVER as well as the client.
+ *
+ * The fields are deliberately raw. The interesting failure is a disagreement
+ * between four independent records of "where the user is" — the audio element
+ * at the instant of the kill, this device's durable local record, the unsent
+ * row in the outbox, and the row Postgres ends up holding — and a summary that
+ * folded them together could not show which one lied.
+ */
+export type StaleAheadRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  bookTitle: string;
+  ticks: number;
+  playedMs: number;
+  /** The high-water mark this session reached, before the skip back. */
+  advancedToMs: number;
+  /** What "Back N seconds" is on this build, read off the control's own label. */
+  skipBackMs: number;
+  /** The outbox's row for this book, sampled just BEFORE the skip. */
+  queuedBeforeSkipMs: number | null;
+  /**
+   * The outbox's row for this book AFTER the kill, read on the restore stub —
+   * a same-origin document that runs no app code, so nothing has replayed or
+   * rewritten it yet. This is the value replay is about to deliver.
+   */
+  queuedAfterKillMs: number | null;
+  queuedAfterKillOccurredAt: string | null;
+  queuedAfterKillCount: number;
+  /** The durable local record that survived the kill. */
+  localAfterKillMs: number | null;
+  localAfterKillOccurredAt: number | null;
+  /** Sampled off the element and carried forward to the instant of the SIGKILL. */
+  truePositionMs: number;
+  /**
+   * How long the debounced post-rewind server write had to fire before the
+   * process died. It must be under the 800 ms seek debounce: if that write
+   * lands, it coalesces over the stale row and the trap was never armed.
+   */
+  skipToKillMs: number;
+  /** `queuedAfterKill - true`: how far ahead the thing about to be replayed is. */
+  armedAheadMs: number | null;
+  /** Postgres after the relaunch drained the queue. */
+  serverPositionMs: number | null;
+  /** `server - true`. Positive means the server is serving content the user has not heard. */
+  serverAheadMs: number | null;
+  serverCompleted: boolean | null;
+  outboxDrained: boolean;
+  /** Where THIS device came back, which `localWinsOver` may protect on its own. */
+  resumedPositionMs: number;
+  resumedAheadMs: number;
+  shelf: ShelfReading;
+  lifecycle: string[];
+  notes: string[];
+};
+
+/**
+ * The ~12 second skip, end to end, in the engine of record.
+ *
+ * MECHANISM (measured before the fix: Postgres holding 15245 ms against a true
+ * position of 3231 ms). The 15 s server heartbeat journals the position it sees
+ * into the outbox. The user then presses "Back 15 seconds", which makes the
+ * local record durable AT ONCE but only schedules the matching server write
+ * 800 ms later. A SIGKILL inside that window takes the second write and leaves
+ * the first, and replay delivers the stale row verbatim — carrying its ORIGINAL
+ * `eventOccurredAt`, which the server compares against what IT holds rather
+ * than against what the device knows. Postgres ends up authoritative for a
+ * position the user rewound away from.
+ *
+ * WHY THE SERVER IS THE ASSERTION. On the device that made the mess, the damage
+ * is invisible: its own local record is newer and `localWinsOver` prefers it, so
+ * the player comes back in the right place. The row still records that, because
+ * a client that ALSO skipped would be a worse failure. But the user this hurts
+ * is the one on a second device, a fresh install, or cleared storage — for whom
+ * the server is the only witness, and it is holding twelve seconds of a book
+ * they have not heard.
+ *
+ * The trap has to be armed for the row to mean anything, and "armed" is not
+ * assumed: the queued position is read twice (before the skip, and after the
+ * kill from a document that runs no app code), and the interval between the
+ * skip and the kill is measured against the debounce it has to beat.
+ */
+export async function measureStaleAheadReplay(spec: {
+  scenario: string;
+  bookIndex: number;
+  /**
+   * Playback before the skip. Must exceed the 15 s heartbeat interval, or the
+   * only queued row is the one minted at position ~0 and there is nothing ahead
+   * to replay.
+   */
+  playMs?: number;
+}): Promise<StaleAheadRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books, durationMs } = active!;
+  const bookTitle = bookTitleFor(spec.bookIndex);
+  const book = books.get(bookTitle);
+  expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
+  const bookId = book!.id;
+  const playMs = spec.playMs ?? 16_500;
+  const notes: string[] = [];
+
+  net.restore();
+  net.reset();
+
+  let media: CacheSnapshot | null = null;
+  let session = await launch();
+  try {
+    await session.page.goto(`${origin}/library`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await session.page.waitForSelector("[data-launch-ready]", {
+      state: "attached",
+      timeout: 90_000,
+    });
+    await resetBookEverywhere(session.page, userId, bookId);
+    await openPlayer(session.page, origin, bookId, bookTitle);
+    media = await snapshotCaches(session.page);
+
+    const openedAtMs = await readAudioPositionMs(session.page);
+    expect(
+      openedAtMs,
+      `${spec.scenario}: the book opened at ${Math.round(openedAtMs)}ms after being reset to ` +
+        "zero, so something this scenario does not control is still holding a position for it " +
+        "and the headroom below cannot be trusted",
+    ).toBeLessThan(1_000);
+    expect(
+      playMs + openedAtMs,
+      `${spec.scenario}: ${playMs}ms of playback would run past the end of a ${durationMs}ms ` +
+        "book. A finished book restarts from zero by design, so the skip below would have " +
+        "nothing to skip back FROM and the row would measure fixture exhaustion.",
+    ).toBeLessThan(durationMs - BOOK_END_EPSILON_FOR_FIXTURE_MS);
+
+    // Offline is what puts the heartbeat in the OUTBOX rather than on the wire.
+    // An accepted PATCH leaves no unsent intent, and there is then nothing for
+    // replay to deliver stale.
+    net.cut();
+    await proveOffline(session.page, origin);
+
+    const { startedAtMs } = await playForReal(session.page, playMs);
+    const advancedToMs = await readAudioPositionMs(session.page);
+
+    const queuedBefore = await readQueuedProgress(session.page, userId, bookId);
+    const queuedBeforeSkipMs = queuedBefore[0]?.positionMs ?? null;
+
+    const backControl = session.page.getByRole("button", { name: /^Back \d+ seconds$/ });
+    const label = await backControl.getAttribute("aria-label");
+    const skipBackMs = Number(/Back (\d+) seconds/.exec(label ?? "")?.[1] ?? 0) * 1_000;
+    expect(
+      skipBackMs,
+      `${spec.scenario}: the skip-back control's label ("${label}") does not name a number of ` +
+        "seconds, so the size of the rewind this row depends on is unknown",
+    ).toBeGreaterThan(0);
+
+    const lifecycleBeforeKill = await readLifecycle(session.page);
+    const skippedAt = Date.now();
+    await backControl.click();
+    // Long enough for the seek and the SYNCHRONOUS local write, short enough
+    // that the 800 ms debounced server write has not fired.
+    await session.page.waitForTimeout(120);
+
+    const sample = await session.page.evaluate(() => {
+      const audio = document.querySelector("audio");
+      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      return {
+        positionMs: audio ? audio.currentTime * 1000 : -1,
+        paused: audio?.paused ?? true,
+        rate: audio?.playbackRate ?? 1,
+        ticks: probe?.ticks ?? 0,
+      };
+    });
+    const sampleReturnedAt = Date.now();
+    expect(
+      sample.paused,
+      `${spec.scenario}: the audio was not playing when the process was killed, so this is not ` +
+        "the interrupted-mid-listen case the trap needs",
+    ).toBe(false);
+
+    const killAt = Date.now();
+    const truePositionMs = sample.positionMs + (killAt - sampleReturnedAt) * sample.rate;
+    const killedPids = hardKill();
+    const skipToKillMs = killAt - skippedAt;
+    await expectPageDead(session.page, killedPids);
+
+    // The network comes back BEFORE the relaunch: the replay is the step under
+    // measurement, and a device that is still offline never performs it.
+    net.restore();
+    const relaunched = await relaunch(origin, media);
+    session = { page: relaunched.page };
+    const lifecycle = mergeLifecycle(lifecycleBeforeKill, relaunched.carried);
+
+    // Read on the restore stub, which mounts no app: nothing has replayed,
+    // superseded or settled this row yet, so this is exactly what the replay
+    // about to happen will be working from.
+    const queuedAfterKill = await readQueuedProgress(session.page, userId, bookId);
+    const localAfterKill = await readLocalRecord(session.page, userId, bookId);
+    const queuedAfterKillMs = queuedAfterKill[0]?.positionMs ?? null;
+    const armedAheadMs =
+      queuedAfterKillMs === null ? null : Math.round(queuedAfterKillMs - truePositionMs);
+
+    // Now let the app run. Mounting the provider is what replays the queue.
+    await session.page.goto(`${origin}/library`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await session.page.waitForSelector("[data-launch-ready]", {
+      state: "attached",
+      timeout: 90_000,
+    });
+    let outboxDrained = false;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const remaining = await readQueuedProgress(session.page, userId, bookId);
+      if (remaining.length === 0) {
+        outboxDrained = true;
+        break;
+      }
+      await session.page.waitForTimeout(500);
+    }
+    if (!outboxDrained) {
+      notes.push(
+        "the queued progress row never left the outbox within 60s, so the server value below is " +
+          "what the server held BEFORE the replay rather than after it",
+      );
+    }
+
+    // The server, before this device is allowed to open the player again — the
+    // player itself writes, and a value read after it would be the client's
+    // repair rather than what replay delivered.
+    const server = await readServerProgress(bookId);
+    const shelf = await readShelf(session.page, origin, bookId, bookTitle, userId, durationMs);
+    await openPlayer(session.page, origin, bookId, bookTitle);
+    const settled = await readSettledPosition(session.page);
+
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      bookTitle,
+      ticks: sample.ticks,
+      playedMs: Math.round(advancedToMs - startedAtMs),
+      advancedToMs: Math.round(advancedToMs),
+      skipBackMs,
+      queuedBeforeSkipMs,
+      queuedAfterKillMs,
+      queuedAfterKillOccurredAt: queuedAfterKill[0]?.eventOccurredAt ?? null,
+      queuedAfterKillCount: queuedAfterKill.length,
+      localAfterKillMs: localAfterKill.positionMs,
+      localAfterKillOccurredAt: localAfterKill.occurredAt,
+      truePositionMs: Math.round(truePositionMs),
+      skipToKillMs,
+      armedAheadMs,
+      serverPositionMs: server?.positionMs ?? null,
+      serverAheadMs: server ? Math.round(server.positionMs - truePositionMs) : null,
+      serverCompleted: server?.completed ?? null,
+      outboxDrained,
+      resumedPositionMs: Math.round(settled.positionMs),
+      resumedAheadMs: Math.round(settled.positionMs - truePositionMs),
+      shelf,
+      lifecycle,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await session.page.close().catch(() => undefined);
+    await healDevice(origin, media);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F2 — finishing one book, then opening another
+// ---------------------------------------------------------------------------
+
+/** Does opening the next book un-finish the one just finished? */
+export type CompletionRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  finishedBookTitle: string;
+  nextBookTitle: string;
+  /** Every witness, immediately after the book was marked finished. */
+  finishedLocalBefore: boolean | null;
+  finishedMirrorBefore: boolean | null;
+  finishedServerBefore: boolean | null;
+  /** The same witnesses, after the NEXT book was opened. */
+  finishedLocalAfter: boolean | null;
+  finishedMirrorAfter: boolean | null;
+  finishedServerAfter: boolean | null;
+  /** The shelf's own words for the finished book, after the next one was opened. */
+  finishedStatusText: string | null;
+  /** Proof the next book really did load in the same session as the first. */
+  nextBookLoaded: boolean;
+  /** The user action this row is built on: the book genuinely reached its end. */
+  endedObserved: boolean;
+  /** Proof the provider still held the finished book when the next one was opened. */
+  previousBookWasStillActive: boolean;
+  ticks: number;
+  notes: string[];
+};
+
+/**
+ * Finish a book, open the next one, and ask whether the first is still
+ * finished — locally, in the mirror the shelf renders from, and in Postgres.
+ *
+ * WHY IT WAS INVISIBLE. Every other row in this oracle measures ONE book, so a
+ * write that a second book's arrival makes to the FIRST book is structurally
+ * unobservable: there is no second book. `loadBook` persists the previous
+ * book's position as it switches, and it used to hand that write a literal
+ * `completed: false`.
+ *
+ * THE NAVIGATION HAS TO BE CLIENT-SIDE, and only one route in this app is.
+ * `loadBook` reaches its previous-book branch only when the provider is still
+ * holding the first book, and the provider lives in the app shell — so any
+ * navigation that reloads the document drops `activeBookRef`, and with no
+ * previous book there is no write and the defect cannot fire. MEASURED: going
+ * out through the player's Library control and back in through the next book's
+ * card lands on a shell whose audio element has no `src` at all
+ * (`{"audioCount":1,"currentSrc":"","srcAttribute":null}` — a freshly mounted
+ * provider), so that route cannot reach it.
+ *
+ * So this drives the path the defect was actually reported on: AUTOPLAY-NEXT.
+ * Both books go into a collection, the "Play the next book in a collection"
+ * preference is switched on through the real settings control, and the first
+ * book is played to its end. `FullPlayer` then calls `router.push` itself and
+ * the second book arrives without the document ever being replaced — which is
+ * exactly why the finished book is ALWAYS the previous one on this path.
+ *
+ * That the document really did survive is not assumed: a marker is written onto
+ * `window` before the first book ends and read back after the second has
+ * loaded. A row that lost it is UNCOVERED, never a pass.
+ */
+export async function measureCompletionAcrossBooks(spec: {
+  scenario: string;
+  finishedBookIndex: number;
+  nextBookIndex: number;
+}): Promise<CompletionRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books, durationMs } = active!;
+  expect(
+    spec.finishedBookIndex,
+    "the finished book and the next book must be different books",
+  ).not.toBe(spec.nextBookIndex);
+  const finishedTitle = bookTitleFor(spec.finishedBookIndex);
+  const nextTitle = bookTitleFor(spec.nextBookIndex);
+  const finishedId = books.get(finishedTitle)!.id;
+  const nextId = books.get(nextTitle)!.id;
+  const notes: string[] = [];
+
+  net.restore();
+  net.reset();
+
+  let media: CacheSnapshot | null = null;
+  const session = await launch();
+  try {
+    await session.page.goto(`${origin}/library`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await session.page.waitForSelector("[data-launch-ready]", {
+      state: "attached",
+      timeout: 90_000,
+    });
+    await resetBookEverywhere(session.page, userId, finishedId);
+    await resetBookEverywhere(session.page, userId, nextId);
+
+    // The autoplay-next path needs a collection holding both books in order,
+    // and the preference switched on. `getNextBookInCollection` reads Postgres
+    // when `/books/:id` renders, so the membership has to exist before the
+    // first book is opened.
+    const collectionName = `Resume Oracle ${spec.scenario}`.slice(0, 60);
+    const collection = await session.page.evaluate(
+      async ([target, name]) => {
+        const response = await fetch(`${target}/api/collections`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        return {
+          status: response.status,
+          body: (await response.json()) as { collection?: { id?: string } },
+        };
+      },
+      [origin, collectionName] as const,
+    );
+    expect(
+      collection.status,
+      `${spec.scenario}: could not create the collection the autoplay-next path needs`,
+    ).toBe(201);
+    const collectionId = collection.body.collection?.id;
+    expect(collectionId, `${spec.scenario}: the collection came back with no id`).toBeTruthy();
+    for (const id of [finishedId, nextId]) {
+      const added = await session.page.evaluate(
+        async ([target, list, bookId]) => {
+          const response = await fetch(`${target}/api/collections/${list}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bookId, include: true }),
+          });
+          return response.status;
+        },
+        [origin, collectionId!, id] as const,
+      );
+      expect(added, `${spec.scenario}: adding ${id} to the collection failed`).toBe(200);
+    }
+
+    // The preference goes on through the real control, not through the API, so
+    // the provider's own state carries it rather than only the database.
+    await session.page.goto(`${origin}/settings`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    const autoplayToggle = session.page.getByRole("checkbox", {
+      name: /Play the next book in a collection/,
+    });
+    await expect(
+      autoplayToggle,
+      `${spec.scenario}: the settings page has no autoplay-next control, so the path this row ` +
+        "drives cannot be switched on",
+    ).toBeVisible({ timeout: 60_000 });
+    if (!(await autoplayToggle.isChecked())) await autoplayToggle.check();
+    await expect(autoplayToggle).toBeChecked();
+    notes.push("autoplay-next switched on through the settings control");
+
+    await openPlayer(session.page, origin, finishedId, finishedTitle);
+    await expect(
+      session.page.getByText(
+        new RegExp(`Up next in ${collectionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+      ),
+      `${spec.scenario}: the player does not believe there is a next book in this collection, so ` +
+        "no autoplay-next navigation will happen and this row cannot reach the defect",
+    ).toBeVisible({ timeout: 30_000 });
+    media = await snapshotCaches(session.page);
+    // Real listening first: a book "finished" with no playback behind it is not
+    // the journey, and `positionChangedRef` would refuse the write anyway.
+    const { startedAtMs } = await playForReal(session.page, 6_000);
+    const ticks = await session.page.evaluate(() => {
+      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      return probe?.ticks ?? 0;
+    });
+    expect(
+      ticks,
+      `${spec.scenario}: nothing played, so the book was never really listened to`,
+    ).toBeGreaterThan(2);
+    notes.push(`listened from ${Math.round(startedAtMs)}ms for 6000ms before finishing`);
+
+    // Finished by REACHING THE END, not by a menu item. `markEnded` is the path
+    // the autoplay-next journey runs down — the one where the finished book is
+    // always the previous book — and it is the only way to finish a book without
+    // the user having asked a dialog for it. The scrubber is a real control with
+    // a 1000 ms step; `fill` moves it without a pointer drag, which is the
+    // keyboard path and seeks immediately.
+    const scrubber = session.page.locator('input[aria-label="Audiobook position"]');
+    await expect(
+      scrubber,
+      `${spec.scenario}: the player has no position control, so the book cannot be taken to its ` +
+        "end and this row cannot create the state it exists to protect",
+    ).toBeVisible({ timeout: 30_000 });
+    const nearEndMs = Math.max(0, Math.floor((durationMs - 3_000) / 1_000) * 1_000);
+    // Written before the book ends, read after the next one has loaded. It
+    // survives a `router.push` and nothing else, so it is the proof that the
+    // provider — and with it the finished book — was never torn down.
+    await session.page.evaluate(() => {
+      (window as unknown as { __f2SameDocument?: number }).__f2SameDocument = Date.now();
+    });
+    await scrubber.fill(String(nearEndMs));
+    await expect
+      .poll(() => session.page.evaluate(() => document.querySelector("audio")?.ended ?? false), {
+        timeout: 60_000,
+        message:
+          `${spec.scenario}: the book never reached its end after being scrubbed to ` +
+          `${nearEndMs}ms of ${durationMs}ms, so it was never finished`,
+      })
+      .toBe(true);
+    const endedObserved = await session.page.evaluate(
+      () => document.querySelector("audio")?.ended ?? false,
+    );
+    notes.push(`scrubbed to ${nearEndMs}ms of ${durationMs}ms and played to the end`);
+
+    // Read AT ONCE, and never by polling the server.
+    //
+    // The autoplay push fires off the same `ended` event, so on a build with the
+    // defect the un-finishing write is already in flight; a poll waiting for the
+    // server to say `true` would time out and report "the book was never
+    // finished", which is a precondition's words for the very failure this row
+    // exists to name. The reliable "before" witness is this device's own durable
+    // record, written synchronously inside `markEnded`. The server's value here
+    // is recorded as a snapshot, not gated on.
+    const finishedLocalBefore = (await readLocalRecord(session.page, userId, finishedId)).completed;
+    const finishedMirrorBefore = await readMirrorCompleted(session.page, userId, finishedId);
+    const finishedServerBefore = (await readServerProgress(finishedId))?.completed ?? null;
+
+    // The app navigates itself. Nothing here clicks anything.
+    await session.page.waitForURL(new RegExp(`/books/${nextId}`), { timeout: 60_000 });
+    await settlePlayer(session.page);
+    const activeProbe = await session.page.evaluate(() => ({
+      sameDocument:
+        (window as unknown as { __f2SameDocument?: number }).__f2SameDocument !== undefined,
+      audioCount: document.querySelectorAll("audio").length,
+      currentSrc: document.querySelector("audio")?.currentSrc ?? null,
+    }));
+    const previousBookWasStillActive = activeProbe.sameDocument;
+    notes.push(`after the autoplay-next push: ${JSON.stringify(activeProbe)}`);
+    if (!previousBookWasStillActive) {
+      notes.push(
+        "UNCOVERED-RISK: the document was replaced on the way to the next book, so the provider " +
+          "was rebuilt with no previous book and there is no write to the finished one for this " +
+          "row to grade",
+      );
+    }
+    const nextBookLoaded = (
+      await session.page.evaluate(() => {
+        const heading = document.querySelector("#book-title") ?? document.querySelector("h1");
+        return (heading?.textContent ?? "").trim();
+      })
+    ).includes(nextTitle);
+
+    // The write to the PREVIOUS book travels the same outbox as everything
+    // else, so give it the same chance to land as a real one would get — and
+    // then confirm the server has stopped moving, so the value read below is a
+    // settled answer rather than whichever half of the race was caught.
+    await session.page.waitForTimeout(3_000);
+    let settledServer = (await readServerProgress(finishedId))?.completed ?? null;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await session.page.waitForTimeout(1_000);
+      const again = (await readServerProgress(finishedId))?.completed ?? null;
+      if (again === settledServer) break;
+      settledServer = again;
+    }
+
+    const finishedLocalAfter = (await readLocalRecord(session.page, userId, finishedId)).completed;
+    const finishedMirrorAfter = await readMirrorCompleted(session.page, userId, finishedId);
+    const finishedServerAfter = (await readServerProgress(finishedId))?.completed ?? null;
+    const shelf = await readShelf(
+      session.page,
+      origin,
+      finishedId,
+      finishedTitle,
+      userId,
+      durationMs,
+    );
+
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      finishedBookTitle: finishedTitle,
+      nextBookTitle: nextTitle,
+      finishedLocalBefore,
+      finishedMirrorBefore,
+      finishedServerBefore,
+      finishedLocalAfter,
+      finishedMirrorAfter,
+      finishedServerAfter,
+      finishedStatusText: shelf.statusText,
+      nextBookLoaded,
+      endedObserved,
+      previousBookWasStillActive,
+      ticks,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await session.page.close().catch(() => undefined);
+    await healDevice(origin, media);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// X2 — two devices, one account, one book
+// ---------------------------------------------------------------------------
+
+/**
+ * Put a page back in the foreground the same way `background()` takes it out.
+ *
+ * The engine cannot produce either state for real (see `background()`), so both
+ * edges are synthesised the same way and the row says so. What matters for the
+ * republish case is not whether the platform reported the transition — it is
+ * that the app's handler runs with `document.visibilityState === "visible"`,
+ * which is exactly what a user returning to a long-open tab produces, and which
+ * is what this arranges.
+ */
+async function foreground(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    document.dispatchEvent(new Event("visibilitychange"));
+    return document.visibilityState;
+  });
+}
+
+/** Two devices on one account, both mounting a real player on the same book. */
+export type TwoDeviceRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  bookTitle: string;
+  deviceIdA: string | null;
+  deviceIdB: string | null;
+  /** Where A listened to, and what the server held when A stopped. */
+  deviceAListenedToMs: number;
+  serverAfterAMs: number | null;
+  /** Where B's player STARTED — a cross-device resume in its own right. */
+  deviceBStartedAtMs: number;
+  /** Where B listened to, and what the server held when B stopped. */
+  deviceBListenedToMs: number;
+  serverAfterBMs: number | null;
+  /** The furthest the user has actually reached, across both devices. */
+  furthestMs: number;
+  /** What A's own handler read when the stale tab came back to the foreground. */
+  visibilityAtForeground: string | null;
+  /** The server AFTER A was foregrounded. This is where the republish shows. */
+  serverAfterForegroundMs: number | null;
+  /** `furthest - server`: positive means A's stale tab clobbered B's newer write. */
+  clobberedMs: number | null;
+  /**
+   * The server after A's tab was NAVIGATED AWAY FROM — the `pagehide` edge,
+   * which this build flushes unconditionally. A second chance for a stale tab
+   * to publish, measured separately from the visible edge.
+   */
+  serverAfterANavigatedMs: number | null;
+  /** `furthest - serverAfterANavigated`. Positive means the pagehide edge clobbered. */
+  clobberedByPagehideMs: number | null;
+  /** A's own durable record on both sides of that navigation. */
+  localABeforeNav: LocalRecord;
+  localAAfterNav: LocalRecord;
+  /** Where each device comes back when its player is opened again. */
+  deviceAResumedMs: number;
+  deviceBResumedMs: number;
+  /** Positive means that device would skip content the user has not heard. */
+  deviceAAheadMs: number;
+  deviceBAheadMs: number;
+  /** Positive means that device threw away listening the user really did. */
+  deviceALostMs: number;
+  deviceBLostMs: number;
+  /**
+   * The rewind the app's own ladder credits each device on its final open.
+   * Both devices paused through the UI, and the cross-device leg takes real
+   * wall-clock time, so a bounded smart rewind is legitimate here and is
+   * subtracted from the "lost" columns rather than being charged to the bug.
+   */
+  rewindCreditedA: number;
+  rewindCreditedB: number;
+  ticksA: number;
+  ticksB: number;
+  /** Guard: a second import that created a SECOND book makes every row above vacuous. */
+  booksForUser: number;
+  notes: string[];
+};
+
+/**
+ * Two real devices, one account, one book — the axis the oracle could not see.
+ *
+ * Every other row here runs on ONE device, so a write that one device makes
+ * over another device's newer position is structurally invisible: there is no
+ * other device. `tests/sync/two-device-convergence.spec.ts` has two, but it
+ * drives them through an in-page sync driver and never mounts a player or reads
+ * a start position, so the player's own write paths are not on the wire.
+ *
+ * The journey: A listens and stops. B — a genuinely separate storage session
+ * with its own device id — picks the book up, resumes where A left it, and
+ * listens further. Then A's tab, still open and still holding its old position,
+ * comes back to the foreground.
+ *
+ * Three questions, all of which need two devices to ask:
+ *   1. Did B resume where A left off? (`deviceBStartedAtMs`)
+ *   2. Did A's stale tab republish over B's newer write? (`clobberedMs`)
+ *   3. Does either device now come back AHEAD of anything the user has heard?
+ *
+ * Both devices stay alive throughout, so nothing here hard-kills: a SIGKILL is
+ * aimed at every renderer this run started, and B's is one of them.
+ */
+export async function measureTwoDeviceResume(spec: {
+  scenario: string;
+  bookIndex: number;
+  playMsA?: number;
+  playMsB?: number;
+}): Promise<TwoDeviceRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books, durationMs } = active!;
+  const bookTitle = bookTitleFor(spec.bookIndex);
+  const bookId = books.get(bookTitle)!.id;
+  const playMsA = spec.playMsA ?? 6_000;
+  const playMsB = spec.playMsB ?? 8_000;
+  const notes: string[] = [];
+
+  net.restore();
+  net.reset();
+
+  const { browser, context: contextA } = await openDevice();
+  const pageA = trackCrash(await contextA.newPage());
+  let contextB: BrowserContext | null = null;
+  try {
+    await pageA.goto(`${origin}/library`, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    await pageA.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
+    await resetBookEverywhere(pageA, userId, bookId);
+
+    // ------------------------------------------------------------- device A
+    await openPlayer(pageA, origin, bookId, bookTitle);
+    const { startedAtMs: startedA } = await playForReal(pageA, playMsA);
+    await pauseThroughUi(pageA);
+    const deviceAListenedToMs = Math.round(await readAudioPositionMs(pageA));
+    const ticksA = await pageA.evaluate(() => {
+      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      return probe?.ticks ?? 0;
+    });
+    expect(ticksA, `${spec.scenario}: device A never played`).toBeGreaterThan(2);
+    await expect
+      .poll(async () => (await readServerProgress(bookId))?.positionMs ?? -1, {
+        timeout: 60_000,
+        message:
+          `${spec.scenario}: device A's position never reached the server, so device B ` +
+          "would have nothing to resume from and the cross-device journey never starts",
+      })
+      .toBeGreaterThan(startedA + 1_000);
+    const serverAfterAMs = (await readServerProgress(bookId))?.positionMs ?? null;
+
+    // A goes to the background and STAYS OPEN, holding its position. This is
+    // the tab left running while the user picks the book up somewhere else.
+    await background(pageA);
+    const deviceIdA = await pageA.evaluate(() => localStorage.getItem("chapterline:device-id"));
+
+    // ------------------------------------------------------------- device B
+    // Cookies only. Copying A's localStorage would copy A's device id, and two
+    // "devices" sharing one id makes every ordering assertion below vacuous.
+    const cookies = (await contextA.storageState()).cookies;
+    contextB = await browser.newContext({
+      ...devices["iPhone 15"],
+      serviceWorkers: "allow",
+      storageState: { cookies, origins: [] },
+    });
+    await contextB.addInitScript({ content: PROBE_SCRIPT });
+    const pageB = trackCrash(await contextB.newPage());
+    await pageB.goto(`${origin}/library`, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    await pageB.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
+    await assertEngineCanStoreMedia(pageB);
+    await pageB.reload({ waitUntil: "domcontentloaded" });
+    await pageB.waitForFunction(() => navigator.serviceWorker.controller !== null, undefined, {
+      timeout: 60_000,
+    });
+    await pageB.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
+    // B has the account but not the bytes. It gets them the way a second device
+    // does: the same file, which the server recognises by fingerprint and
+    // re-points onto the book that already exists.
+    await pageB.setInputFiles('input[aria-label="Choose an MP3 file to import"]', {
+      name: `${bookTitle}.mp3`,
+      mimeType: "audio/mpeg",
+      buffer: buildLongMp3(FIXTURE_REPEAT, 64 + spec.bookIndex * 16, bookTitle),
+    });
+    await expect
+      .poll(
+        () =>
+          pageB.evaluate((title) => {
+            const card = [...document.querySelectorAll("article.book-item")].find(
+              (node) => (node.querySelector(".book-title")?.textContent ?? "").trim() === title,
+            );
+            if (!card) return "no card";
+            return card.querySelector(".book-device-missing") ? "not on this device" : "on device";
+          }, bookTitle),
+        {
+          timeout: 120_000,
+          message:
+            `${spec.scenario}: "${bookTitle}" never reached device B, so B cannot mount a ` +
+            "player and there is no second device in this row",
+        },
+      )
+      .toBe("on device");
+    const [bookCount] = await sql()<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM books WHERE owner_id = ${userId} AND title = ${bookTitle}
+    `;
+    const booksForUser = Number(bookCount!.count);
+    expect(
+      booksForUser,
+      `${spec.scenario}: device B's import created a SECOND "${bookTitle}" instead of being ` +
+        "matched to the existing one, so the two devices are not on the same book and nothing " +
+        "below compares anything",
+    ).toBe(1);
+
+    await openPlayer(pageB, origin, bookId, bookTitle);
+    const deviceBStartedAtMs = Math.round((await readSettledPosition(pageB)).positionMs);
+    await playForReal(pageB, playMsB);
+    await pauseThroughUi(pageB);
+    const deviceBListenedToMs = Math.round(await readAudioPositionMs(pageB));
+    const ticksB = await pageB.evaluate(() => {
+      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      return probe?.ticks ?? 0;
+    });
+    expect(ticksB, `${spec.scenario}: device B never played`).toBeGreaterThan(2);
+    // Read HERE, not on first load: `getDeviceId()` mints lazily, on the first
+    // write, so a context that has only browsed reports null and the check
+    // below would fail for a reason that has nothing to do with identity.
+    const deviceIdB = await pageB.evaluate(() => localStorage.getItem("chapterline:device-id"));
+    expect(
+      !!deviceIdB && !!deviceIdA && deviceIdB !== deviceIdA,
+      `${spec.scenario}: device ids were ${deviceIdA} and ${deviceIdB} — either one is missing ` +
+        "or the two contexts minted the same one, so these are two tabs and not two devices and " +
+        "every ordering rule below is vacuous",
+    ).toBe(true);
+    await expect
+      .poll(async () => (await readServerProgress(bookId))?.positionMs ?? -1, {
+        timeout: 60_000,
+        message:
+          `${spec.scenario}: device B's listening never reached the server, so there is ` +
+          "no newer write for A's stale tab to be tested against",
+      })
+      .toBeGreaterThan(deviceAListenedToMs + 1_000);
+    const serverAfterBMs = (await readServerProgress(bookId))?.positionMs ?? null;
+    const furthestMs = Math.max(deviceAListenedToMs, deviceBListenedToMs);
+
+    // ------------------------------------------- A comes back to the foreground
+    const visibilityAtForeground = await foreground(pageA);
+    // Long enough for a flush, a PATCH and the server to have written it. If
+    // nothing is published this window costs the row nothing.
+    await pageA.waitForTimeout(5_000);
+    const serverAfterForegroundMs = (await readServerProgress(bookId))?.positionMs ?? null;
+
+    // ------------------------------------------------- what each device shows
+    // The rewind each device is owed is read BEFORE its open, because the open
+    // is what consumes the marker.
+    const inputsB = await readRewindInputs(pageB, userId, bookId);
+    assertMarkerKeyShape(spec.scenario, userId, inputsB.markerKeysSeen);
+    const rewindCreditedB = expectedRewindMs(inputsB);
+    await openPlayer(pageB, origin, bookId, bookTitle);
+    const deviceBResumedMs = Math.round((await readSettledPosition(pageB)).positionMs);
+
+    // A's tab is now navigated away from — a plain document navigation, which
+    // is what closing the tab or following a link does. It delivers `pagehide`,
+    // which this build flushes UNCONDITIONALLY by design. That is a second edge
+    // on which a stale tab can publish, so this row measures A's own record and
+    // the server on both sides of it rather than assuming the edge is harmless.
+    const localABeforeNav = await readLocalRecord(pageA, userId, bookId);
+    await pageA.goto(`${origin}/library`, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    await pageA.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
+    await pageA.waitForTimeout(3_000);
+    const localAAfterNav = await readLocalRecord(pageA, userId, bookId);
+    const serverAfterANavigatedMs = (await readServerProgress(bookId))?.positionMs ?? null;
+    notes.push(
+      `device A local record before its own navigation ${JSON.stringify(localABeforeNav)}, ` +
+        `after ${JSON.stringify(localAAfterNav)}`,
+    );
+    const inputsA = await readRewindInputs(pageA, userId, bookId);
+    assertMarkerKeyShape(spec.scenario, userId, inputsA.markerKeysSeen);
+    const rewindCreditedA = expectedRewindMs(inputsA);
+    await openPlayer(pageA, origin, bookId, bookTitle);
+    const deviceAResumedMs = Math.round((await readSettledPosition(pageA)).positionMs);
+
+    if (deviceBStartedAtMs < deviceAListenedToMs - 2_000) {
+      notes.push(
+        `device B started at ${deviceBStartedAtMs}ms for a book device A left at ` +
+          `${deviceAListenedToMs}ms`,
+      );
+    }
+    notes.push(`book duration ${durationMs}ms`);
+
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      bookTitle,
+      deviceIdA,
+      deviceIdB,
+      deviceAListenedToMs,
+      serverAfterAMs,
+      deviceBStartedAtMs,
+      deviceBListenedToMs,
+      serverAfterBMs,
+      furthestMs,
+      visibilityAtForeground,
+      serverAfterForegroundMs,
+      clobberedMs:
+        serverAfterForegroundMs === null ? null : Math.round(furthestMs - serverAfterForegroundMs),
+      serverAfterANavigatedMs,
+      clobberedByPagehideMs:
+        serverAfterANavigatedMs === null ? null : Math.round(furthestMs - serverAfterANavigatedMs),
+      localABeforeNav,
+      localAAfterNav,
+      deviceAResumedMs,
+      deviceBResumedMs,
+      deviceAAheadMs: Math.round(deviceAResumedMs - furthestMs),
+      deviceBAheadMs: Math.round(deviceBResumedMs - furthestMs),
+      deviceALostMs: Math.round(furthestMs - deviceAResumedMs),
+      deviceBLostMs: Math.round(furthestMs - deviceBResumedMs),
+      rewindCreditedA,
+      rewindCreditedB,
+      ticksA,
+      ticksB,
+      booksForUser,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await pageA.close().catch(() => undefined);
+    // B's renderer belongs to this run, so a later scenario's SIGKILL would
+    // find it. It does not outlive this row.
+    await contextB?.close().catch(() => undefined);
   }
 }
