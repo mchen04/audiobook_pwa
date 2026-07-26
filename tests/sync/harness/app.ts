@@ -5,6 +5,7 @@ import path from "node:path";
 import postgres from "postgres";
 
 import { awaitSignInBudget } from "../../shared/sign-in-budget";
+import { testAccountPassword } from "../../shared/test-account-password";
 import { assertLocalDatabase } from "../../../scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "../../../scripts/lib/env-file.mjs";
 
@@ -58,7 +59,7 @@ export type Account = { email: string; password: string; userId: string };
  * before a spec runs, and from each device starting with an empty IndexedDB.
  */
 const SHARED_EMAIL = "sync-verifier@hark.test";
-const SHARED_PASSWORD = "Hark-Sync-Verifier-2026!";
+const SHARED_PASSWORD = testAccountPassword("sync-verifier");
 
 let sharedStorageState: StorageState | null = null;
 let sharedAccount: Account | null = null;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { awaitSignInBudget, burnSignInWindow } from "../../shared/sign-in-budget";
+import { testAccountPassword } from "../../shared/test-account-password";
 import { assertLocalDatabase } from "../../../scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "../../../scripts/lib/env-file.mjs";
 // Reused, not re-implemented: the sync suite already owns the local-database
@@ -107,13 +108,13 @@ type AccountSpec = Omit<Account, "userId">;
 
 export const ACCOUNT_A: AccountSpec = {
   email: "parity-a@hark.test",
-  password: "Hark-Parity-Account-A-2026!",
+  password: testAccountPassword("parity-a"),
   name: "Parity A",
 };
 
 export const ACCOUNT_B: AccountSpec = {
   email: "parity-b@hark.test",
-  password: "Hark-Parity-Account-B-2026!",
+  password: testAccountPassword("parity-b"),
   name: "Parity B",
 };
 
