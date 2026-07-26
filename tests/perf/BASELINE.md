@@ -188,25 +188,39 @@ profile delays — is byte-identical to the baseline.
    rendered cards are counted in the same tick, and the document must arrive as
    `deliveryType: cache-storage` with an empty transfer.
 
+Two consecutive runs, each from a destroyed-and-rebuilt database and a fresh
+build. Both are shown, because a single green run of a performance gate says
+less than two that agree.
+
 ```
+CLEAN PASS 1
 profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries    marker    cards
-A fast (0ms)                 297ms     306ms     306ms         0         0         0       0        0     books       50
-B slow (400ms)               296ms     297ms     297ms         0         0         0       0        0     books       50
-C cold database (3000ms)     345ms     367ms     367ms         0         0         0       0        0     books       50
-D offline                    347ms     365ms     365ms         0         0         0       0        0     books       50
-spread of p95 across profiles: 70ms (bar 150ms)
-CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 17ms at 4x (4.15x observed)
+A fast (0ms)                 297ms     299ms     299ms         0         0         0       0        0     books       50
+B slow (400ms)               293ms     297ms     297ms         0         0         0       0        0     books       50
+C cold database (3000ms)     348ms     378ms     378ms         0         0         0       0        0     books       50
+D offline                    347ms     359ms     359ms         0         0         0       0        0     books       50
+spread of p95 across profiles: 81ms (bar 150ms)
+CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 17ms at 4x (3.80x observed)
+
+CLEAN PASS 2
+profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries    marker    cards
+A fast (0ms)                 294ms     298ms     298ms         0         0         0       0        0     books       50
+B slow (400ms)               294ms     295ms     295ms         0         0         0       0        0     books       50
+C cold database (3000ms)     348ms     366ms     366ms         0         0         0       0        0     books       50
+D offline                    343ms     357ms     357ms         0         0         0       0        0     books       50
+spread of p95 across profiles: 71ms (bar 150ms)
+CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 16ms at 4x (3.70x observed)
 ```
 
-| Profile         | p95 before  | p95 after | doc hits | Postgres queries |
-| --------------- | ----------- | --------- | -------- | ---------------- |
-| A fast          | 92ms        | 306ms     | 6 → 0    | 81 → 0           |
-| B slow          | 509ms       | 297ms     | 6 → 0    | 60 → 0           |
-| C cold database | 3104ms      | 367ms     | 6 → 0    | 60 → 0           |
-| D offline       | ≥15007ms    | 365ms     | 0 → 0    | 0 → 0            |
-| **spread**      | **14915ms** | **70ms**  |          |                  |
+| Profile         | p95 before  | p95 after (pass 1 / pass 2) | doc hits | Postgres queries |
+| --------------- | ----------- | --------------------------- | -------- | ---------------- |
+| A fast          | 92ms        | 299ms / 298ms               | 6 → 0    | 81 → 0           |
+| B slow          | 509ms       | 297ms / 295ms               | 6 → 0    | 60 → 0           |
+| C cold database | 3104ms      | 378ms / 366ms               | 6 → 0    | 60 → 0           |
+| D offline       | ≥15007ms    | 359ms / 357ms               | 0 → 0    | 0 → 0            |
+| **spread**      | **14915ms** | **81ms / 71ms**             |          |                  |
 
-Profile A is _slower_ than its baseline (92ms → 306ms), and every part of that
+Profile A is _slower_ than its baseline (92ms → ~298ms), and every part of that
 is the honest direction. At baseline it painted the empty state, because the
 mirror had not been populated; it now paints 1000 real book cards. Roughly 2.4x
 of the remainder is the CPU throttle — the in-page figure printed beside each
