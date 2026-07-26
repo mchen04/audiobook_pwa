@@ -20,6 +20,7 @@ import {
   sql,
   type Account,
 } from "./harness/app";
+import { awaitSignInBudget } from "../shared/sign-in-budget";
 import { buildDriverScript } from "./harness/driver-bundle";
 import { readBookIds, readServerState } from "./harness/state";
 
@@ -100,11 +101,33 @@ test("every queued mutation survives the app being closed and reopened", async (
     // ------------------------------------------------ first launch, online
     const first = await launch(userDataDir);
     try {
+      // This spec signs in for real — it needs a session inside its own
+      // persistent profile, which a reused storageState cannot give it — so it
+      // spends from the same window every other suite spends from. Without
+      // this it passed alone and failed whenever parity had just run, which
+      // looks exactly like a product bug and is not one.
+      await awaitSignInBudget("sync");
       await first.page.goto(`${APP_ORIGIN}/login`, { waitUntil: "domcontentloaded" });
       await first.page.getByLabel("Email").fill(account.email);
       await first.page.getByLabel("Password").fill(account.password);
       await first.page.getByRole("button", { name: "Sign in" }).click();
-      await first.page.waitForURL(/\/library/, { timeout: 60_000 });
+      await first.page
+        .waitForURL(/\/library/, { timeout: 60_000 })
+        .catch(async (error: unknown) => {
+          // A bare timeout here says "the app never reached the library", which
+          // is a product claim. Read the page before making it.
+          const message = await first.page
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          if (message.includes("Too many requests")) {
+            throw new Error(
+              "better-auth rate-limited this sign-in. That is the harness overspending the shared " +
+                "window in tests/shared/sign-in-budget.ts, not a product failure.",
+            );
+          }
+          throw error;
+        });
       await first.page.waitForSelector("[data-launch-ready]", {
         state: "attached",
         timeout: 60_000,
