@@ -163,41 +163,86 @@ which uses a non-persistent WebKit context. When Playwright fixes WebKit
 persistent Cache Storage, `selectEngine()` will pick WebKit automatically on the
 next run and the header line will say so.
 
-## After — the same harness against the local-first launch path
+## After — the local-first launch path, under a stricter harness
 
-Recorded 2026-07-25, same harness, same bars, same 1000-book library, same local
-database. Nothing in the harness or the thresholds changed between the two runs;
-`git diff` on `tests/perf/` across the work is empty apart from this section.
+Recorded 2026-07-25 against the same bars, the same 1000-book library and the
+same local database.
+
+**The harness did change between the two runs, and it changed in one direction
+only: harder.** Saying otherwise would make the comparison below dishonest, so
+the three changes are named here, and every frozen threshold — `P95_BAR_MS=500`,
+`SPREAD_BAR_MS=150`, `LAUNCHES_PER_PROFILE=6`, `MIN_BOOKS=1000`, and the four
+profile delays — is byte-identical to the baseline.
+
+1. **A launch restarts the browser process** against the same `userDataDir`, so
+   the profile stays warm while the process does not. The baseline reused one
+   context for all 24 launches, which excluded every cold-start cost — and hid a
+   real bug (below).
+2. **The CPU is throttled 4x**, and the throttle is proved rather than assumed:
+   a fixed 8M-iteration loop is timed at 1x and at 4x every run, and the
+   measured slowdown is printed. `devices["iPhone 15"]` sets viewport and
+   user-agent, never CPU, so the baseline's numbers were desktop numbers for a
+   path that is almost entirely device-local work.
+3. **The content assertion is real.** The baseline asserted only that _some_
+   `data-launch-ready` marker appeared. The marker must now say `books`, the
+   rendered cards are counted in the same tick, and the document must arrive as
+   `deliveryType: cache-storage` with an empty transfer.
 
 ```
-profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries
-----------------------------------------------------------------------------------------------------------------
-A fast (0ms)                 131ms     132ms     132ms         0         0         0       0        0
-B slow (400ms)               123ms     132ms     132ms         0         0         0       1        0
-C cold database (3000ms)     125ms     142ms     142ms         0         0         0       0        0
-D offline                    123ms     129ms     129ms         0         0         0       0        0
-----------------------------------------------------------------------------------------------------------------
-spread of p95 across profiles: 13ms (bar 150ms)
+profile                        p50       p95       max  timeouts  doc hits  api hits   asset  queries    marker    cards
+A fast (0ms)                 297ms     306ms     306ms         0         0         0       0        0     books       50
+B slow (400ms)               296ms     297ms     297ms         0         0         0       0        0     books       50
+C cold database (3000ms)     345ms     367ms     367ms         0         0         0       0        0     books       50
+D offline                    347ms     365ms     365ms         0         0         0       0        0     books       50
+spread of p95 across profiles: 70ms (bar 150ms)
+CPU throttle: a fixed 8M-iteration loop ran in 4ms at 1x, 17ms at 4x (4.15x observed)
 ```
 
 | Profile         | p95 before  | p95 after | doc hits | Postgres queries |
 | --------------- | ----------- | --------- | -------- | ---------------- |
-| A fast          | 92ms        | 132ms     | 6 → 0    | 81 → 0           |
-| B slow          | 509ms       | 132ms     | 6 → 0    | 60 → 0           |
-| C cold database | 3104ms      | 142ms     | 6 → 0    | 60 → 0           |
-| D offline       | ≥15007ms    | 129ms     | 0 → 0    | 0 → 0            |
-| **spread**      | **14915ms** | **13ms**  |          |                  |
+| A fast          | 92ms        | 306ms     | 6 → 0    | 81 → 0           |
+| B slow          | 509ms       | 297ms     | 6 → 0    | 60 → 0           |
+| C cold database | 3104ms      | 367ms     | 6 → 0    | 60 → 0           |
+| D offline       | ≥15007ms    | 365ms     | 0 → 0    | 0 → 0            |
+| **spread**      | **14915ms** | **70ms**  |          |                  |
 
-Profile A is _slower_ than its baseline (92ms → 132ms) and that is the honest
-direction: at baseline it painted the empty state, because the mirror had not
-been populated. It now paints 1000 real book cards. The readiness marker was
-tightened during the work — a device that has never synced shows a first-sync
-notice that carries no marker at all — so the number is harder to earn than it
-was, not easier.
+Profile A is _slower_ than its baseline (92ms → 306ms), and every part of that
+is the honest direction. At baseline it painted the empty state, because the
+mirror had not been populated; it now paints 1000 real book cards. Roughly 2.4x
+of the remainder is the CPU throttle — the in-page figure printed beside each
+launch went from ~85ms to ~205ms — and the reported number also carries ~109ms
+of Playwright round trip that the in-page figure excludes. The harness therefore
+**over**-reports, which is the safe direction: overhead can turn a passing
+launch into a failing one, never the reverse.
 
-The check is still able to fail. Disabling the service worker's cache-first
-branch returns it to 6 document hits per profile, 24 Postgres queries, p95
-551ms/3152ms on B/C, and a 3009ms spread.
+### What restarting the process found
+
+The old single-context harness kept one service worker resident for all 24
+launches. Restarting it exposed that **Chromium speculatively fetches the launch
+document whenever it has to boot the worker for a navigation**
+(`ServiceWorkerAutoPreload`). The paint never waited for it — delivery was still
+`cache-storage` with 0 bytes — but the server rendered `/library` and ran four
+Postgres queries on every cold launch and the answer was discarded: 6 wasted
+renders and 24 queries per run. `public/sw.js` now declares a static route for
+the start_url so the browser answers from the cache without starting the worker
+at all, which is why the table above reads 0 across both columns.
+
+### The check is still able to fail
+
+Three demonstrations, each run rather than argued:
+
+- **Empty mirror.** Wiping the mirror's `books` and `bookTags` while keeping
+  `syncMeta` — an eviction, not a first run — produced p95 234ms, zero document
+  hits and zero queries: the best numbers this app has ever recorded, while
+  showing "Bring your first audiobook" to an account owning 1000 books. The
+  baseline harness calls that a pass. This one produces 48 failures.
+- **A broken static route.** Declaring the route for a bare `/library` while the
+  launch asks for `/library?source=pwa` misses, and a routing miss goes to the
+  network rather than to the worker's own handler: 5371-5521 bytes on the wire
+  per launch, p95 732ms on B and 3426ms on C. Caught on the first run after the
+  change.
+- **No cache-first branch.** Disabling it returns 6 document hits per profile,
+  24 Postgres queries, p95 551ms/3152ms on B/C and a 3009ms spread.
 
 ## Reproducing
 

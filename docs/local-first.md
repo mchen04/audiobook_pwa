@@ -251,7 +251,7 @@ Icon tap → painted content:
 
    Two details are load-bearing, because a routing **miss goes to the network**
    rather than falling back to the `fetch` handler. The condition matches the
-   start_url exactly — pathname *and* search — so every other navigation is left
+   start_url exactly — pathname _and_ search — so every other navigation is left
    to `serveNavigation`, which is not query-sensitive; and `precacheShell`
    stores the shell under that exact key so the lookup hits. Writing the rule
    for a bare `/library` put the whole launch document back on the wire

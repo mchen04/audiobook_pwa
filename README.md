@@ -48,10 +48,12 @@ contract for that is `docs/local-first.md`.
   identically with the network off — there is no "am I online?" branch on the
   read path. The `/library` document itself is served from Cache Storage without
   touching the network, so a cold database and airplane mode cost what wifi
-  costs: warm-launch p95 measures 134-151ms across fast, slow, 3000ms-cold-database
-  and offline profiles, with zero server document hits and zero Postgres
-  queries. Imported audio is served by the service worker with full seeking, and
-  queued writes replay when the app is next open.
+  costs: warm-launch p95 measures 297-367ms across fast, slow,
+  3000ms-cold-database and offline profiles — a 70ms spread — with zero server
+  document hits and zero Postgres queries. Those figures are taken under 4x CPU
+  throttling with a fresh browser process per launch, so they mean something on
+  a phone rather than on a desktop. Imported audio is served by the service
+  worker with full seeking, and queued writes replay when the app is next open.
 - **Organize**: search, status and tag filters, an "On this device" facet, sort
   orders, grid/list views, collections with optional next-book autoplay,
   archive, and delete. There is one library screen: books whose audio is not on
