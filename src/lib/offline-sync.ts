@@ -389,18 +389,25 @@ function resolveCoalescing(
   return next;
 }
 
+/**
+ * One progress event in outbox form. Shared by the queue-only path and by
+ * `offline/outbox.ts#commitProgress`, so the row a replay sends and the row the
+ * mirror is projected from are assembled once, from the same builder.
+ */
+export function buildProgressMutation(entry: QueuedProgress): QueuedMutation {
+  return buildMutation({
+    key: progressMutationKey(entry),
+    userId: entry.userId,
+    kind: "progress",
+    entityId: entry.bookId,
+    payload: progressPayload(entry),
+    deviceId: entry.deviceId,
+    deviceSequence: entry.deviceSequence,
+  });
+}
+
 export async function queueProgress(entry: QueuedProgress): Promise<void> {
-  await queueMutation(
-    buildMutation({
-      key: progressMutationKey(entry),
-      userId: entry.userId,
-      kind: "progress",
-      entityId: entry.bookId,
-      payload: progressPayload(entry),
-      deviceId: entry.deviceId,
-      deviceSequence: entry.deviceSequence,
-    }),
-  );
+  await queueMutation(buildProgressMutation(entry));
 }
 
 export function toProgressBody(entry: Omit<QueuedProgress, "userId">): string {

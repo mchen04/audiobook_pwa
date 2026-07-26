@@ -31,10 +31,10 @@ import {
 import {
   markPausedNow,
   freshestPosition,
+  localWinsOver,
   readLocalProgress,
   readMsSinceLastPause,
   resolveStartPosition,
-  saveLocalPosition,
   selectCurrentChapter,
 } from "@/lib/playback-core";
 import {
@@ -109,11 +109,14 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const [lastEndedAt, setLastEndedAt] = useState(0);
 
   const announcePlaying = useTabArbitration(audioRef);
-  const { persistProgress, onListeningTick, markInProgress } = useProgressPersistence(
-    userId,
-    audioRef,
-    activeBookRef,
-  );
+  const {
+    persistProgress,
+    onListeningTick,
+    markInProgress,
+    saveDurableState,
+    markPositionChanged,
+    resetPositionChanged,
+  } = useProgressPersistence(userId, audioRef, activeBookRef);
   const {
     sleepMode,
     setSleepMinutes: setSleepMinutesTarget,
@@ -235,10 +238,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       }
       markPausedNow();
       const positionMs = audio.currentTime * 1000;
-      if (activeBookRef.current) {
-        saveLocalPosition(userId, activeBookRef.current.id, positionMs);
-        trackerRef.current.end(activeBookRef.current.id, positionMs);
-      }
+      if (activeBookRef.current) trackerRef.current.end(activeBookRef.current.id, positionMs);
       void persistProgress(positionMs);
       recordAction("pause", positionMs);
     };
@@ -246,6 +246,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       setIsPlaying(false);
       const endPositionMs = activeBookRef.current?.durationMs || audio.currentTime * 1000;
       if (activeBookRef.current) trackerRef.current.end(activeBookRef.current.id, endPositionMs);
+      markPositionChanged();
       void persistProgress(endPositionMs, true);
       recordAction("finished", endPositionMs);
       setLastEndedAt(Date.now());
@@ -264,6 +265,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   }, [
     announcePlaying,
     markInProgress,
+    markPositionChanged,
     onListeningTick,
     onSleepTick,
     persistProgress,
@@ -278,6 +280,8 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     suppressNextPauseRef,
     timeStore,
     persistProgress,
+    saveDurableState,
+    markPositionChanged,
     recordAction,
   });
 
@@ -302,21 +306,28 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         const audio = audioRef.current;
         if (!audio) return;
         if (activeBookRef.current?.id !== nextBook.id) {
-          cancelSeekPersist();
           const previousBook = activeBookRef.current;
-          if (!audio.paused && previousBook) {
+          if (previousBook) {
+            // The previous book's position is made durable BEFORE the seek
+            // debounce is dropped, because dropping it is what used to throw
+            // away a seek the user made while paused.
             const previousPositionMs = audio.currentTime * 1000;
-            suppressNextPauseRef.current = true;
-            audio.pause();
-            saveLocalPosition(userId, previousBook.id, previousPositionMs);
-            trackerRef.current.end(previousBook.id, previousPositionMs);
+            if (!audio.paused) suppressNextPauseRef.current = true;
+            saveDurableState(previousPositionMs, undefined, previousBook);
             void persistProgress(previousPositionMs, false, previousBook);
+            cancelSeekPersist();
+            if (!audio.paused) audio.pause();
+            trackerRef.current.end(previousBook.id, previousPositionMs);
+          } else {
+            cancelSeekPersist();
           }
           trackerRef.current.reset();
 
+          const localProgress = readLocalProgress(userId, nextBook.id);
+          const localIsFresher = localWinsOver(localProgress, nextBook.initialProgressOccurredAt);
           const { startAtMs, appliedRewindMs } = resolveStartPosition({
             storedPositionMs: freshestPosition({
-              local: readLocalProgress(userId, nextBook.id),
+              local: localProgress,
               serverPositionMs: nextBook.initialPositionMs,
               serverOccurredAt: nextBook.initialProgressOccurredAt,
             }),
@@ -327,15 +338,28 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
           // The rewind is a one-shot listening aid: refresh the pause marker so
           // reopening the book again does not walk the position further back.
           if (appliedRewindMs > 0) markPausedNow();
+          // The rate is part of where the user left off. A relaunch with no
+          // network reads the book's server-side rate from whatever the mirror
+          // last held, which is 1.0 for a book whose 1.6x was only ever set on
+          // this device — so this device's own record wins whenever it also
+          // owns the position.
+          const startRate =
+            localIsFresher && localProgress?.playbackRate
+              ? localProgress.playbackRate
+              : nextBook.initialPlaybackRate;
 
           audio.src = nextBook.mediaUrl;
           audio.currentTime = startAtMs / 1000;
-          audio.playbackRate = nextBook.initialPlaybackRate;
+          audio.playbackRate = startRate;
           activeBookRef.current = nextBook;
+          // Nothing has happened to this book's position yet on this open, so a
+          // close with no listening must not write the (possibly rewound)
+          // start back as if the user had chosen it.
+          resetPositionChanged();
           setBook(nextBook);
           setHistory([]);
           timeStore.write(startAtMs);
-          setRateState(nextBook.initialPlaybackRate);
+          setRateState(startRate);
           setMediaSessionMetadata(nextBook);
           recordAction(
             "opened",
@@ -366,6 +390,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         setRateState(bounded);
         // The rate is part of durable playback state, so it survives reloads
         // even when changed while paused.
+        markPositionChanged();
         void persistProgress((audioRef.current?.currentTime || 0) * 1000);
         recordAction("playback_rate", undefined, null, `${bounded}×`);
       },
@@ -386,13 +411,24 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         recordAction("sleep_timer_cleared");
       },
       unloadBook() {
-        cancelSeekPersist();
         const audio = audioRef.current;
+        // Durable BEFORE anything is torn down. `cancelSeekPersist` used to run
+        // first and `audio.pause()` on an already-paused element fires no
+        // event, so leaving the player after a seek made while paused lost the
+        // seek entirely — and `removeAttribute("src")` then zeroes
+        // `currentTime`, so there is nothing left to read afterwards either.
+        if (audio && activeBookRef.current) {
+          const positionMs = audio.currentTime * 1000;
+          saveDurableState(positionMs);
+          void persistProgress(positionMs);
+        }
+        cancelSeekPersist();
         if (audio) {
           audio.pause();
           audio.removeAttribute("src");
           audio.load();
         }
+        resetPositionChanged();
         activeBookRef.current = null;
         setBook(null);
         setHistory([]);
@@ -404,8 +440,11 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   }, [
     cancelSeekPersist,
     clearSleepTarget,
+    markPositionChanged,
     persistProgress,
     recordAction,
+    resetPositionChanged,
+    saveDurableState,
     setSleepAtChapterEndTarget,
     setSleepMinutesTarget,
     timeStore,

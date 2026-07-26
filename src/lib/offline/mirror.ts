@@ -1,6 +1,7 @@
 import type { IDBPTransaction } from "idb";
 
 import type { LibraryBook } from "@/domain/library";
+import { listLocalPlaybackStates } from "@/lib/playback-core";
 
 import {
   database,
@@ -443,6 +444,82 @@ export async function purgeUser(userId: string): Promise<void> {
 export async function getSyncMeta(userId: string): Promise<MirrorSyncMeta | undefined> {
   const db = await database();
   return db.get("syncMeta", userId);
+}
+
+/**
+ * Brings the shelf up to date with what this device actually knows.
+ *
+ * The library card renders from `playbackStates`, and the only writer of that
+ * store used to be a server pull. So the position the player had written
+ * durably to `localStorage` a fraction of a second before the app was killed
+ * was invisible on the shelf: the card said "Not started" for a book the user
+ * had just listened to, which is the complaint in its own right.
+ *
+ * The player now projects each progress event as it happens, but it cannot
+ * project the LAST one — a process killed with no callback wrote its final
+ * position synchronously to `localStorage` and never got a task in which to
+ * open an IndexedDB transaction. This closes that gap on the read side: one
+ * pass over this account's local position keys, writing only the rows whose
+ * local record describes a strictly later moment than the mirror holds.
+ *
+ * Timestamps decide, not device sequences. A sequence orders two events from
+ * one device against the SERVER's record of that device; it says nothing about
+ * a local write that was never sent. The existing sequence is carried through
+ * untouched so a later real progress mutation still orders correctly against it.
+ *
+ * Also refreshes the `downloads` record, because a book this device holds but
+ * the mirror has not seen yet renders its card from there instead — and the two
+ * surfaces disagreeing is its own bug.
+ */
+export async function healMirrorPlaybackFromLocal(userId: string): Promise<number> {
+  const local = listLocalPlaybackStates(userId);
+  if (!local.length) return 0;
+  const db = await database();
+  const transaction = db.transaction(["playbackStates", "downloads"], "readwrite");
+  const states = transaction.objectStore("playbackStates");
+  const downloads = transaction.objectStore("downloads");
+  let healed = 0;
+
+  for (const { bookId, state } of local) {
+    const key = mirrorKey(userId, bookId);
+    const [existing, download] = await Promise.all([states.get(key), downloads.get(key)]);
+    if (state.occurredAt <= momentOf(existing?.eventOccurredAt)) continue;
+    const occurredAt = new Date(state.occurredAt).toISOString();
+    const record: MirrorPlaybackState = {
+      key,
+      userId,
+      bookId,
+      positionMs: state.positionMs,
+      playbackRate: state.playbackRate ?? existing?.playbackRate ?? 1,
+      completed: state.completed ?? existing?.completed ?? false,
+      deviceId: existing?.deviceId ?? "",
+      deviceSequence: existing?.deviceSequence ?? 0,
+      eventOccurredAt: occurredAt,
+      updatedAt: occurredAt,
+    };
+    await states.put(record);
+    if (download && momentOf(download.book.initialProgressOccurredAt) < state.occurredAt) {
+      await downloads.put({
+        ...download,
+        book: {
+          ...download.book,
+          initialPositionMs: record.positionMs,
+          initialProgressOccurredAt: occurredAt,
+          initialPlaybackRate: record.playbackRate,
+          completed: record.completed,
+        },
+      });
+    }
+    healed += 1;
+  }
+  await transaction.done;
+  return healed;
+}
+
+function momentOf(isoTimestamp: string | null | undefined): number {
+  if (!isoTimestamp) return 0;
+  const parsed = Date.parse(isoTimestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 type LibrarySnapshot = {

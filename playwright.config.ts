@@ -66,6 +66,16 @@ export default defineConfig({
       use: { ...devices["iPhone 15"], browserName: "webkit" },
     },
     {
+      // The resume oracle. Drives its own persistent contexts and kills them
+      // with SIGKILL, so it cannot share a context with anything else.
+      // `HARK_RESUME_TESTDIR` points it at a spec file kept outside the repo,
+      // which is how the held-out scenarios stay held out.
+      name: "resume-durability",
+      testDir: process.env.HARK_RESUME_TESTDIR ?? "./tests/resume",
+      timeout: 900_000,
+      use: { ...devices["iPhone 15"], browserName: "webkit" },
+    },
+    {
       name: "sync",
       testDir: "./tests/sync",
       // Fuzz seeds interleaved with offline/online transitions and reloads.

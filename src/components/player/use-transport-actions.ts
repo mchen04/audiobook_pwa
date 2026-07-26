@@ -18,6 +18,8 @@ export function useTransportActions({
   suppressNextPauseRef,
   timeStore,
   persistProgress,
+  saveDurableState,
+  markPositionChanged,
   recordAction,
 }: {
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -29,6 +31,9 @@ export function useTransportActions({
     completed?: boolean,
     bookOverride?: PlayerBook,
   ) => Promise<void>;
+  /** Synchronous durable write; see `use-progress-persistence`. */
+  saveDurableState: (positionMs?: number, completed?: boolean, bookOverride?: PlayerBook) => void;
+  markPositionChanged: () => void;
   recordAction: (
     action: PlaybackAction,
     positionMs?: number,
@@ -67,6 +72,13 @@ export function useTransportActions({
       const previousPositionMs = audio.currentTime * 1000;
       audio.currentTime = bounded / 1000;
       timeStore.write(bounded);
+      // Durable at once, not in 800 ms. The debounce coalesces SERVER writes,
+      // which is all it was ever for; leaving the local position behind it lost
+      // the seek outright whenever the next thing to happen was
+      // `cancelSeekPersist` — seek while paused, then leave the player, and
+      // there was no `pause` event coming to save it either.
+      markPositionChanged();
+      saveDurableState(bounded);
       persistSeekSoon();
       recordAction(action, bounded, previousPositionMs, description);
     };
@@ -115,6 +127,7 @@ export function useTransportActions({
           audio.pause();
           audio.currentTime = activeBook.durationMs / 1000;
           timeStore.write(activeBook.durationMs);
+          markPositionChanged();
           void persistProgress(activeBook.durationMs, true);
           recordAction("finished", activeBook.durationMs);
         },
@@ -125,12 +138,22 @@ export function useTransportActions({
           const previousPositionMs = audio.currentTime * 1000;
           audio.currentTime = 0;
           timeStore.write(0);
+          markPositionChanged();
           void persistProgress(0, false);
           recordAction("restarted", 0, previousPositionMs);
         },
       },
     };
-  }, [activeBookRef, audioRef, persistProgress, recordAction, suppressNextPauseRef, timeStore]);
+  }, [
+    activeBookRef,
+    audioRef,
+    markPositionChanged,
+    persistProgress,
+    recordAction,
+    saveDurableState,
+    suppressNextPauseRef,
+    timeStore,
+  ]);
 }
 
 // Autoplay can be blocked before the first user activation; a rejected play()

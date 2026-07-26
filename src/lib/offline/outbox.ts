@@ -3,6 +3,7 @@ import type { IDBPTransaction } from "idb";
 import {
   archiveMutationKey,
   buildMutation,
+  buildProgressMutation,
   collectionMutationKey,
   eventMutationKey,
   metadataMutationKey,
@@ -11,6 +12,7 @@ import {
   tagMutationKey,
   type MutationDraft,
   type QueuedMutation,
+  type QueuedProgress,
 } from "@/lib/offline-sync";
 
 import {
@@ -84,7 +86,12 @@ export async function commitMutation(
   // Coalescing kept an existing row instead: the intent this call carried is
   // already superseded, so projecting it would move the mirror backwards.
   if (queued !== mutation || !patch) return { queued, mirrored: false };
+  await applyMirrorPatch(patch);
+  return { queued, mirrored: true };
+}
 
+/** One mirror patch, atomically, with no outbox row in front of it. */
+export async function applyMirrorPatch(patch: MirrorPatch): Promise<void> {
   const db = await database();
   const transaction = db.transaction(PATCH_STORES as unknown as PatchStore[], "readwrite");
   try {
@@ -94,7 +101,6 @@ export async function commitMutation(
     abortQuietly(transaction);
     throw error;
   }
-  return { queued, mirrored: true };
 }
 
 export function commitDraft(draft: MutationDraft, patch?: MirrorPatch | null) {
@@ -235,6 +241,32 @@ export async function commitTagList(
     }
     await commitTagEdge(origin, bookId, tagId, true);
   }
+}
+
+/**
+ * A progress event, journalled AND projected onto the shelf.
+ *
+ * `queueProgress` wrote the outbox row and nothing else, which is why
+ * `mirrorPatchFor`'s `case "progress"` was unreachable in production: the
+ * library card renders from the mirror's `playbackStates` row, so a device that
+ * only ever queued progress showed "Not started" for a book it had just played
+ * nine seconds of. Routing the queue through `commitMutation` is what makes the
+ * projection run — journal first, patch second, exactly as every other kind
+ * does.
+ */
+export function commitProgress(entry: QueuedProgress) {
+  return commitMutation(buildProgressMutation(entry));
+}
+
+/**
+ * The projection with no outbox row: the server has already accepted this
+ * event, so there is no unsent intent to record, but the shelf on THIS device
+ * still has to show it. Without this the card is only ever as fresh as the last
+ * pull, which is the online half of the same stale-shelf failure.
+ */
+export function mirrorProgress(entry: QueuedProgress): Promise<void> {
+  const patch = mirrorPatchFor(buildProgressMutation(entry));
+  return patch ? applyMirrorPatch(patch) : Promise.resolve();
 }
 
 export function commitCollectionEdge(

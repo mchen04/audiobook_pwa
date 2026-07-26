@@ -23,6 +23,9 @@ vi.mock("./use-progress-persistence", () => ({
     persistProgress: vi.fn().mockResolvedValue(undefined),
     onListeningTick: vi.fn(),
     markInProgress: vi.fn(),
+    saveDurableState: vi.fn(),
+    markPositionChanged: vi.fn(),
+    resetPositionChanged: vi.fn(),
   }),
 }));
 vi.mock("./use-sleep-timer", () => ({

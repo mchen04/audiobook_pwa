@@ -11,10 +11,12 @@ import {
   applyPullBatch,
   getMirrorContinueBook,
   getSyncMeta,
+  healMirrorPlaybackFromLocal,
   listMirrorBooks,
   listMirrorTagNames,
 } from "@/lib/offline/mirror";
 import { isPullBatch } from "@/lib/offline/sync-protocol";
+import { singleFlight } from "@/lib/single-flight";
 
 import type { SortOrder, StatusFilter } from "./library-view";
 
@@ -306,7 +308,26 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
 // Local reads
 // ---------------------------------------------------------------------------
 
+/**
+ * The shelf must show what this device knows, not what it last heard from the
+ * server. A relaunch after a kill has a durable local position that no
+ * IndexedDB write ever got to record, so the mirror is brought up to date
+ * before it is read. Single-flighted: the overview and the listing are two
+ * concurrent readers of one snapshot, and they must not race each other into
+ * the same rows.
+ */
+const activeHeals = new Map<string, Promise<void>>();
+
+function healBeforeRead(userId: string): Promise<void> {
+  return singleFlight(activeHeals, userId, async () => {
+    // Never fatal to a library read: a device that cannot write the mirror can
+    // still show what the mirror already holds.
+    await healMirrorPlaybackFromLocal(userId).catch(() => 0);
+  });
+}
+
 async function readOverview(userId: string): Promise<Overview> {
+  await healBeforeRead(userId);
   const [tags, continueBook, mirrorIds, records] = await Promise.all([
     listMirrorTagNames(userId),
     getMirrorContinueBook(userId),
@@ -318,6 +339,7 @@ async function readOverview(userId: string): Promise<Overview> {
 }
 
 async function readListing(userId: string, filters: LibraryFilters): Promise<Listing> {
+  await healBeforeRead(userId);
   const [rows, records, mirrorIds] = await Promise.all([
     listMirrorBooks(userId, {
       query: filters.query.trim() || undefined,

@@ -72,7 +72,52 @@ export function isChapterEnding(chapter: PlayerChapter, positionMs: number): boo
 /* Per-user local playback state. Keys are user-scoped so account switches on
  * one device never leak positions between accounts. */
 
-export type LocalPosition = { positionMs: number; occurredAt: number };
+export type LocalPosition = {
+  positionMs: number;
+  occurredAt: number;
+  /** Absent on records written before the rate and completion were durable. */
+  playbackRate?: number;
+  completed?: boolean;
+};
+
+/**
+ * The whole durable playback tuple for one book, written SYNCHRONOUSLY.
+ *
+ * This is the only write in the app that a terminating page is guaranteed to
+ * complete. It runs to the `setItem` with no await, no lock and no IndexedDB
+ * transaction in front of it, because a `visibilitychange` or `pagehide`
+ * handler on iOS gets one task and then the process may be gone: anything
+ * scheduled behind `navigator.locks.request` (an asynchronous grant, not a
+ * microtask) or behind an IDB transaction simply never runs.
+ *
+ * The rate and the completion flag travel with the position because the user's
+ * request was "save the proper and necessary info": a relaunch that restores
+ * the second but resets 1.6x to 1.0x has still lost their place.
+ *
+ * A throwing `setItem` — Safari's "Block All Cookies", a full quota — must not
+ * take anything else down with it. It is contained here so the caller can go on
+ * to journal the same event in the outbox, which is the other durable copy.
+ */
+export function saveLocalPlaybackState(
+  userId: string,
+  bookId: string,
+  state: { positionMs: number; playbackRate?: number; completed?: boolean; occurredAt?: number },
+): boolean {
+  const record: LocalPosition = {
+    positionMs: Math.round(state.positionMs),
+    occurredAt: state.occurredAt ?? Date.now(),
+  };
+  if (typeof state.playbackRate === "number" && Number.isFinite(state.playbackRate)) {
+    record.playbackRate = state.playbackRate;
+  }
+  if (typeof state.completed === "boolean") record.completed = state.completed;
+  try {
+    localStorage.setItem(localPositionKey(userId, bookId), JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function saveLocalPosition(
   userId: string,
@@ -80,10 +125,7 @@ export function saveLocalPosition(
   positionMs: number,
   occurredAt = Date.now(),
 ): void {
-  localStorage.setItem(
-    localPositionKey(userId, bookId),
-    JSON.stringify({ positionMs: Math.round(positionMs), occurredAt }),
-  );
+  saveLocalPlaybackState(userId, bookId, { positionMs, occurredAt });
 }
 
 export function readLocalPosition(userId: string, bookId: string): number | null {
@@ -91,19 +133,60 @@ export function readLocalPosition(userId: string, bookId: string): number | null
 }
 
 export function readLocalProgress(userId: string, bookId: string): LocalPosition | null {
-  const value = localStorage.getItem(localPositionKey(userId, bookId));
-  if (value === null) return null;
+  // `getItem` is inside the try, not in front of it: it throws outright when
+  // the user has blocked storage, and a throw from here used to propagate
+  // through `loadBook` so the book never opened at all.
   try {
-    const parsed = JSON.parse(value) as unknown;
-    if (typeof parsed === "number") return validLocalPosition(parsed, 0);
-    if (parsed && typeof parsed === "object") {
-      const entry = parsed as Partial<LocalPosition>;
-      return validLocalPosition(entry.positionMs, entry.occurredAt);
+    const value = localStorage.getItem(localPositionKey(userId, bookId));
+    if (value === null) return null;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed === "number") return validLocalPosition(parsed, 0);
+      if (parsed && typeof parsed === "object") return validLocalPosition(parsed, undefined);
+    } catch {
+      return validLocalPosition(Number(value), 0);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every book this device holds a local position for, for the shelf projection. */
+export function listLocalPlaybackStates(
+  userId: string,
+): Array<{ bookId: string; state: LocalPosition }> {
+  const prefix = `chapterline:position:${userId}:`;
+  const found: Array<{ bookId: string; state: LocalPosition }> = [];
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !key.startsWith(prefix)) continue;
+      const bookId = key.slice(prefix.length);
+      const state = readLocalProgress(userId, bookId);
+      if (state) found.push({ bookId, state });
     }
   } catch {
-    return validLocalPosition(Number(value), 0);
+    return found;
   }
-  return null;
+  return found;
+}
+
+/**
+ * Does this device's own record describe a later moment than the server's?
+ *
+ * A local record with no timestamp (`occurredAt: 0`, which is every pre-v2
+ * value) loses to any server timestamp: it claims no moment at all, so it
+ * cannot claim a later one.
+ */
+export function localWinsOver(
+  local: LocalPosition | null,
+  serverOccurredAt: string | null,
+): boolean {
+  if (!local) return false;
+  if (!serverOccurredAt) return true;
+  const serverTime = Date.parse(serverOccurredAt);
+  return !(Number.isFinite(serverTime) && serverTime > local.occurredAt);
 }
 
 export function freshestPosition(input: {
@@ -111,45 +194,77 @@ export function freshestPosition(input: {
   serverPositionMs: number;
   serverOccurredAt: string | null;
 }): number {
-  if (!input.local) return input.serverPositionMs;
-  if (!input.serverOccurredAt) return input.local.positionMs;
-  const serverTime = Date.parse(input.serverOccurredAt);
-  return Number.isFinite(serverTime) && serverTime > input.local.occurredAt
-    ? input.serverPositionMs
-    : input.local.positionMs;
+  const { local } = input;
+  return local && localWinsOver(local, input.serverOccurredAt)
+    ? local.positionMs
+    : input.serverPositionMs;
 }
 
 export function readMsSinceLastPause(): number | null {
-  const raw = Number(localStorage.getItem(LAST_PAUSED_KEY) || 0);
-  return raw > 0 ? Date.now() - raw : null;
+  try {
+    const raw = Number(localStorage.getItem(LAST_PAUSED_KEY) || 0);
+    return raw > 0 ? Date.now() - raw : null;
+  } catch {
+    return null;
+  }
 }
 
 export function markPausedNow(): void {
-  localStorage.setItem(LAST_PAUSED_KEY, String(Date.now()));
+  try {
+    localStorage.setItem(LAST_PAUSED_KEY, String(Date.now()));
+  } catch {
+    // A device with storage blocked still has to be able to play.
+  }
 }
 
 export function getDeviceId(): string {
-  const existing = localStorage.getItem("chapterline:device-id");
-  if (existing) return existing;
-  const created = crypto.randomUUID();
-  localStorage.setItem("chapterline:device-id", created);
-  return created;
+  try {
+    const existing = localStorage.getItem("chapterline:device-id");
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem("chapterline:device-id", created);
+    return created;
+  } catch {
+    return sessionDeviceId();
+  }
 }
 
 const LAST_PAUSED_KEY = "chapterline:last-paused-at";
+
+/**
+ * One stable id for a session that cannot persist one. Minting a fresh uuid per
+ * call would give every write its own device identity, and the server orders
+ * progress per (user, book, device) — a new device on every write is no
+ * ordering at all, and every write but the first would be discarded.
+ */
+let ephemeralDeviceId: string | null = null;
+
+function sessionDeviceId(): string {
+  if (!ephemeralDeviceId) ephemeralDeviceId = `ephemeral:${crypto.randomUUID()}`;
+  return ephemeralDeviceId;
+}
 
 function localPositionKey(userId: string, bookId: string): string {
   return `chapterline:position:${userId}:${bookId}`;
 }
 
-function validLocalPosition(positionMs: unknown, occurredAt: unknown): LocalPosition | null {
-  return typeof positionMs === "number" && Number.isFinite(positionMs) && positionMs >= 0
-    ? {
-        positionMs,
-        occurredAt:
-          typeof occurredAt === "number" && Number.isFinite(occurredAt) && occurredAt >= 0
-            ? occurredAt
-            : 0,
-      }
-    : null;
+function validLocalPosition(parsed: unknown, occurredAtOverride: number | undefined) {
+  const entry = (
+    typeof parsed === "number" ? { positionMs: parsed } : parsed
+  ) as Partial<LocalPosition> | null;
+  const positionMs = entry?.positionMs;
+  if (typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs < 0) return null;
+  const occurredAt = occurredAtOverride ?? entry?.occurredAt;
+  const record: LocalPosition = {
+    positionMs,
+    occurredAt:
+      typeof occurredAt === "number" && Number.isFinite(occurredAt) && occurredAt >= 0
+        ? occurredAt
+        : 0,
+  };
+  if (typeof entry?.playbackRate === "number" && Number.isFinite(entry.playbackRate)) {
+    record.playbackRate = entry.playbackRate;
+  }
+  if (typeof entry?.completed === "boolean") record.completed = entry.completed;
+  return record;
 }
