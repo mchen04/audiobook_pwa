@@ -63,6 +63,14 @@ export const HARD_KILL_BAR_MS = 1_000;
  */
 export const AHEAD_BAR_MS = 250;
 
+/**
+ * How close to the end of a book counts as "finished" for the purposes of
+ * spotting fixture exhaustion. Mirrors the app's own `BOOK_END_EPSILON_MS`
+ * (1000 ms) with margin, because the app restarts a finished book from zero and
+ * a cumulative row that lands there measures nothing.
+ */
+const BOOK_END_EPSILON_FOR_FIXTURE_MS = 2_000;
+
 export const APP_ORIGIN = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000";
 
 /**
@@ -144,7 +152,27 @@ export function bookTitleFor(index: number): string {
 }
 
 export type NetworkMode = "online" | "offline";
-export type Termination = "hidden" | "pagehide" | "hard-kill" | "reload" | "in-app-nav";
+export type Termination =
+  | "hidden"
+  | "pagehide"
+  | "hard-kill"
+  | "reload"
+  | "in-app-nav"
+  /**
+   * Leave the player, THEN lose the process — the composed shape that replaces
+   * the bare `in-app-nav` row.
+   *
+   * Leaving the player does not stop playback ON PURPOSE on this build
+   * (548623c / f787e8e keep one library UI with the player alive while the user
+   * browses), so `in-app-nav` alone terminates nothing and a resume bar applied
+   * to it grades a session that never ended. This one keeps the deliberate
+   * product behaviour and then applies a termination the build really does
+   * treat as one, so the user journey "I hit back, then iOS killed the tab" is
+   * covered instead of being reported as an untestable cell.
+   */
+  | "nav-then-hard-kill"
+  /** The same journey, but the platform does deliver a callback first. */
+  | "nav-then-pagehide";
 
 export type ShelfReading = {
   /** `aria-valuenow` on the card's progressbar: integer percent. */
@@ -242,6 +270,30 @@ export type CumulativeRow = {
   shelfTotalDriftMs: number | null;
   barMs: number;
   rewindObserved: number[];
+  /** Simulated absence applied before each cycle; null when the cycles ran back to back. */
+  absenceBetweenCyclesMs: number | null;
+  notes: string[];
+};
+
+/** One book's absence must not move a different book. */
+export type CrossBookRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  absenceMs: number;
+  /** The book that was paused and left alone. */
+  absentBookTitle: string;
+  /** The book that must not move. */
+  otherBookTitle: string;
+  otherStoredMs: number;
+  otherResumedMs: number;
+  /** Positive means the untouched book was rewound by another book's absence. */
+  leakedRewindMs: number;
+  /** The rewind the ladder would have applied had the absence been this book's. */
+  rewindIfLeakedMs: number;
+  markerKeysSeen: string[];
+  ticks: number;
+  playedMs: number;
   notes: string[];
 };
 
@@ -405,6 +457,52 @@ function poisonScript(): string | null {
           }
           return key === undefined ? put.call(this, value) : put.call(this, value, key);
         };
+      })();
+    `;
+  }
+  if (poison === "persist-rewound-start") {
+    // The fail-demo for the CUMULATIVE rows, arrived at after two others were
+    // measured and rejected for not discriminating. Both rejections are
+    // recorded because each one is a fact about this build:
+    //
+    //  - `seek-back-400ms` on C3: `positions [7404 x5]`,
+    //    `perCycleDeltaMs [0,0,0,0,0]` — a clean PASS. It shifts every restore
+    //    by the SAME amount, and a constant offset is not a WALK; the
+    //    cumulative columns grade movement BETWEEN cycles, so it cancels.
+    //  - shrinking the stored localStorage record on read: `positions
+    //    [7815 x5]` — also a clean PASS. The shelf moved (12815 -> 12415) and
+    //    the PLAYER did not, because with the local record's `occurredAt` left
+    //    alone the server's value still won `freshestPosition`. Poisoning a
+    //    record the restore does not prefer proves nothing.
+    //
+    // This one reproduces the actual pre-fix defect instead of approximating
+    // it: on close, the (already rewound) start position is written back as if
+    // the user had chosen it, with a FRESH `occurredAt` so it wins the merge —
+    // which is what makes it compound. Each cycle then rewinds from the
+    // previous cycle's rewound value: one full rewind tier lost per open.
+    //
+    // The book is taken from the URL (`/books/:id`), so exactly one record is
+    // touched and never the wrong book's.
+    return `
+      (() => {
+        addEventListener("pagehide", () => {
+          const audio = document.querySelector("audio");
+          const match = /\\/books\\/([0-9a-fA-F-]{36})/.exec(location.pathname);
+          if (!audio || !match) return;
+          const suffix = ":" + match[1];
+          for (let index = 0; index < localStorage.length; index += 1) {
+            const key = localStorage.key(index);
+            if (!key || !key.startsWith("chapterline:position:") || !key.endsWith(suffix)) continue;
+            localStorage.setItem(
+              key,
+              JSON.stringify({
+                positionMs: Math.round(audio.currentTime * 1000),
+                occurredAt: Date.now(),
+              }),
+            );
+            return;
+          }
+        });
       })();
     `;
   }
@@ -1282,26 +1380,75 @@ function expectedRewindMs(input: {
   return 30_000;
 }
 
+/**
+ * The two inputs the app's own smart rewind reads, read the same way the app
+ * reads them, so `expectedRewindMs` models the app instead of guessing at it.
+ *
+ * The pause marker is keyed by user AND book (`playback-core.ts:lastPausedKey`).
+ * It was a single global key until the absence of book A was found to rewind
+ * book B; this reader tracks the app's real key. If the app's key changes again
+ * and this is not updated, the model silently reads `null` for every book and
+ * every rewind row starts crediting 0 — so the shape of the key is asserted
+ * against the app's, below, rather than trusted.
+ */
 async function readRewindInputs(
   page: Page,
   userId: string,
-): Promise<{ smartRewind: boolean; msSinceLastPause: number | null }> {
-  return page.evaluate((id) => {
-    let smartRewind = true;
-    try {
-      const raw = localStorage.getItem(`chapterline:preferences:${id}`);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { preferences?: { smartRewind?: boolean } };
-        if (typeof parsed?.preferences?.smartRewind === "boolean") {
-          smartRewind = parsed.preferences.smartRewind;
+  bookId: string,
+): Promise<{ smartRewind: boolean; msSinceLastPause: number | null; markerKeysSeen: string[] }> {
+  return page.evaluate(
+    ({ id, book }) => {
+      let smartRewind = true;
+      try {
+        const raw = localStorage.getItem(`chapterline:preferences:${id}`);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { preferences?: { smartRewind?: boolean } };
+          if (typeof parsed?.preferences?.smartRewind === "boolean") {
+            smartRewind = parsed.preferences.smartRewind;
+          }
         }
+      } catch {
+        smartRewind = true;
       }
-    } catch {
-      smartRewind = true;
-    }
-    const marker = Number(localStorage.getItem("chapterline:last-paused-at") || 0);
-    return { smartRewind, msSinceLastPause: marker > 0 ? Date.now() - marker : null };
-  }, userId);
+      // Every marker key the app actually wrote, so a key-shape drift between
+      // the app and this reader shows up as a row that names the keys it found
+      // instead of as a quietly-zero rewind model.
+      const markerKeysSeen: string[] = [];
+      try {
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (key?.startsWith("chapterline:last-paused-at")) markerKeysSeen.push(key);
+        }
+      } catch {
+        /* storage blocked; the empty list is the honest answer */
+      }
+      const marker = Number(localStorage.getItem(`chapterline:last-paused-at:${id}:${book}`) || 0);
+      return {
+        smartRewind,
+        msSinceLastPause: marker > 0 ? Date.now() - marker : null,
+        markerKeysSeen,
+      };
+    },
+    { id: userId, book: bookId },
+  );
+}
+
+/**
+ * Fails loudly when the app writes pause markers this reader cannot address.
+ * A reader that silently misses the marker turns every smart-rewind row into a
+ * vacuous "expected 0, got 0".
+ */
+function assertMarkerKeyShape(scenario: string, userId: string, keys: string[]): void {
+  const unaddressable = keys.filter(
+    (key) => !key.startsWith(`chapterline:last-paused-at:${userId}:`),
+  );
+  expect(
+    unaddressable,
+    `${scenario}: the app wrote pause marker key(s) this oracle does not model ` +
+      `(${JSON.stringify(unaddressable)}). readRewindInputs is reading ` +
+      `"chapterline:last-paused-at:<userId>:<bookId>" and would report a rewind of 0 for a ` +
+      "book the app is actually rewinding. Update the reader, not this assertion.",
+  ).toStrictEqual([]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,7 +1479,7 @@ export type ScenarioSpec = {
 const LEDGER =
   process.env.HARK_RESUME_LEDGER ?? path.join(tmpdir(), "hark-resume-oracle", "rows.jsonl");
 
-export function recordRow(row: Row | CumulativeRow): void {
+export function recordRow(row: Row | CumulativeRow | CrossBookRow): void {
   mkdirSync(path.dirname(LEDGER), { recursive: true });
   appendFileSync(LEDGER, `${JSON.stringify(row)}\n`, "utf8");
   console.log(`[resume-oracle] ${JSON.stringify(row)}`);
@@ -1355,6 +1502,60 @@ async function proveOffline(page: Page, origin: string): Promise<void> {
 }
 
 /** Plays for real and refuses to continue if nothing actually played. */
+/**
+ * Pause the way the user does, so the APP writes its own absence marker.
+ *
+ * Nothing here may write the marker on the app's behalf: a marker the harness
+ * invented would prove the harness can rewind a book, not that the app can.
+ */
+async function pauseThroughUi(page: Page): Promise<void> {
+  const pause = page.getByRole("button", { name: "Pause" });
+  if (await pause.count()) {
+    await pause.first().click();
+  } else {
+    // Some builds label the single transport control by its next action only.
+    await page.evaluate(() => document.querySelector("audio")?.pause());
+  }
+  await expect
+    .poll(() => page.evaluate(() => document.querySelector("audio")?.paused ?? false), {
+      timeout: 10_000,
+      message: "the player never paused, so the app never wrote an absence marker",
+    })
+    .toBe(true);
+  await page.waitForTimeout(250);
+}
+
+/**
+ * Move the app's own pause marker `absenceMs` into the past.
+ *
+ * This is a clock advance applied to the one value the absence is computed
+ * from, and it is the only way to reach the upper rewind tiers (10 minutes,
+ * 1 hour) inside a test. It refuses to CREATE a marker: returns null when the
+ * app never wrote one, so the caller can fail instead of silently grading the
+ * 0 ms tier. Returns the original timestamp it replaced.
+ */
+async function ageAbsenceMarker(
+  page: Page,
+  userId: string,
+  bookId: string,
+  absenceMs: number,
+): Promise<number | null> {
+  return page.evaluate(
+    ({ id, book, absence }) => {
+      const key = `chapterline:last-paused-at:${id}:${book}`;
+      try {
+        const existing = Number(localStorage.getItem(key) || 0);
+        if (!(existing > 0)) return null;
+        localStorage.setItem(key, String(Date.now() - absence));
+        return existing;
+      } catch {
+        return null;
+      }
+    },
+    { id: userId, book: bookId, absence: absenceMs },
+  );
+}
+
 async function playForReal(page: Page, playMs: number): Promise<{ startedAtMs: number }> {
   const startedAtMs = await page.evaluate(() => {
     const audio = document.querySelector("audio");
@@ -1526,6 +1727,58 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       truePositionMs = sample.positionMs + (Date.now() - sampledAt) * rate;
       await expectPageDead(session.page, hardKill());
       killed = true;
+    } else if (
+      spec.termination === "nav-then-hard-kill" ||
+      spec.termination === "nav-then-pagehide"
+    ) {
+      // Step one: the user leaves the player. Playback deliberately continues.
+      await playerBackControl(session.page).click();
+      await session.page.waitForURL(/\/library/, { timeout: 60_000 });
+      const stillPlaying = await session.page.evaluate(() => {
+        const audio = document.querySelector("audio");
+        return !!audio && !audio.paused;
+      });
+      notes.push(
+        stillPlaying
+          ? "left the player; playback continued, which is the product's deliberate behaviour"
+          : "left the player and playback stopped — the composed termination is now redundant " +
+              "with the plain in-app navigation, and the product behaviour recorded in 548623c / " +
+              "f787e8e has changed",
+      );
+      // Step two: the real termination, applied from the library, where the
+      // user actually is. The bar is the terminating step's bar, not the
+      // navigation's.
+      if (spec.termination === "nav-then-pagehide") {
+        await session.page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+        await session.page.waitForTimeout(300);
+        lifecycle = await readLifecycle(session.page);
+        truePositionMs = sample.positionMs + (Date.now() - sampleReturnedAt) * rate;
+      } else {
+        lifecycle = await readLifecycle(session.page);
+        truePositionMs = sample.positionMs + (Date.now() - sampledAt) * rate;
+      }
+      // Whether the audio is still running at the instant of the kill decides
+      // whether the extrapolation above is honest, so it is asserted, not
+      // assumed: an element that stopped somewhere in the navigation would make
+      // `truePositionMs` overshoot and manufacture a "resumed behind" reading.
+      const playingAtTermination = await session.page.evaluate(() => {
+        const audio = document.querySelector("audio");
+        return {
+          present: !!audio,
+          paused: audio?.paused ?? true,
+          at: (audio?.currentTime ?? 0) * 1000,
+        };
+      });
+      if (!playingAtTermination.present || playingAtTermination.paused) {
+        // Use what the element really reached rather than extrapolating past it.
+        truePositionMs = playingAtTermination.present ? playingAtTermination.at : sample.positionMs;
+        notes.push(
+          "the audio was not playing at the moment of termination, so the true position is the " +
+            "element's own last value rather than an extrapolation",
+        );
+      }
+      await expectPageDead(session.page, hardKill());
+      killed = true;
     } else if (spec.termination === "reload") {
       await session.page.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
       // The audio keeps playing while the reload is being carried out, and the
@@ -1619,7 +1872,8 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
 
     const settled = await readSettledPosition(page);
     const resumedUiMs = await readUiPosition(page);
-    const rewindInputs = await readRewindInputs(page, userId);
+    const rewindInputs = await readRewindInputs(page, userId, bookId);
+    assertMarkerKeyShape(spec.scenario, userId, rewindInputs.markerKeysSeen);
     const rewind = expectedRewindMs(rewindInputs);
     if (rewind > 0) {
       notes.push(
@@ -1696,7 +1950,14 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
         shelf.sourceMs === null
           ? null
           : Math.round(Math.abs(truePositionMs - shelf.sourceMs - rewind)),
-      barMs: spec.termination === "hard-kill" ? HARD_KILL_BAR_MS : CALLBACK_BAR_MS,
+      // The bar belongs to the TERMINATING step. A composed row that navigates
+      // and then dies with no callback gets the no-callback bar; one that gets
+      // a pagehide gets the callback bar. Never the looser of the two by
+      // default.
+      barMs:
+        spec.termination === "hard-kill" || spec.termination === "nav-then-hard-kill"
+          ? HARD_KILL_BAR_MS
+          : CALLBACK_BAR_MS,
       lifecycle,
       hiddenTransition,
       visibilityAtCallback,
@@ -1738,6 +1999,21 @@ export async function measureCumulative(spec: {
   network: NetworkMode;
   cycles: number;
   playMs?: number;
+  /**
+   * Simulated time away from the book between cycles, in milliseconds.
+   *
+   * Without this the cycles run back to back in a few seconds, `rewindForAbsence`
+   * returns 0 below 60_000 ms, and the smart-rewind branch is never entered at
+   * all — so C1/C2 pass at 0 ms without ever testing the compounding backward
+   * walk they exist to catch. That is a vacuous pass.
+   *
+   * The absence is applied by AGEING the marker the app itself wrote (see
+   * `ageAbsenceMarker`), never by inventing one: if the app never wrote a pause
+   * marker, this variant fails rather than quietly measuring the 0 ms tier.
+   * Ageing a stored timestamp is exactly what waiting would do to it, and it is
+   * the only way to reach the 30 s tier (>1 h) inside a test run.
+   */
+  absenceBetweenCyclesMs?: number;
 }): Promise<CumulativeRow> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
@@ -1746,6 +2022,7 @@ export async function measureCumulative(spec: {
   const book = books.get(bookTitle);
   expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
   const bookId = book!.id;
+  const absenceMs = spec.absenceBetweenCyclesMs ?? null;
   await sql()`DELETE FROM playback_states WHERE book_id = ${bookId}`;
 
   net.restore();
@@ -1777,6 +2054,29 @@ export async function measureCumulative(spec: {
     ticks = sample.ticks;
     playedMs = Math.round(sample.positionMs - startedAtMs);
     expect(ticks, "nothing played, so this cumulative row measured nothing").toBeGreaterThan(2);
+    // Did the listening pass run this book off the end of the fixture?
+    //
+    // The books are ~24 s and the rows SHARE them, each starting wherever the
+    // previous row left off, so a long matrix eventually pushes one to its end
+    // — and a book stored at its end deliberately restarts from zero
+    // (`resolveStartPosition`, BOOK_END_EPSILON_MS). Every cycle then reads a
+    // clean 0, which is a fixture-capacity fact wearing the costume of a
+    // product result. Named here so it can never be mistaken for one.
+    const endOfBook = durationMs - BOOK_END_EPSILON_FOR_FIXTURE_MS;
+    expect(
+      Math.round(sample.positionMs),
+      `${spec.scenario}: the listening pass ended at ${Math.round(sample.positionMs)}ms of a ` +
+        `${durationMs}ms book, i.e. AT ITS END. A finished book restarts from zero by design, so ` +
+        "every cycle below would read 0 and the row would measure fixture exhaustion rather than " +
+        "resume. The rows share three ~24 s books and start where the previous row left off — run " +
+        "this cumulative row standalone, or give it a book the matrix has not already used up.",
+    ).toBeLessThan(endOfBook);
+    // The absence variant needs the app to have written its own pause marker,
+    // and only a real pause writes one. Pause through the UI before leaving.
+    if (absenceMs !== null) {
+      await pauseThroughUi(session.page);
+      notes.push(`paused through the UI so the app wrote its own absence marker`);
+    }
     // Leave gracefully: the cycles below are about what repeated OPENING does,
     // not about what a crash costs — that is the single-cycle matrix's job.
     await session.page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
@@ -1787,9 +2087,30 @@ export async function measureCumulative(spec: {
     for (let cycle = 0; cycle < spec.cycles; cycle += 1) {
       session = await relaunch(origin, media!);
       const shelf = await readShelf(session.page, origin, bookId, bookTitle, userId, durationMs);
+      // Age the marker BEFORE the open, because the open is what reads it.
+      let rewind: number;
+      if (absenceMs !== null) {
+        const aged = await ageAbsenceMarker(session.page, userId, bookId, absenceMs);
+        expect(
+          aged,
+          `${spec.scenario}: cycle ${cycle + 1} found no pause marker for this book, so the ` +
+            "absence could not be applied and this variant would grade the 0 ms rewind tier " +
+            "while claiming to grade the long-absence one. That is the vacuous pass this row " +
+            "exists to prevent.",
+        ).not.toBeNull();
+        const inputs = await readRewindInputs(session.page, userId, bookId);
+        assertMarkerKeyShape(spec.scenario, userId, inputs.markerKeysSeen);
+        rewind = expectedRewindMs({ smartRewind: inputs.smartRewind, msSinceLastPause: absenceMs });
+        expect(
+          rewind,
+          `${spec.scenario}: cycle ${cycle + 1} set an absence of ${absenceMs}ms but the app's own ` +
+            "rewind ladder credits 0ms for it, so the rewind branch is still not being entered",
+        ).toBeGreaterThan(0);
+      } else {
+        rewind = expectedRewindMs(await readRewindInputs(session.page, userId, bookId));
+      }
       await openPlayer(session.page, origin, bookId, bookTitle);
       const settled = await readSettledPosition(session.page);
-      const rewind = expectedRewindMs(await readRewindInputs(session.page, userId));
       positions.push(Math.round(settled.positionMs));
       shelfPositions.push(shelf.sourceMs === null ? null : Math.round(shelf.sourceMs));
       rewindObserved.push(rewind);
@@ -1827,6 +2148,116 @@ export async function measureCumulative(spec: {
         : null,
     barMs: CALLBACK_BAR_MS,
     rewindObserved,
+    absenceBetweenCyclesMs: absenceMs,
     notes,
   };
+}
+
+/**
+ * Does an absence from ONE book move a DIFFERENT one?
+ *
+ * The pause marker was a single global key with no user and no book in it, so
+ * the app could not tell "you have been away from this story for an hour" from
+ * "you have been away from some story for an hour". Both books are paused for
+ * real here, and only the first one's marker is aged: a correctly scoped app
+ * leaves the second exactly where it was.
+ */
+export async function measureCrossBookAbsence(spec: {
+  scenario: string;
+  absentBookIndex: number;
+  otherBookIndex: number;
+  absenceMs: number;
+  playMs?: number;
+}): Promise<CrossBookRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books } = active!;
+  expect(
+    spec.absentBookIndex,
+    "the absent book and the untouched book must be different books",
+  ).not.toBe(spec.otherBookIndex);
+  const absentTitle = bookTitleFor(spec.absentBookIndex);
+  const otherTitle = bookTitleFor(spec.otherBookIndex);
+  const absentId = books.get(absentTitle)!.id;
+  const otherId = books.get(otherTitle)!.id;
+  await sql()`DELETE FROM playback_states WHERE book_id IN (${absentId}, ${otherId})`;
+
+  net.restore();
+  net.reset();
+
+  const notes: string[] = [];
+  let media: CacheSnapshot | null = null;
+  let session = await launch();
+  let ticks = 0;
+  let playedMs = 0;
+  try {
+    // The book that must not move: play it, pause it, leave it.
+    await openPlayer(session.page, origin, otherId, otherTitle);
+    media = await snapshotCaches(session.page);
+    const { startedAtMs } = await playForReal(session.page, spec.playMs ?? 12_000);
+    await pauseThroughUi(session.page);
+    const sample = await session.page.evaluate(() => {
+      const audio = document.querySelector("audio");
+      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      return { positionMs: audio ? audio.currentTime * 1000 : -1, ticks: probe?.ticks ?? 0 };
+    });
+    ticks = sample.ticks;
+    playedMs = Math.round(sample.positionMs - startedAtMs);
+    const otherStoredMs = Math.round(sample.positionMs);
+    expect(ticks, `${spec.scenario}: nothing played, so nothing was measured`).toBeGreaterThan(2);
+
+    // The book the user really is away from: play it, pause it, leave it.
+    await openPlayer(session.page, origin, absentId, absentTitle);
+    await playForReal(session.page, 6_000);
+    await pauseThroughUi(session.page);
+    await session.page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    await session.page.waitForTimeout(300);
+    await expectPageDead(session.page, hardKill());
+
+    // Only the absent book's clock moves.
+    session = await relaunch(origin, media!);
+    const aged = await ageAbsenceMarker(session.page, userId, absentId, spec.absenceMs);
+    expect(
+      aged,
+      `${spec.scenario}: "${absentTitle}" has no pause marker, so no absence could be created ` +
+        "and a green here would mean nothing",
+    ).not.toBeNull();
+    const inputs = await readRewindInputs(session.page, userId, absentId);
+    assertMarkerKeyShape(spec.scenario, userId, inputs.markerKeysSeen);
+    const rewindIfLeakedMs = expectedRewindMs({
+      smartRewind: inputs.smartRewind,
+      msSinceLastPause: spec.absenceMs,
+    });
+    expect(
+      rewindIfLeakedMs,
+      `${spec.scenario}: an absence of ${spec.absenceMs}ms credits no rewind at all, so a leak ` +
+        "would be invisible and this row proves nothing",
+    ).toBeGreaterThan(0);
+
+    // Open the OTHER book. It was paused seconds ago; it must not be rewound.
+    await openPlayer(session.page, origin, otherId, otherTitle);
+    const settled = await readSettledPosition(session.page);
+    const otherResumedMs = Math.round(settled.positionMs);
+    notes.push(`marker keys present: ${JSON.stringify(inputs.markerKeysSeen)}`);
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      absenceMs: spec.absenceMs,
+      absentBookTitle: absentTitle,
+      otherBookTitle: otherTitle,
+      otherStoredMs,
+      otherResumedMs,
+      leakedRewindMs: otherStoredMs - otherResumedMs,
+      rewindIfLeakedMs,
+      markerKeysSeen: inputs.markerKeysSeen,
+      ticks,
+      playedMs,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await session.page.close().catch(() => undefined);
+    await healDevice(origin, media);
+  }
 }

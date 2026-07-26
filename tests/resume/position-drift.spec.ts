@@ -2,8 +2,10 @@ import { expect, test } from "@playwright/test";
 
 import {
   AHEAD_BAR_MS,
+  CALLBACK_BAR_MS,
   closeResumeFixture,
   measure,
+  measureCrossBookAbsence,
   measureCumulative,
   recordRow,
   resumeFixture,
@@ -38,18 +40,78 @@ const SCENARIOS: ScenarioSpec[] = [
   { scenario: "T2 pagehide offline", bookIndex: 0, termination: "pagehide", network: "offline" },
   { scenario: "T3 hardkill online", bookIndex: 1, termination: "hard-kill", network: "online" },
   { scenario: "T4 reload online", bookIndex: 2, termination: "reload", network: "online" },
+  // T5 was "leave the player" on its own. It is N/A-BY-DESIGN and is replaced
+  // below; see `T5_RETIRED_RATIONALE`.
   {
-    scenario: "T5 nav online",
+    scenario: "T6 nav then hardkill online",
     bookIndex: 0,
-    termination: "in-app-nav",
+    termination: "nav-then-hard-kill",
+    network: "online",
+    openFromLibrary: true,
+  },
+  {
+    scenario: "T7 nav then pagehide online",
+    bookIndex: 1,
+    termination: "nav-then-pagehide",
     network: "online",
     openFromLibrary: true,
   },
 ];
 
+/**
+ * T5 — "leave the player" — is retired as N/A-BY-DESIGN, not relaxed.
+ *
+ * Leaving the player keeps audio playing ON PURPOSE: commits 548623c and
+ * f787e8e deliberately keep one library UI with the player alive while the user
+ * browses. So the in-app navigation terminates nothing, nothing is ever
+ * restored, and applying a 250 ms RESUME bar to it grades a session that never
+ * ended — it produced a 1109 ms "resumed AHEAD" reading, the most serious
+ * verdict this suite has, for a build whose stored position was exactly right.
+ * Making back stop playback to satisfy the oracle would silently reverse a
+ * product decision, so the row is retired and REPLACED by T6/T7, which perform
+ * the same navigation and THEN apply a termination this build really does treat
+ * as one. Net coverage goes up: the journey "I hit back, then iOS took the tab"
+ * was previously untested by anything.
+ *
+ * Whether back SHOULD stop playback is `tests/parity/player-back.spec.ts`'s
+ * question. This suite only measures resume.
+ */
+const T5_RETIRED_RATIONALE =
+  "T5 (bare in-app navigation) is N/A-by-design: it is not a termination on this build.";
+
 const CUMULATIVE = [
   { scenario: "C1 cycles online", bookIndex: 1, network: "online" as const, cycles: 5 },
   { scenario: "C2 cycles offline", bookIndex: 2, network: "offline" as const, cycles: 5 },
+  /**
+   * C3 is the cell C1/C2 only LOOKED like they covered.
+   *
+   * C1/C2 run their cycles back to back in seconds. `rewindForAbsence` returns
+   * 0 below 60_000 ms, so those rows never enter the smart-rewind branch at all
+   * and their 0 ms result says nothing about the compounding backward walk they
+   * were written to catch. C3 puts a real absence between every cycle, which
+   * makes each open apply a genuine rewind, and then demands that the position
+   * still not walk backwards across the cycles.
+   *
+   * 300_000 ms picks the 5 s rewind tier deliberately. The oracle fixture book
+   * is ~24 s long; five cycles at the 30 s tier (>1 h absence) would drive the
+   * position to zero on the FIRST cycle and every later cycle would then read a
+   * clean 0 ms delta — a rewind that bottoms out cannot show a walk, so the
+   * higher tiers are UNREACHABLE with this fixture and are recorded as such
+   * rather than faked. At the 5 s tier the ~12 s anchor leaves room for two
+   * full cycles of walk before the floor, which is enough for the per-cycle
+   * column to show one; and a walk that bottoms out later still blows the
+   * total, since `anchor - 0` is thirty times the bar. Measured under
+   * `HARK_RESUME_POISON=persist-rewound-start`: per-cycle [0,5000,2806,0,0],
+   * total 7806 against a 250 ms bar.
+   */
+  {
+    scenario: "C3 cycles online, 5min absence each",
+    bookIndex: 0,
+    network: "online" as const,
+    cycles: 5,
+    playMs: 12_000,
+    absenceBetweenCyclesMs: 300_000,
+  },
 ];
 
 /** Three books is what WebKit's Cache Storage would hold; see `ScenarioSpec`. */
@@ -99,7 +161,7 @@ function assertMeasured(row: Row): void {
 
 function assertLifecycle(row: Row): void {
   const kinds = row.lifecycle.map((entry) => entry.split("@")[0]);
-  if (row.termination === "hard-kill") {
+  if (row.termination === "hard-kill" || row.termination === "nav-then-hard-kill") {
     expect(
       kinds,
       `${row.scenario}: a lifecycle callback WAS delivered, so this is not the no-callback case ` +
@@ -239,6 +301,27 @@ function assertCumulativeMeasured(row: CumulativeRow): void {
   expect(row.ticks, `${row.scenario}: nothing played, so nothing was measured`).toBeGreaterThan(2);
   expect(row.anchorMs, `${row.scenario}: no ground was established to hold`).toBeGreaterThan(4_000);
   expect(row.positions.length, `${row.scenario}: no cycles ran`).toBe(row.cycles);
+  // An absence row that credited no rewind graded the same 0 ms tier the plain
+  // cumulative rows already grade, and would be a duplicate wearing a new name.
+  if (row.absenceBetweenCyclesMs !== null) {
+    expect(
+      Math.min(...row.rewindObserved),
+      `${row.scenario}: at least one cycle entered with a rewind of 0ms despite a ` +
+        `${row.absenceBetweenCyclesMs}ms absence (${JSON.stringify(row.rewindObserved)}). This ` +
+        "row would then be grading the same branch C1/C2 already grade — a vacuous pass.",
+    ).toBeGreaterThan(0);
+    // There has to be somewhere to walk TO. A rewind that bottoms out at zero
+    // on the first cycle reports a clean 0 ms delta for every cycle after it,
+    // because there was nowhere left to go — the position at the anchor must
+    // leave room for at least one full rewind to be visible. (The total still
+    // catches a walk that bottoms out later: `anchor - 0` is far past the bar.)
+    expect(
+      row.anchorMs,
+      `${row.scenario}: the anchor is ${row.anchorMs}ms and a single cycle's rewind is ` +
+        `${row.rewindObserved[0]}ms, so the rewind bottoms out immediately and no per-cycle ` +
+        "movement could be observed at all",
+    ).toBeGreaterThan(row.rewindObserved[0]!);
+  }
 }
 
 for (const spec of CUMULATIVE) {
@@ -259,6 +342,18 @@ for (const spec of CUMULATIVE) {
         "a rewind that re-applies on every open is this failure, not an allowance.",
     ).toBeLessThanOrEqual(row.barMs);
 
+    // Reported as its own column, not folded into the total: a walk that is
+    // steady and small reads differently from one cycle that lost everything,
+    // and the two need different fixes.
+    expect(
+      Math.max(...row.perCycleDeltaMs),
+      `${row.scenario}: one open with no listening lost ` +
+        `${Math.max(...row.perCycleDeltaMs)}ms on its own ` +
+        `(per-cycle ${JSON.stringify(row.perCycleDeltaMs)}, positions ` +
+        `${JSON.stringify(row.positions)}, rewind credited per cycle ` +
+        `${JSON.stringify(row.rewindObserved)})`,
+    ).toBeLessThanOrEqual(row.barMs);
+
     if (row.shelfTotalDriftMs !== null) {
       expect(
         Math.abs(row.shelfTotalDriftMs),
@@ -268,3 +363,49 @@ for (const spec of CUMULATIVE) {
     }
   });
 }
+
+/**
+ * X1: an absence from one book must not move another.
+ *
+ * The pause marker used to be one global key with no user and no book in it, so
+ * "you have been away for an hour" was a property of the DEVICE. A user who
+ * finished book A last month and has been listening to book B every night would
+ * have B rewound on open because of A. This is the direct test of that, and it
+ * is separate from C3 because C3 could pass on a per-user-but-not-per-book key.
+ */
+test("X1: an absence from one book does not rewind another", async () => {
+  test.setTimeout(600_000);
+  const row = await measureCrossBookAbsence({
+    scenario: "X1 cross-book absence",
+    absentBookIndex: 1,
+    otherBookIndex: 2,
+    absenceMs: 20 * 60_000,
+    playMs: 12_000,
+  });
+  recordRow(row);
+
+  expect(row.ticks, "X1: nothing played, so nothing was measured").toBeGreaterThan(2);
+  expect(row.otherStoredMs, "X1: the untouched book had no ground to hold").toBeGreaterThan(4_000);
+  expect(
+    row.leakedRewindMs,
+    `X1: "${row.otherBookTitle}" was paused seconds ago and stored at ${row.otherStoredMs}ms, but ` +
+      `opening it came back at ${row.otherResumedMs}ms — ${row.leakedRewindMs}ms of rewind that ` +
+      `belongs to "${row.absentBookTitle}", which the user has been away from for ` +
+      `${row.absenceMs}ms. The ladder credits ${row.rewindIfLeakedMs}ms for that absence. ` +
+      `Marker keys on the device: ${JSON.stringify(row.markerKeysSeen)}.`,
+  ).toBeLessThanOrEqual(CALLBACK_BAR_MS);
+});
+
+test("T5 stays retired, and its replacements stay in the matrix", () => {
+  expect(
+    SCENARIOS.some((spec) => spec.termination === "in-app-nav"),
+    `${T5_RETIRED_RATIONALE} A bare in-app-navigation row is back in the matrix: the audio ` +
+      "survives that navigation by design, so a resume bar applied to it grades a session that " +
+      "never ended. Use nav-then-hard-kill or nav-then-pagehide.",
+  ).toBe(false);
+  expect(
+    SCENARIOS.filter((spec) => spec.termination.startsWith("nav-then-")).length,
+    `${T5_RETIRED_RATIONALE} Its composed replacements have been removed, which turns a ` +
+      "reclassification into a net LOSS of coverage.",
+  ).toBeGreaterThanOrEqual(2);
+});

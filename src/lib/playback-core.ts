@@ -200,18 +200,32 @@ export function freshestPosition(input: {
     : input.serverPositionMs;
 }
 
-export function readMsSinceLastPause(): number | null {
+/**
+ * How long the user has been away from THIS book, for smart rewind.
+ *
+ * Scoped by user and book. A single global marker made the absence a property
+ * of the device rather than of the book: pausing book A and returning to book B
+ * a week later rewound B by 30 seconds even though B had never been paused at
+ * all, and switching accounts on one device leaked the other account's absence.
+ * Smart rewind is "remind me where I was in THIS story", so the marker has to
+ * be per story, per account.
+ *
+ * An absent marker returns null (never 0), which `resolveStartPosition` treats
+ * as "no rewind" rather than "no absence" — a book that has never been paused
+ * must not be rewound.
+ */
+export function readMsSinceLastPause(userId: string, bookId: string): number | null {
   try {
-    const raw = Number(localStorage.getItem(LAST_PAUSED_KEY) || 0);
+    const raw = Number(localStorage.getItem(lastPausedKey(userId, bookId)) || 0);
     return raw > 0 ? Date.now() - raw : null;
   } catch {
     return null;
   }
 }
 
-export function markPausedNow(): void {
+export function markPausedNow(userId: string, bookId: string): void {
   try {
-    localStorage.setItem(LAST_PAUSED_KEY, String(Date.now()));
+    localStorage.setItem(lastPausedKey(userId, bookId), String(Date.now()));
   } catch {
     // A device with storage blocked still has to be able to play.
   }
@@ -229,7 +243,9 @@ export function getDeviceId(): string {
   }
 }
 
-const LAST_PAUSED_KEY = "chapterline:last-paused-at";
+function lastPausedKey(userId: string, bookId: string): string {
+  return `chapterline:last-paused-at:${userId}:${bookId}`;
+}
 
 /**
  * One stable id for a session that cannot persist one. Minting a fresh uuid per

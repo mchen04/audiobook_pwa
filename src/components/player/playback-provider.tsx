@@ -236,9 +236,13 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         suppressNextPauseRef.current = false;
         return;
       }
-      markPausedNow();
       const positionMs = audio.currentTime * 1000;
-      if (activeBookRef.current) trackerRef.current.end(activeBookRef.current.id, positionMs);
+      // The marker records an absence from a specific book, so there is nothing
+      // to mark when no book is loaded.
+      if (activeBookRef.current) {
+        markPausedNow(userId, activeBookRef.current.id);
+        trackerRef.current.end(activeBookRef.current.id, positionMs);
+      }
       void persistProgress(positionMs);
       recordAction("pause", positionMs);
     };
@@ -333,11 +337,11 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
             }),
             durationMs: nextBook.durationMs,
             smartRewindEnabled: preferencesRef.current.smartRewind,
-            msSinceLastPause: readMsSinceLastPause(),
+            msSinceLastPause: readMsSinceLastPause(userId, nextBook.id),
           });
           // The rewind is a one-shot listening aid: refresh the pause marker so
           // reopening the book again does not walk the position further back.
-          if (appliedRewindMs > 0) markPausedNow();
+          if (appliedRewindMs > 0) markPausedNow(userId, nextBook.id);
           // The rate is part of where the user left off. A relaunch with no
           // network reads the book's server-side rate from whatever the mirror
           // last held, which is 1.0 for a book whose 1.6x was only ever set on
