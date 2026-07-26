@@ -8,7 +8,7 @@ import {
   deleteJournaledCacheEntry,
   deleteJournaledMedia,
 } from "./deletion-journal";
-import { getOfflineBook } from "./library";
+import { getStoredOfflineBook } from "./library";
 
 const MEDIA_CHUNK_BYTES = 4 * 1024 * 1024;
 // Overlaps file reads with cache commits while keeping at most ~12MB of audio
@@ -197,11 +197,20 @@ async function storeLocalBookMediaUnlocked(
     offlineCoverThumbUrl,
     byteSize: file.size,
     downloadedAt: new Date().toISOString(),
+    // The bytes were just written and are verified below, so this record is by
+    // construction on this device. Written explicitly rather than left absent
+    // so re-attaching a book whose audio went missing clears the mark.
+    mediaMissingSince: null,
   };
 
+  // The STORED record, not a reconciled read. `getOfflineBook` answers "can
+  // this device play it", so a book whose audio went missing came back
+  // `undefined` — and the old token's bytes and cover, which a transient cache
+  // wipe may hand back at any moment, were left for the orphan sweep instead of
+  // being reclaimed here. It is also what the failure path must restore.
   let existing: OfflineBook | undefined;
   try {
-    existing = await getOfflineBook(userId, book.id);
+    existing = await getStoredOfflineBook(userId, book.id);
     await db.put("downloads", record);
     const [storedRecord, storedMedia] = await Promise.all([
       db.get("downloads", key),

@@ -41,7 +41,16 @@ export type LibraryFilters = {
   onDevice: boolean;
 };
 
-/** Downloads keyed by book id: byte size, cover art, and the record to play. */
+/**
+ * Downloads keyed by book id: byte size, cover art, and the record to play.
+ *
+ * Only books whose audio this device can actually reach. A record marked
+ * `mediaMissingSince` is deliberately absent: this map decides the download
+ * badge, the on-device facet and — through `library-client.tsx`'s
+ * `device.get(...)` → `asOfflinePlayerBook` — which record the library hands
+ * straight to the player. The book itself is still listed and still openable;
+ * the gate then offers to re-attach the MP3.
+ */
 export type DeviceIndex = Map<string, OfflineBook>;
 
 export type LibraryListing = {
@@ -350,7 +359,12 @@ async function readListing(userId: string, filters: LibraryFilters): Promise<Lis
     listStoredOfflineBooks(userId),
     readMirrorBookIds(userId),
   ]);
-  const device: DeviceIndex = new Map(records.map((record) => [record.book.id, record]));
+  const device: DeviceIndex = new Map(
+    records.filter((record) => !record.mediaMissingSince).map((record) => [record.book.id, record]),
+  );
+  // Every record, marked or not: a book this device imported and the mirror has
+  // not seen yet must keep its row even after its audio went missing, or the
+  // only way back to the attach screen would vanish with it.
   const merged = withDeviceOnlyBooks(rows, records, mirrorIds, filters);
   return { books: filters.onDevice ? merged.filter((row) => device.has(row.id)) : merged, device };
 }
@@ -450,9 +464,11 @@ type PullOutcome = "applied" | "unauthorized" | "unreachable";
 
 async function revalidate(userId: string): Promise<PullOutcome> {
   const outcome = await pull(userId);
-  // Reconciling downloads against Cache Storage is how evicted audio is
-  // detected: the stale record is dropped, and the book keeps its metadata and
-  // is marked "not on this device" instead of continuing to look playable.
+  // Reconciling downloads against Cache Storage is how missing audio is
+  // detected: the record is marked "not on this device" — never deleted, and
+  // never at the cost of its read-along cues — so the book stops looking
+  // playable while staying re-attachable, and un-marks itself if the bytes come
+  // back. See `reconcileOfflineRecord`.
   await listOfflineBooks(userId).catch(() => undefined);
   return outcome;
 }
