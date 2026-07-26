@@ -33,25 +33,46 @@ import {
  * process and never taken from the app.
  */
 
+/**
+ * ONE BOOK PER SCENARIO. Nothing here shares a book with anything else.
+ *
+ * The rows used to share three books, which coupled them in a way that only
+ * showed up in a full pass: a book is a single entry in this device's download
+ * store and a single set of bytes in Cache Storage, so one scenario losing that
+ * entry took the book away from every later scenario that used it. Measured, on
+ * the three-book matrix: C2 and X1 failed at their FIRST `openPlayer` with "this
+ * device does not currently have it", for a book damaged four scenarios earlier,
+ * while both passed standalone. `preflightDevice` now catches that at the moment
+ * it happens rather than where it surfaces, but the coupling itself is worth
+ * removing: a shared book also means each row starts wherever the last one left
+ * off, which is why several of them had to ask for `resetBookFirst`.
+ *
+ * The cost is import time and disk, and both are cheap. MEASURED, WebKit
+ * ephemeral context, `navigator.storage.estimate()`: quota 1_048_576_000 bytes,
+ * and 200 x 98 KB entries written and read back with no error. The "WebKit
+ * refuses to hold more than a few hundred kilobytes" note this file used to
+ * carry was wrong — it belonged to the persistent-context setup that could not
+ * host the app at all.
+ */
 const SCENARIOS: ScenarioSpec[] = [
   { scenario: "T1 hidden online", bookIndex: 0, termination: "hidden", network: "online" },
   { scenario: "T1 hidden offline", bookIndex: 1, termination: "hidden", network: "offline" },
   { scenario: "T2 pagehide online", bookIndex: 2, termination: "pagehide", network: "online" },
-  { scenario: "T2 pagehide offline", bookIndex: 0, termination: "pagehide", network: "offline" },
-  { scenario: "T3 hardkill online", bookIndex: 1, termination: "hard-kill", network: "online" },
-  { scenario: "T4 reload online", bookIndex: 2, termination: "reload", network: "online" },
+  { scenario: "T2 pagehide offline", bookIndex: 3, termination: "pagehide", network: "offline" },
+  { scenario: "T3 hardkill online", bookIndex: 4, termination: "hard-kill", network: "online" },
+  { scenario: "T4 reload online", bookIndex: 5, termination: "reload", network: "online" },
   // T5 was "leave the player" on its own. It is N/A-BY-DESIGN and is replaced
   // below; see `T5_RETIRED_RATIONALE`.
   {
     scenario: "T6 nav then hardkill online",
-    bookIndex: 0,
+    bookIndex: 6,
     termination: "nav-then-hard-kill",
     network: "online",
     openFromLibrary: true,
   },
   {
     scenario: "T7 nav then pagehide online",
-    bookIndex: 1,
+    bookIndex: 7,
     termination: "nav-then-pagehide",
     network: "online",
     openFromLibrary: true,
@@ -79,9 +100,23 @@ const SCENARIOS: ScenarioSpec[] = [
 const T5_RETIRED_RATIONALE =
   "T5 (bare in-app navigation) is N/A-by-design: it is not a termination on this build.";
 
+/**
+ * The book index whose fixture is built long, and how long.
+ *
+ * C4 grades the ladder's top tier, which subtracts 30 s. A ~24 s book cannot
+ * hold that: the position bottoms out at zero on the first open and every later
+ * cycle reads a clean 0 ms delta, so the tier is not merely awkward to measure,
+ * it is unmeasurable — which is why C3's comment recorded the upper tiers as
+ * UNREACHABLE rather than faking them. Fifteen copies of the fixture's frames
+ * is ~120 s, which leaves a 65 s listen sitting 35 s clear of the floor after
+ * the rewind, so a per-cycle walk has somewhere to show itself.
+ */
+const LONG_BOOK_INDEX = 11;
+const LONG_BOOK_REPEAT = 15;
+
 const CUMULATIVE = [
-  { scenario: "C1 cycles online", bookIndex: 1, network: "online" as const, cycles: 5 },
-  { scenario: "C2 cycles offline", bookIndex: 2, network: "offline" as const, cycles: 5 },
+  { scenario: "C1 cycles online", bookIndex: 8, network: "online" as const, cycles: 5 },
+  { scenario: "C2 cycles offline", bookIndex: 9, network: "offline" as const, cycles: 5 },
   /**
    * C3 is the cell C1/C2 only LOOKED like they covered.
    *
@@ -106,16 +141,39 @@ const CUMULATIVE = [
    */
   {
     scenario: "C3 cycles online, 5min absence each",
-    bookIndex: 0,
+    bookIndex: 10,
     network: "online" as const,
     cycles: 5,
     playMs: 12_000,
     absenceBetweenCyclesMs: 300_000,
   },
+  /**
+   * C4 closes the tier C3 could only name.
+   *
+   * C3 deliberately grades the 5 s tier and records the two above it as
+   * UNREACHABLE, because a 24 s book has no room for a 30 s subtraction. That
+   * is a fixture limit, not a product one, so it is removed by giving this row
+   * a ~120 s book (`LONG_BOOK_INDEX`) and a 65 s listen. An absence of 65
+   * minutes puts it past the ladder's one-hour threshold, so every cycle
+   * credits the full 30 s — asserted, not assumed, by `assertCumulativeMeasured`
+   * — and the anchor lands around 35 s, comfortably clear of the floor, so a
+   * per-cycle walk backwards has somewhere to go and would be seen.
+   *
+   * This is the tier a real user meets most often: the one where they come back
+   * to a book the next day.
+   */
+  {
+    scenario: "C4 cycles online, 65min absence each",
+    bookIndex: LONG_BOOK_INDEX,
+    network: "online" as const,
+    cycles: 5,
+    playMs: 65_000,
+    absenceBetweenCyclesMs: 65 * 60_000,
+  },
 ];
 
-/** Three books is what WebKit's Cache Storage would hold; see `ScenarioSpec`. */
-const BOOK_COUNT = 3;
+/** One book per scenario, plus the two X1 needs. See `SCENARIOS`. */
+const BOOK_COUNT = 14;
 
 /**
  * Sequential, but NOT `mode: "serial"`.
@@ -132,7 +190,7 @@ const BOOK_COUNT = 3;
 
 test.beforeAll(async () => {
   test.setTimeout(900_000);
-  await resumeFixture(BOOK_COUNT);
+  await resumeFixture(BOOK_COUNT, { [LONG_BOOK_INDEX]: LONG_BOOK_REPEAT });
 });
 
 test.afterAll(async () => {
@@ -204,6 +262,48 @@ function assertHiddenIsReal(row: Row): void {
   ).toBe("real");
 }
 
+/**
+ * A verdict may never be stronger than the evidence behind it.
+ *
+ * This is what T7 got wrong for a whole matrix pass. An in-app navigation
+ * DESTROYS the audio element, and the row's fallback true position was then the
+ * last value the DRIVING PROCESS had sampled — before the navigation started,
+ * while the element went on playing throughout it. That is a LOWER bound, and
+ * the row's own notes said so:
+ *
+ *   "its currentTime collapsed to 0ms from a sampled 18998ms, so its value is
+ *    not evidence of anything ... which is a LOWER bound"
+ *
+ * and then it applied the AHEAD bar — "content the user paid for, silently
+ * skipped", the harshest verdict this suite has — to the gap between that lower
+ * bound and where the app came back. MEASURED: startedAt 9155 + played 9657 =
+ * 18812 sampled against a resume of 20387, reported as a 1389 ms blocker for a
+ * build that had skipped nothing; the gap is the navigation's own duration.
+ *
+ * The instrument now establishes real ground truth instead: `PROBE_SCRIPT`
+ * samples the element from inside the page every 50 ms and keeps the last
+ * observation taken while it was alive, unpaused and past zero, so the value
+ * graded against is at most 50 ms — a fifth of the bar — older than the
+ * element's death. `groundTruth: "teardown-probe"` is that case.
+ *
+ * When even that produces nothing, the row is UNCOVERED. It is NOT graded, and
+ * it is NOT silently passed: a resume ahead of a lower bound is not evidence of
+ * a skip, and a bound of unknown size is not evidence of anything.
+ */
+function assertGroundTruthIsReal(row: Row): void {
+  expect(
+    row.groundTruth,
+    `${row.scenario}: UNCOVERED. The termination destroyed the audio element and the in-page ` +
+      `probe produced no usable witness (${row.teardownWitnessSamples} samples, last ` +
+      `${row.teardownWitnessMs}ms). All this row knows is that the user had reached ` +
+      `${row.truePositionMs}ms, which is a LOWER bound — the element kept playing for the length ` +
+      `of the navigation before it died. The app came back at ${row.resumedPositionMs}ms and the ` +
+      `shelf held ${row.shelf.sourceMs}ms, both recorded; but grading a resume against a lower ` +
+      "bound would report the navigation's own duration as content the user paid for and never " +
+      "heard. Cover this cell with a probe that survives the teardown, not with a wider bar.",
+  ).not.toBe("lower-bound");
+}
+
 for (const spec of SCENARIOS) {
   test(`${spec.scenario}: resumes where the user left off`, async () => {
     test.setTimeout(300_000);
@@ -213,6 +313,7 @@ for (const spec of SCENARIOS) {
     assertMeasured(row);
     assertLifecycle(row);
     assertHiddenIsReal(row);
+    assertGroundTruthIsReal(row);
 
     // A termination that did not terminate anything grades as UNCOVERED, never
     // as a pass and never as a product blocker. The audio element surviving an
@@ -377,22 +478,52 @@ test("X1: an absence from one book does not rewind another", async () => {
   test.setTimeout(600_000);
   const row = await measureCrossBookAbsence({
     scenario: "X1 cross-book absence",
-    absentBookIndex: 1,
-    otherBookIndex: 2,
-    absenceMs: 20 * 60_000,
+    absentBookIndex: 12,
+    otherBookIndex: 13,
+    /**
+     * 90 minutes puts the ABSENT book on the ladder's top rung (30 s), which is
+     * two rungs clear of anything the untouched book can reach on its own while
+     * this row runs — it is paused for a couple of minutes at most, so 5 s, and
+     * 15 s even if the machine crawls. The gap is what makes a leak visible
+     * after the untouched book's own credit is subtracted; the precondition
+     * below refuses to grade the row if it ever closes.
+     */
+    absenceMs: 90 * 60_000,
     playMs: 12_000,
   });
   recordRow(row);
 
   expect(row.ticks, "X1: nothing played, so nothing was measured").toBeGreaterThan(2);
   expect(row.otherStoredMs, "X1: the untouched book had no ground to hold").toBeGreaterThan(4_000);
+
+  /**
+   * THE LEAK HAS TO BE DISTINGUISHABLE FROM THE UNTOUCHED BOOK'S OWN ABSENCE.
+   *
+   * The untouched book is paused while the user listens to the other one, so it
+   * accrues an absence of its own and the ladder credits it honestly. That
+   * credit is subtracted below. If the two absences ever landed on the SAME
+   * rung, subtracting one would hide the other and the row would pass without
+   * being able to see the thing it exists to see — so the rungs are required to
+   * differ, and the row is UNCOVERED rather than green if they do not.
+   */
   expect(
-    row.leakedRewindMs,
-    `X1: "${row.otherBookTitle}" was paused seconds ago and stored at ${row.otherStoredMs}ms, but ` +
-      `opening it came back at ${row.otherResumedMs}ms — ${row.leakedRewindMs}ms of rewind that ` +
-      `belongs to "${row.absentBookTitle}", which the user has been away from for ` +
-      `${row.absenceMs}ms. The ladder credits ${row.rewindIfLeakedMs}ms for that absence. ` +
-      `Marker keys on the device: ${JSON.stringify(row.markerKeysSeen)}.`,
+    row.rewindIfLeakedMs,
+    `X1: UNCOVERED. The absent book's absence credits ${row.rewindIfLeakedMs}ms and the untouched ` +
+      `book's own absence (${row.otherOwnAbsenceMs}ms) credits ${row.otherOwnRewindMs}ms — the ` +
+      "same rung. A leak of exactly that size would be indistinguishable from the untouched " +
+      "book's own legitimate rewind, so this row could not see the defect it exists for. Give " +
+      "the absent book a longer absence, or the untouched book a shorter one.",
+  ).toBeGreaterThan(row.otherOwnRewindMs);
+
+  expect(
+    row.leakedRewindMs - row.otherOwnRewindMs,
+    `X1: "${row.otherBookTitle}" was stored at ${row.otherStoredMs}ms and opening it came back at ` +
+      `${row.otherResumedMs}ms — ${row.leakedRewindMs}ms of movement, of which only ` +
+      `${row.otherOwnRewindMs}ms is the rewind it earned itself (its own marker is ` +
+      `${row.otherOwnAbsenceMs}ms old). The remainder is rewind that belongs to ` +
+      `"${row.absentBookTitle}", which the user has been away from for ${row.absenceMs}ms and for ` +
+      `which the ladder credits ${row.rewindIfLeakedMs}ms. Marker keys on the device: ` +
+      `${JSON.stringify(row.markerKeysSeen)}.`,
   ).toBeLessThanOrEqual(CALLBACK_BAR_MS);
 });
 

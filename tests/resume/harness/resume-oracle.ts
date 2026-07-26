@@ -248,6 +248,27 @@ export type Row = {
   completedAfter: boolean | null;
   serverPositionMs: number | null;
   /**
+   * How `truePositionMs` was obtained, so a verdict can never be stronger than
+   * the evidence behind it.
+   *
+   * `extrapolated`  — sampled off the element while it was playing and carried
+   *                   forward to a timestamped instant of termination.
+   * `element`       — the element's own final value, read while it still had one.
+   * `teardown-probe`— the in-page probe's last observation of a live, playing
+   *                   element, taken at most `TEARDOWN_SAMPLE_MS` before the
+   *                   element was destroyed. Real ground truth.
+   * `lower-bound`   — the element was destroyed and the probe produced no
+   *                   witness, so all that is known is a position the user had
+   *                   certainly reached. NOT gradeable: the spec reports the
+   *                   row UNCOVERED rather than reading a gap as a skip.
+   */
+  groundTruth: "extrapolated" | "element" | "teardown-probe" | "lower-bound";
+  /** The probe's witness, raw, for the rows where the element was torn down. */
+  teardownWitnessMs: number | null;
+  /** How stale that witness was when the element died, by the page's own clock. */
+  teardownWitnessAgeMs: number | null;
+  teardownWitnessSamples: number;
+  /**
    * True when the termination did not actually end the listening session (the
    * audio element survived it and was still playing). Such a row measures
    * continuity, not restoration, and the spec refuses to grade it as resume.
@@ -294,10 +315,24 @@ export type CrossBookRow = {
   otherBookTitle: string;
   otherStoredMs: number;
   otherResumedMs: number;
-  /** Positive means the untouched book was rewound by another book's absence. */
+  /** Raw backward movement of the untouched book: `stored - resumed`. */
   leakedRewindMs: number;
   /** The rewind the ladder would have applied had the absence been this book's. */
   rewindIfLeakedMs: number;
+  /**
+   * How long the UNTOUCHED book has been paused, by its own marker, at the
+   * instant it is reopened — and what the ladder legitimately credits for it.
+   *
+   * This row used to assume that was zero, because the whole sequence ran in
+   * well under a minute. MEASURED once the harness got slower: the untouched
+   * book came back 5000 ms behind, which is not a leak at all — it is its OWN
+   * 5 s tier, earned honestly by having been paused for more than a minute
+   * while the user listened to the other book. A metric that cannot tell those
+   * apart would report correct behaviour as a defect, and the numbers say which
+   * is which: a leak from a 20-minute absence would be 15000 ms, not 5000 ms.
+   */
+  otherOwnAbsenceMs: number | null;
+  otherOwnRewindMs: number;
   markerKeysSeen: string[];
   ticks: number;
   playedMs: number;
@@ -359,7 +394,27 @@ export function buildLongMp3(repeat = FIXTURE_REPEAT, tailPadding = 0, title?: s
 // Instrumentation injected into the page (test-only; `src/` is untouched)
 // ---------------------------------------------------------------------------
 
+/**
+ * A same-origin document Playwright serves itself, so a JS context on the app's
+ * origin can be obtained with the network physically cut — which is what the
+ * offline rows need in order to put the audiobook bytes back before the app is
+ * allowed to look for them.
+ */
+const RESTORE_PATH = "/__resume-oracle-restore__";
+const RESTORE_TITLE = "resume-oracle-restore";
+
 const LIFECYCLE_KEY = "resume-oracle:lifecycle";
+
+/**
+ * How often the in-page probe samples a playing audio element.
+ *
+ * This is the resolution of the ground truth for a termination that DESTROYS
+ * the element (see `PROBE_SCRIPT`): the last sample can be at most this old at
+ * the instant the element dies. 50 ms is a fifth of the 250 ms callback bar, so
+ * the witness's own staleness cannot move a row across it, and it is a bare
+ * property read so it does not perturb what it measures.
+ */
+const TEARDOWN_SAMPLE_MS = 50;
 const PROBE_SCRIPT = `
 (() => {
   const state = { ticks: 0, lastPositionMs: 0, hiddenObserved: false, visibilityAtCallback: null };
@@ -370,6 +425,40 @@ const PROBE_SCRIPT = `
     state.ticks += 1;
     state.lastPositionMs = media.currentTime * 1000;
   }, true);
+  // GROUND TRUTH FOR AN ELEMENT THAT IS ABOUT TO BE DESTROYED.
+  //
+  // An in-app navigation can tear the audio element down mid-playback. Once it
+  // has, \`currentTime\` reads 0 and the driving process has nothing to sample:
+  // the element is not evidence of where the user was, it is the absence of
+  // evidence. T7 graded a 1389 ms "resumed AHEAD" — the harshest verdict this
+  // suite has — against exactly that non-evidence.
+  //
+  // This watches the element from INSIDE the page, so the last observation is
+  // taken at most one interval before it dies rather than one \`evaluate\` round
+  // trip after. Only samples where the element was present, unpaused and past
+  // zero are kept, and each carries the page's own timestamp, so the caller can
+  // see how stale the witness is instead of trusting it blind.
+  state.livePositionMs = null;
+  state.livePositionAtMs = null;
+  state.liveSamples = 0;
+  setInterval(() => {
+    const media = document.querySelector("audio");
+    if (!media || media.paused || !(media.currentTime > 0)) return;
+    state.livePositionMs = media.currentTime * 1000;
+    state.livePositionAtMs = Date.now();
+    state.liveSamples += 1;
+  }, ${TEARDOWN_SAMPLE_MS});
+  // The harness's OWN documents never journal.
+  //
+  // The lifecycle journal answers "what did the APP's page see", and it is one
+  // localStorage key shared by every document on this origin. The restore stub
+  // and the device anchor are harness documents that run no app code, so a
+  // \`pagehide\` they emit on their way out is the instrument writing evidence
+  // about itself — and it lands in the very list that decides whether T3 saw no
+  // callback. \`relaunch()\` used to work around this by reading the journal
+  // before navigating away from the stub; this stops it at the source, so the
+  // harness cannot manufacture a callback even in the paths that read later.
+  if (location.pathname === ${JSON.stringify(RESTORE_PATH)}) return;
   const note = (name) => {
     try {
       const seen = JSON.parse(localStorage.getItem(${JSON.stringify(LIFECYCLE_KEY)}) || "[]");
@@ -400,9 +489,12 @@ const PROBE_SCRIPT = `
  * no-op, which is what a regression in the save path looks like from outside.
  * `stale-shelf` rewinds every mirror playback-state write by 30 s, which is
  * what "the shelf shows a stale number" looks like from outside while the
- * player itself may still be right.
+ * player itself may still be right. `seek-back-400ms` and `seek-ahead-600ms`
+ * move the restoring seek off the position the app meant to restore, in each
+ * direction, which is what the drift and AHEAD bars are actually about.
  *
- * Both are enabled only by `HARK_RESUME_POISON`; unset, this adds nothing.
+ * All of them are enabled only by `HARK_RESUME_POISON`; unset, this adds
+ * nothing.
  */
 function poisonScript(): string | null {
   const poison = process.env.HARK_RESUME_POISON;
@@ -447,6 +539,40 @@ function poisonScript(): string | null {
             if (!restored.has(this) && typeof value === "number" && value > 1000 / 1000) {
               restored.add(this);
               next = Math.max(0, value - 0.4);
+            }
+            return media.set.call(this, next);
+          },
+        });
+      })();
+    `;
+  }
+  if (poison === "seek-ahead-600ms") {
+    // The fail-demo for the rows whose ground truth comes from the teardown
+    // probe (T6/T7). `seek-back-400ms` proves the BEHIND bar can still fire on
+    // those rows; it says nothing about the AHEAD bar, which is the assertion
+    // T7 was getting wrong, and a ground truth that could no longer catch a
+    // real skip would be a worse instrument than the one it replaced.
+    //
+    // 600 ms forward: past the 250 ms AHEAD bar by enough that no amount of
+    // probe staleness (50 ms) explains it, and small enough to be invisible to
+    // every other suite in this repo. Only the restoring seek is touched — the
+    // first assignment on a fresh element — so a poisoned run still plays for
+    // real and still produces live rows.
+    return `
+      (() => {
+        const media = Object.getOwnPropertyDescriptor(
+          HTMLMediaElement.prototype,
+          "currentTime",
+        );
+        if (!media || !media.set) return;
+        const restored = new WeakSet();
+        Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+          ...media,
+          set(value) {
+            let next = value;
+            if (!restored.has(this) && typeof value === "number" && value > 1) {
+              restored.add(this);
+              next = value + 0.6;
             }
             return media.set.call(this, next);
           },
@@ -573,7 +699,12 @@ export type Fixture = {
   userId: string;
   origin: string;
   net: ControllableNetwork;
-  books: Map<string, { id: string; title: string }>;
+  books: Map<string, { id: string; title: string; durationMs: number }>;
+  /**
+   * The length of an ORDINARY fixture book. Per-book lengths live on `books`,
+   * because a scenario that needs a rewind tier the ordinary book cannot reach
+   * is given a longer one — see `resumeFixture`'s `repeatByIndex`.
+   */
   durationMs: number;
   chapters: Array<{ title: string; startMs: number; endMs: number }>;
 };
@@ -593,15 +724,6 @@ let device: Device | null = null;
  * machine periodically runs `pkill -f playwright`; the courtesy is returned.)
  */
 let foreignRenderPids = new Set<string>();
-
-/**
- * A same-origin document Playwright serves itself, so a JS context on the app's
- * origin can be obtained with the network physically cut — which is what the
- * offline rows need in order to put the audiobook bytes back before the app is
- * allowed to look for them.
- */
-const RESTORE_PATH = "/__resume-oracle-restore__";
-const RESTORE_TITLE = "resume-oracle-restore";
 
 /**
  * Recognises THIS engine's renderer process in `ps` output.
@@ -738,6 +860,37 @@ async function background(page: Page): Promise<HiddenTransition> {
   return "synthesised-state";
 }
 
+/**
+ * The last position the in-page probe saw while the audio element was
+ * demonstrably alive and playing, with the page's own timestamp for it.
+ *
+ * `samples` is the liveness column: a witness assembled from zero samples is
+ * not a witness, and the caller must be able to tell that apart from one that
+ * happened to read the same number twice.
+ */
+type TeardownWitness = { positionMs: number | null; atMs: number | null; samples: number };
+
+async function readTeardownWitness(page: Page): Promise<TeardownWitness> {
+  return page
+    .evaluate(() => {
+      const probe = (
+        window as unknown as {
+          __resumeProbe?: {
+            livePositionMs?: number | null;
+            livePositionAtMs?: number | null;
+            liveSamples?: number;
+          };
+        }
+      ).__resumeProbe;
+      return {
+        positionMs: probe?.livePositionMs ?? null,
+        atMs: probe?.livePositionAtMs ?? null,
+        samples: probe?.liveSamples ?? 0,
+      };
+    })
+    .catch(() => ({ positionMs: null, atMs: null, samples: 0 }));
+}
+
 /** What the page's own `visibilitychange` handler saw, read from the live page. */
 async function readVisibilityWitness(
   page: Page,
@@ -805,6 +958,7 @@ async function snapshotCaches(page: Page): Promise<CacheSnapshot> {
       "nothing to put back after the kill and the relaunch would be measuring a device that " +
       "never had the book",
   ).toBeGreaterThan(0);
+  lastMediaSnapshot = snapshot;
   return snapshot;
 }
 
@@ -816,10 +970,19 @@ async function snapshotCaches(page: Page): Promise<CacheSnapshot> {
  * silently no-ops. Measured — write into the stale name: `{"keys":0}`; delete
  * and recreate the same name: `{"keys":1}`. Without the delete, the restore
  * reports twenty-two entries written and the app comes up with an empty device.
+ *
+ * COUNTING KEYS IS NOT ENOUGH, which is what the read-back below is for. A
+ * `put()` that stored an empty or truncated body still puts its Request in
+ * `cache.keys()`, so a key count of 22 is consistent with a device holding 22
+ * zero-byte audiobooks. The verification therefore reads every entry back
+ * through `cache.match()` and compares its BYTE LENGTH against the snapshot's.
+ * A mismatch is an INSTRUMENT failure — the harness failed to carry the phone's
+ * disk across the kill — and is worded so it can never be read as the product
+ * losing a user's book.
  */
 async function restoreCaches(page: Page, snapshot: CacheSnapshot): Promise<void> {
-  const counts = await page.evaluate(async (input: CacheSnapshot) => {
-    const written: Record<string, number> = {};
+  const readBack = await page.evaluate(async (input: CacheSnapshot) => {
+    const written: Record<string, Record<string, number>> = {};
     for (const { name, entries } of input) {
       await caches.delete(name);
       const cache = await caches.open(name);
@@ -837,17 +1000,188 @@ async function restoreCaches(page: Page, snapshot: CacheSnapshot): Promise<void>
           }),
         );
       }
-      // Counted by READING BACK, never by counting the puts that were issued.
-      written[name] = (await (await caches.open(name)).keys()).length;
+      // Read BACK, never counted from the puts that were issued, and measured
+      // in bytes rather than in keys.
+      const verified: Record<string, number> = {};
+      const fresh = await caches.open(name);
+      for (const request of await fresh.keys()) {
+        const response = await fresh.match(request);
+        verified[request.url] = response ? (await response.arrayBuffer()).byteLength : -1;
+      }
+      written[name] = verified;
     }
     return written;
   }, snapshot);
-  const expected = Object.fromEntries(snapshot.map((cache) => [cache.name, cache.entries.length]));
+  const expected = Object.fromEntries(
+    snapshot.map((cache) => [
+      cache.name,
+      Object.fromEntries(cache.entries.map((entry) => [entry.url, atob(entry.body).length])),
+    ]),
+  );
   expect(
-    counts,
-    "Cache Storage did not come back after the relaunch, so the device does not have the " +
-      "audiobook and every position read below would be measuring a book that is not there",
+    readBack,
+    "INSTRUMENT: Cache Storage did not come back after the relaunch, so the device does not hold " +
+      "the audiobook bytes it held before the kill. Every position read below would be measuring " +
+      "a book that is not on the device. This is the harness failing to carry the phone's disk " +
+      "across a renderer death, not the app losing a book.",
   ).toStrictEqual(expected);
+}
+
+/**
+ * What this device really has: every download record, next to whether its
+ * audio bytes can actually be read out of Cache Storage.
+ *
+ * WHY THIS EXISTS, and why it is checked before the app is allowed to run.
+ *
+ * `reconcileOfflineRecord` (`src/lib/offline/library.ts`) is a ONE-WAY DOOR: on
+ * every `/library` visit and every player open, a download record whose media
+ * URL is not in Cache Storage is deleted from IndexedDB along with its
+ * transcript. That is correct product behaviour — a record pointing at bytes
+ * that are gone is a lie — but it means one instant of an un-restored Cache
+ * Storage permanently un-downloads the book, and putting the bytes back
+ * afterwards does not bring the record back. MEASURED: C2 and X1 failed at
+ * their FIRST `openPlayer` with "this device does not currently have it" for a
+ * book whose bytes had gone missing several scenarios earlier; the failing row
+ * was only where the damage surfaced, which is the worst possible place to
+ * learn about it.
+ *
+ * Read on the restore stub, which runs no app code, so asking the question
+ * cannot itself trigger the deletion it is asking about.
+ */
+type MediaInventoryEntry = { title: string; url: string; bytes: number };
+
+async function readMediaInventory(page: Page): Promise<MediaInventoryEntry[]> {
+  return page.evaluate(
+    () =>
+      new Promise<MediaInventoryEntry[]>((resolve) => {
+        void (async () => {
+          const names = (await indexedDB.databases?.().catch(() => [])) ?? [];
+          if (!names.some((entry) => entry.name === "chapterline-offline-v1")) return resolve([]);
+          const db = await new Promise<IDBDatabase | null>((done) => {
+            const request = indexedDB.open("chapterline-offline-v1");
+            request.onerror = () => done(null);
+            request.onsuccess = () => done(request.result);
+          });
+          if (!db || !db.objectStoreNames.contains("downloads")) return resolve([]);
+          const records = await new Promise<Array<Record<string, unknown>>>((done) => {
+            const all = db.transaction("downloads").objectStore("downloads").getAll();
+            all.onerror = () => done([]);
+            all.onsuccess = () => done(all.result as Array<Record<string, unknown>>);
+          });
+          const cacheNames = await caches.keys();
+          const out: MediaInventoryEntry[] = [];
+          for (const record of records) {
+            const url = String(record.offlineMediaUrl ?? "");
+            const title = String(
+              (record.book as { title?: string } | undefined)?.title ?? "(untitled)",
+            );
+            let bytes = -1;
+            for (const name of cacheNames) {
+              const hit = await (await caches.open(name)).match(url);
+              if (!hit) continue;
+              bytes = (await hit.arrayBuffer()).byteLength;
+              break;
+            }
+            out.push({ title, url, bytes });
+          }
+          resolve(out.sort((left, right) => left.title.localeCompare(right.title)));
+        })();
+      }),
+  );
+}
+
+/**
+ * Refuses to hand the app a device whose download records point at bytes that
+ * are not there. See `readMediaInventory`: letting it through would silently
+ * and permanently un-download the book, and the red would land on whichever
+ * scenario happened to open it next.
+ */
+async function assertDeviceHasItsBooks(page: Page, expectedTitles: string[]): Promise<void> {
+  const inventory = await readMediaInventory(page);
+  const broken = inventory.filter((entry) => entry.bytes <= 0);
+  expect(
+    broken,
+    "INSTRUMENT: this device holds download records whose audio bytes are not readable out of " +
+      `Cache Storage (${JSON.stringify(broken)}). The app's own reconcile would now delete those ` +
+      'records permanently, and the book would present as "this device does not currently have ' +
+      'it" for the rest of the run. The harness failed to carry the bytes across a renderer ' +
+      "death; this is not the product losing a book.",
+  ).toStrictEqual([]);
+  const present = new Set(inventory.map((entry) => entry.title));
+  const gone = expectedTitles.filter((title) => !present.has(title));
+  expect(
+    gone,
+    `INSTRUMENT: the books ${JSON.stringify(gone)} are no longer downloaded on this device at ` +
+      `all (it holds ${JSON.stringify([...present])}). A book can only leave the download store ` +
+      "by being reconciled away against a Cache Storage that did not have its bytes, so the " +
+      "harness lost them earlier in this run. Every row from here on would be measuring a phone " +
+      "that does not have the audiobook.",
+  ).toStrictEqual([]);
+}
+
+/**
+ * The last copy of the phone's disk this run took, kept so it can always be put
+ * back. Written by `snapshotCaches`, read only by `preflightDevice`.
+ */
+let lastMediaSnapshot: CacheSnapshot | null = null;
+
+/**
+ * The first thing every measurement does: make sure the phone still has its
+ * books, on the restore stub, before a single line of app code runs.
+ *
+ * WHY THIS REPAIRS RATHER THAN ONLY CHECKING.
+ *
+ * WebKit's ephemeral Cache Storage does not merely die with a renderer; it is
+ * discarded whenever the context stops holding the origin open, and putting the
+ * bytes back does not make them stay. MEASURED, in the app's own context, C1 ->
+ * C2 with nothing else running:
+ *
+ *   C1's last cycle ends on a SIGKILL; `healDevice` relaunches, restores both
+ *   caches, and READS THEM BACK — 33 shell entries and 6 media entries, every
+ *   body the right length. Its page then closes. C2's first look at the same
+ *   device, seconds later, finds the cache NAMES still listed and BOTH CACHES
+ *   AT ZERO ENTRIES: `{"chapterline-shell-v6":0,"chapterline-media-v2":0}`.
+ *
+ * That was measured from two different pages at once (a page held open across
+ * the whole sequence and a freshly opened one) and both read zero, so it is the
+ * origin's records going away, not one page losing sight of them. Holding a
+ * page open does NOT prevent it — that was tried, measured, and removed. In a
+ * bare context with no app and no service worker the same experiment is stable,
+ * so this is specific to the real thing and cannot be worked around by
+ * arranging pages.
+ *
+ * The consequence is not recoverable by waiting, because
+ * `reconcileOfflineRecord` deletes a download record whose bytes are missing
+ * the moment the app looks — see `readMediaInventory`. So the bytes go back
+ * BEFORE the app is allowed to look, from the last snapshot taken, and the
+ * result is verified rather than assumed.
+ *
+ * THE REPAIR IS DELIBERATELY NARROW. It only fires when EVERY download record
+ * on the device has unreadable bytes, which is the signature of the engine
+ * throwing the whole origin away. A device that has lost SOME of its media and
+ * kept the rest does not match that signature, is not repaired, and fails the
+ * assertion below — because that shape could be the product deleting a user's
+ * book, and this must never be able to paper over it.
+ */
+async function preflightDevice(page: Page, origin: string): Promise<void> {
+  await page.goto(`${origin}${RESTORE_PATH}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  const inventory = await readMediaInventory(page);
+  const wholeDiskGone = inventory.length > 0 && inventory.every((entry) => entry.bytes <= 0);
+  if (wholeDiskGone) {
+    expect(
+      lastMediaSnapshot,
+      "INSTRUMENT: this engine discarded every byte of this device's Cache Storage and this run " +
+        "holds no snapshot to put back, so the phone has no audiobook on it and nothing below " +
+        "could measure resume",
+    ).toBeTruthy();
+    await restoreCaches(page, lastMediaSnapshot!);
+    console.log(
+      `[resume-oracle] the engine had discarded this device's Cache Storage ` +
+        `(${inventory.length} books with unreadable bytes); it was put back from the last ` +
+        "snapshot before the app was allowed to look",
+    );
+  }
+  await assertDeviceHasItsBooks(page, [...(fixture?.books.keys() ?? [])]);
 }
 
 async function signIn(page: Page, origin: string, register: boolean): Promise<void> {
@@ -933,7 +1267,21 @@ async function assertEngineCanStoreMedia(page: Page): Promise<void> {
  * cookies) and its own book, and rebuilding that per scenario would spend the
  * whole budget on sign-ins the rate limiter would then start refusing.
  */
-export async function resumeFixture(count: number): Promise<Fixture> {
+export async function resumeFixture(
+  count: number,
+  /**
+   * Copies of the fixture's frames for a particular book index, when the
+   * ordinary ~24 s book is too short for what the scenario has to reach.
+   *
+   * The smart-rewind ladder's top tier subtracts 30 s, which a 24 s book cannot
+   * even hold — the position bottoms out at zero on the first open and every
+   * later cycle then reads a clean 0 ms delta, so the tier is unmeasurable
+   * rather than merely awkward. Giving that one row a longer book is what makes
+   * it measurable; every other row keeps the short book, which is cheaper to
+   * import and quicker to play.
+   */
+  repeatByIndex: Record<number, number> = {},
+): Promise<Fixture> {
   const titles = Array.from({ length: count }, (_, index) => bookTitleFor(index));
   if (fixture) return fixture;
 
@@ -966,7 +1314,7 @@ export async function resumeFixture(count: number): Promise<Fixture> {
       await page.setInputFiles('input[aria-label="Choose an MP3 file to import"]', {
         name: `${title}.mp3`,
         mimeType: "audio/mpeg",
-        buffer: buildLongMp3(FIXTURE_REPEAT, 64 + index * 16, title),
+        buffer: buildLongMp3(repeatByIndex[index] ?? FIXTURE_REPEAT, 64 + index * 16, title),
       });
       await expect(
         page.getByRole("link", { name: title, exact: true }).first(),
@@ -1014,14 +1362,21 @@ export async function resumeFixture(count: number): Promise<Fixture> {
       })
       .toBeGreaterThanOrEqual(titles.length);
     const rows = await readBooks();
-    const idByTitle = new Map(rows.map((entry) => [entry.title, entry.id]));
-    const books = new Map<string, { id: string; title: string }>();
+    const byTitle = new Map(rows.map((entry) => [entry.title, entry]));
+    const books = new Map<string, { id: string; title: string; durationMs: number }>();
     for (const title of titles) {
-      const id = idByTitle.get(title);
-      expect(id, `book "${title}" never reached the server`).toBeTruthy();
-      books.set(title, { id: id!, title });
+      const entry = byTitle.get(title);
+      expect(entry, `book "${title}" never reached the server`).toBeTruthy();
+      books.set(title, {
+        id: entry!.id,
+        title,
+        // Per book, because they are no longer all the same length. Reading one
+        // book's duration and applying it to another is how a shelf percent
+        // gets graded against the wrong denominator.
+        durationMs: Number(entry!.duration_ms),
+      });
     }
-    const durationMs = Number(rows[0]!.duration_ms);
+    const durationMs = books.get(titles[0]!)!.durationMs;
     expect(
       durationMs,
       "the generated book is too short to measure drift against a five-second save interval",
@@ -1045,6 +1400,10 @@ export async function resumeFixture(count: number): Promise<Fixture> {
     };
     return fixture;
   } finally {
+    // The golden copy of a freshly-imported device, taken before this page goes
+    // away so the FIRST measurement has something to put back too. Every kill
+    // after this one takes its own.
+    await snapshotCaches(page).catch(() => null);
     // The PAGE, not the device: the device is the disk everything below depends
     // on surviving.
     await page.close().catch(() => undefined);
@@ -1184,6 +1543,7 @@ async function relaunch(
     "the restore document did not come up, so the audiobook could not be put back",
   ).toBe(RESTORE_TITLE);
   await restoreCaches(page, media);
+  await assertDeviceHasItsBooks(page, [...(fixture?.books.keys() ?? [])]);
   deviceMediaBroken = false;
   // Read the lifecycle journal HERE, before anything navigates.
   //
@@ -1202,6 +1562,55 @@ async function relaunch(
 // ---------------------------------------------------------------------------
 // Reading the page
 // ---------------------------------------------------------------------------
+
+/**
+ * Tap the card, and tap it again if the tap did nothing.
+ *
+ * MEASURED, once the matrix went from three shared books to one book per
+ * scenario: the card link resolves to exactly one visible element with the
+ * right `href` (`matches=1 href=/books/4d7fa42f-... visible=true`), Playwright
+ * clicks it, and four seconds later the page is still `/library` with the grid
+ * on screen and no transport control anywhere. The same click on the same build
+ * with three books opened the player every time. The app's launch revalidation
+ * runs a `router.refresh()` after paint and there is more of it to do with
+ * fourteen books, so a client-side `push` issued inside that window is
+ * discarded — the navigation is dropped, not slow: waiting longer never
+ * produced it, and the row died on a 90 s timeout with a product-shaped
+ * message.
+ *
+ * A person whose tap did nothing taps again, so that is what this does, and it
+ * says how many taps it took. It changes no bar: `settlePlayer` still makes the
+ * authoritative assertion afterwards, and the position measured is the position
+ * the app comes back at whichever tap opened it.
+ *
+ * A SECOND TAP IS ONLY SENT WHEN NOTHING MOVED AT ALL. "Nothing happened" means
+ * the URL is exactly where it was and no transport control appeared; if the
+ * navigation has begun, the tap is in flight and tapping again would open the
+ * book twice. MEASURED, before that guard existed: X1 opened its book, played
+ * it, and then could not pause it — `pauseThroughUi` timed out with the audio
+ * still running, which is what a second mounted player looks like from outside.
+ */
+async function tapIntoPlayer(page: Page, title: string): Promise<string[]> {
+  const trail: string[] = [];
+  const link = page.getByRole("link", { name: title, exact: true }).first();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (!(await link.isVisible().catch(() => false))) break;
+    const before = page.url();
+    await link.click({ timeout: 30_000 }).catch(() => undefined);
+    const opened = await page
+      .getByRole("button", { name: /^(Play|Pause)$/ })
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    const moved = page.url() !== before;
+    trail.push(
+      `tap ${attempt} on "${title}": ` +
+        (opened ? "opened the player" : moved ? "navigation in flight" : "did nothing"),
+    );
+    if (opened || moved) return trail;
+  }
+  return trail;
+}
 
 /**
  * Opens a book the way a user does: through the library.
@@ -1224,7 +1633,7 @@ async function openPlayer(
   await page.goto(`${origin}/library`, { waitUntil: "domcontentloaded", timeout: 90_000 });
   await page.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
   if (title) {
-    await page.getByRole("link", { name: title, exact: true }).first().click();
+    await tapIntoPlayer(page, title);
   } else {
     await page.goto(`${origin}/books/${bookId}`, {
       waitUntil: "domcontentloaded",
@@ -1745,11 +2154,17 @@ export type ScenarioSpec = {
   /** Row label. */
   scenario: string;
   /**
-   * Which of the fixture's books this row uses. WebKit's Cache Storage in a
-   * fresh profile refuses to hold more than a few hundred kilobytes of media
-   * (measured: three 98 KB books stored, the fourth failed with the app's
-   * "could not save the audiobook for offline playback" alert), so the books
-   * are shared and their progress is reset before each row instead.
+   * Which of the fixture's books this row uses. ONE PER SCENARIO — nothing is
+   * shared, so a row that damages a book cannot take it away from a later row.
+   *
+   * This used to say WebKit's Cache Storage would not hold more than a few
+   * hundred kilobytes and that the books therefore had to be shared. That was
+   * wrong, and measuring it is what showed why the shared books were a problem
+   * rather than a necessity: in a WebKit ephemeral context on this app's origin,
+   * `navigator.storage.estimate()` reports a 1_048_576_000 byte quota, and 200
+   * entries of 98 KB were written and read back with no error. The old claim
+   * belonged to the persistent-context setup described in `ENGINE`, which could
+   * not host the app at all.
    */
   bookIndex: number;
   termination: Termination;
@@ -1815,17 +2230,47 @@ async function proveOffline(page: Page, origin: string): Promise<void> {
  * invented would prove the harness can rewind a book, not that the app can.
  */
 async function pauseThroughUi(page: Page): Promise<void> {
-  const pause = page.getByRole("button", { name: "Pause" });
-  if (await pause.count()) {
-    await pause.first().click();
-  } else {
-    // Some builds label the single transport control by its next action only.
-    await page.evaluate(() => document.querySelector("audio")?.pause());
+  // EVERY audio element, not the first one in document order. This app can have
+  // a second element on the page (the library keeps one), and asking only the
+  // first turns "one of them is still playing" into a silent pass — the row
+  // would then measure a pause marker written for a session that never stopped.
+  // Stricter than the single read this replaces, deliberately.
+  const allPaused = () =>
+    page.evaluate(() => {
+      const media = [...document.querySelectorAll("audio")];
+      return media.length > 0 && media.every((element) => element.paused);
+    });
+  const control = page.getByRole("button", { name: "Pause" });
+  // Tapped up to three times for the same reason the card is (see
+  // `tapIntoPlayer`): this app's launch revalidation can swallow a click
+  // outright. MEASURED: X1 played its book and then sat with the audio still
+  // running after one Pause tap that did nothing.
+  for (let attempt = 1; attempt <= 3 && !(await allPaused()); attempt += 1) {
+    if (await control.count()) {
+      await control
+        .first()
+        .click({ timeout: 15_000 })
+        .catch(() => undefined);
+    }
+    await page.waitForTimeout(500);
+  }
+  if (!(await allPaused())) {
+    // Last resort, and still the APP writing its own marker: the marker is
+    // written from `audio.addEventListener("pause", ...)` in
+    // `playback-provider.tsx`, so pausing the element runs the product's
+    // handler. Nothing here writes `chapterline:last-paused-at` itself — a
+    // marker the harness invented would prove the harness can rewind a book.
+    await page.evaluate(() =>
+      document.querySelectorAll("audio").forEach((element) => element.pause()),
+    );
   }
   await expect
-    .poll(() => page.evaluate(() => document.querySelector("audio")?.paused ?? false), {
+    .poll(allPaused, {
       timeout: 10_000,
-      message: "the player never paused, so the app never wrote an absence marker",
+      message:
+        "the player never paused, so the app never wrote an absence marker. Every audio element " +
+        "on the page has to be paused, not just the first one, and one of them is still running " +
+        "after three taps on Pause and a direct pause of every element.",
     })
     .toBe(true);
   await page.waitForTimeout(250);
@@ -1894,11 +2339,14 @@ async function playForReal(page: Page, playMs: number): Promise<{ startedAtMs: n
 export async function measure(spec: ScenarioSpec): Promise<Row> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
-  const { userId, origin, net, books, durationMs } = active!;
+  const { userId, origin, net, books } = active!;
   const bookTitle = bookTitleFor(spec.bookIndex);
   const book = books.get(bookTitle);
   expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
   const bookId = book!.id;
+  // THIS book's length, not the fixture's default: the shelf's rendered percent
+  // is graded against it, and the books are no longer all the same length.
+  const durationMs = book!.durationMs;
   // Isolation only: the row starts from a book with no progress anywhere, so
   // nothing another row wrote can be mistaken for what this one measured.
   await sql()`DELETE FROM playback_states WHERE book_id = ${bookId}`;
@@ -1917,6 +2365,7 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
   let session = await launch();
   let killed = false;
   try {
+    await preflightDevice(session.page, origin);
     // Before the first navigation, so the app's own registrations are the ones
     // dropped and the probe's (added to the context, and therefore run first)
     // are not.
@@ -1938,7 +2387,8 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
     if (spec.openFromLibrary) {
       await session.page.goto(`${origin}/library`, { waitUntil: "domcontentloaded" });
       await session.page.waitForSelector("[data-launch-ready]", { state: "attached" });
-      await session.page.getByRole("link", { name: bookTitle, exact: true }).click();
+      const taps = await tapIntoPlayer(session.page, bookTitle);
+      if (taps.length > 1) notes.push(`opening the book from the library took ${taps.length} taps`);
       await settlePlayer(session.page);
     } else {
       await openPlayer(session.page, origin, bookId, bookTitle);
@@ -2013,6 +2463,11 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
     ).toBe(false);
 
     let truePositionMs: number;
+    let groundTruth: Row["groundTruth"] = "extrapolated";
+    let teardownWitness: TeardownWitness = { positionMs: null, atMs: null, samples: 0 };
+    // How stale the witness was WHEN IT WAS READ, which is the number that says
+    // whether it can be trusted. Computed at the read, never at row-return time.
+    let teardownWitnessAgeMs: number | null = null;
     let lifecycle: string[] = [];
     let sessionSurvived = false;
     let hiddenTransition: HiddenTransition =
@@ -2110,25 +2565,67 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
         // instead of leaving it playing (`currentSrc: ""`, `src` attribute gone),
         // which zeroes `currentTime`. Reading that zero as "where the user was"
         // gave T7 `truePositionMs: 0` against a resume of 18651 ms and reported
-        // an 18-second drift for a build that had done nothing wrong. A torn-down
-        // element is the ABSENCE of evidence, so it is treated as absent: the
-        // fallback is the position sampled while the audio was demonstrably
-        // playing, which is a lower bound, and the row says so.
+        // an 18-second drift for a build that had done nothing wrong.
         const tornDown =
           playingAtTermination.present && playingAtTermination.at < sample.positionMs - 1_000;
-        truePositionMs =
-          playingAtTermination.present && !tornDown ? playingAtTermination.at : sample.positionMs;
-        notes.push(
-          tornDown
-            ? "the audio element was TORN DOWN by the navigation (its currentTime collapsed to " +
+        if (playingAtTermination.present && !tornDown) {
+          truePositionMs = playingAtTermination.at;
+          groundTruth = "element";
+          notes.push(
+            "the audio was not playing at the moment of termination, so the true position is " +
+              "the element's own last value rather than an extrapolation",
+          );
+        } else {
+          // THE ELEMENT IS GONE. Ask the witness that was watching it from
+          // inside the page instead of grading against the hole it left.
+          //
+          // This is what the row used to get wrong. Its fallback was the
+          // position sampled by the DRIVING PROCESS before the navigation
+          // started, which is a LOWER bound — the element went on playing for
+          // the whole length of the navigation — and the row said so in its own
+          // notes while still applying the AHEAD bar, the harshest verdict this
+          // suite has, to the gap between that lower bound and where the app
+          // came back. MEASURED: startedAt 9155 + played 9657 = 18812 sampled,
+          // resumed 20387, reported as "1389 ms of content the user paid for,
+          // silently skipped" for a build that had skipped nothing.
+          //
+          // `PROBE_SCRIPT` samples the element every `TEARDOWN_SAMPLE_MS` from
+          // inside the page and keeps the last observation taken while it was
+          // present, unpaused and past zero. That observation is at most one
+          // interval old when the element dies, so it is ground truth to within
+          // a fifth of the bar rather than a bound of unknown size.
+          teardownWitness = await readTeardownWitness(session.page);
+          teardownWitnessAgeMs =
+            teardownWitness.atMs === null ? null : Math.max(0, Date.now() - teardownWitness.atMs);
+          const usable =
+            teardownWitness.samples > 0 &&
+            teardownWitness.positionMs !== null &&
+            teardownWitness.positionMs >= sample.positionMs - 1_000;
+          if (usable) {
+            truePositionMs = teardownWitness.positionMs!;
+            groundTruth = "teardown-probe";
+            notes.push(
+              "the audio element was TORN DOWN by the navigation (its currentTime collapsed to " +
                 `${Math.round(playingAtTermination.at)}ms from a sampled ` +
-                `${Math.round(sample.positionMs)}ms), so its value is not evidence of anything. ` +
-                "The true position here is the last position observed while it was demonstrably " +
-                "playing, which is a LOWER bound: the element may have run on for up to the " +
-                "length of the navigation before it was destroyed."
-            : "the audio was not playing at the moment of termination, so the true position is " +
-                "the element's own last value rather than an extrapolation",
-        );
+                `${Math.round(sample.positionMs)}ms), so its own value is not evidence. The true ` +
+                `position is the in-page probe's last observation of it alive and playing: ` +
+                `${Math.round(teardownWitness.positionMs!)}ms from ${teardownWitness.samples} ` +
+                `samples, at most ${TEARDOWN_SAMPLE_MS}ms before it was destroyed.`,
+            );
+          } else {
+            truePositionMs = sample.positionMs;
+            groundTruth = "lower-bound";
+            notes.push(
+              "UNCOVERED: the audio element was torn down by the navigation and the in-page " +
+                `probe produced no usable witness (${teardownWitness.samples} samples, last ` +
+                `${teardownWitness.positionMs === null ? "none" : Math.round(teardownWitness.positionMs)}). ` +
+                `All that is known is that the user had reached ${Math.round(sample.positionMs)}ms, ` +
+                "which is a LOWER bound — the element may have run on for the length of the " +
+                "navigation before it died. A resume ahead of a lower bound is not evidence of a " +
+                "skip, so this row is not graded.",
+            );
+          }
+        }
       }
       const killedPids = hardKill();
       await expectPageDead(session.page, killedPids);
@@ -2211,7 +2708,7 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       page = session.page;
       shelf = await readShelf(page, origin, bookId, bookTitle, userId, durationMs);
       lifecycle = mergeLifecycle(lifecycle, await readLifecycle(page));
-      await page.getByRole("link", { name: bookTitle, exact: true }).click();
+      await tapIntoPlayer(page, bookTitle);
       await settlePlayer(page);
     } else {
       page = session.page;
@@ -2326,6 +2823,11 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       expectedChapter,
       completedAfter,
       serverPositionMs,
+      groundTruth,
+      teardownWitnessMs:
+        teardownWitness.positionMs === null ? null : Math.round(teardownWitness.positionMs),
+      teardownWitnessAgeMs,
+      teardownWitnessSamples: teardownWitness.samples,
       sessionSurvived,
       notes,
     };
@@ -2372,11 +2874,12 @@ export async function measureCumulative(spec: {
 }): Promise<CumulativeRow> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
-  const { userId, origin, net, books, durationMs } = active!;
+  const { userId, origin, net, books } = active!;
   const bookTitle = bookTitleFor(spec.bookIndex);
   const book = books.get(bookTitle);
   expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
   const bookId = book!.id;
+  const durationMs = book!.durationMs;
   const absenceMs = spec.absenceBetweenCyclesMs ?? null;
   await sql()`DELETE FROM playback_states WHERE book_id = ${bookId}`;
 
@@ -2393,6 +2896,7 @@ export async function measureCumulative(spec: {
   let media: CacheSnapshot | null = null;
   let session = await launch();
   try {
+    await preflightDevice(session.page, origin);
     // ----------------------------------------------- one real listening pass
     await openPlayer(session.page, origin, bookId, bookTitle);
     media = await snapshotCaches(session.page);
@@ -2546,6 +3050,7 @@ export async function measureCrossBookAbsence(spec: {
   let ticks = 0;
   let playedMs = 0;
   try {
+    await preflightDevice(session.page, origin);
     // The book that must not move: play it, pause it, leave it.
     await openPlayer(session.page, origin, otherId, otherTitle);
     media = await snapshotCaches(session.page);
@@ -2589,7 +3094,15 @@ export async function measureCrossBookAbsence(spec: {
         "would be invisible and this row proves nothing",
     ).toBeGreaterThan(0);
 
-    // Open the OTHER book. It was paused seconds ago; it must not be rewound.
+    // What the UNTOUCHED book has legitimately earned on its own, read the way
+    // the app reads it, at the instant before it is opened. Nothing is aged
+    // here — only the absent book's marker was moved.
+    const otherInputs = await readRewindInputs(session.page, userId, otherId);
+    assertMarkerKeyShape(spec.scenario, userId, otherInputs.markerKeysSeen);
+    const otherOwnRewindMs = expectedRewindMs(otherInputs);
+
+    // Open the OTHER book. Whatever it has earned on its own is credited; a
+    // rewind that belongs to the absent book is not.
     await openPlayer(session.page, origin, otherId, otherTitle);
     const settled = await readSettledPosition(session.page);
     const otherResumedMs = Math.round(settled.positionMs);
@@ -2605,6 +3118,8 @@ export async function measureCrossBookAbsence(spec: {
       otherResumedMs,
       leakedRewindMs: otherStoredMs - otherResumedMs,
       rewindIfLeakedMs,
+      otherOwnAbsenceMs: otherInputs.msSinceLastPause,
+      otherOwnRewindMs,
       markerKeysSeen: inputs.markerKeysSeen,
       ticks,
       playedMs,
@@ -2716,11 +3231,12 @@ export async function measureStaleAheadReplay(spec: {
 }): Promise<StaleAheadRow> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
-  const { userId, origin, net, books, durationMs } = active!;
+  const { userId, origin, net, books } = active!;
   const bookTitle = bookTitleFor(spec.bookIndex);
   const book = books.get(bookTitle);
   expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
   const bookId = book!.id;
+  const durationMs = book!.durationMs;
   const playMs = spec.playMs ?? 16_500;
   const notes: string[] = [];
 
@@ -2730,6 +3246,7 @@ export async function measureStaleAheadReplay(spec: {
   let media: CacheSnapshot | null = null;
   let session = await launch();
   try {
+    await preflightDevice(session.page, origin);
     await session.page.goto(`${origin}/library`, {
       waitUntil: "domcontentloaded",
       timeout: 90_000,
@@ -2960,7 +3477,7 @@ export async function measureCompletionAcrossBooks(spec: {
 }): Promise<CompletionRow> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
-  const { userId, origin, net, books, durationMs } = active!;
+  const { userId, origin, net, books } = active!;
   expect(
     spec.finishedBookIndex,
     "the finished book and the next book must be different books",
@@ -2969,6 +3486,8 @@ export async function measureCompletionAcrossBooks(spec: {
   const nextTitle = bookTitleFor(spec.nextBookIndex);
   const finishedId = books.get(finishedTitle)!.id;
   const nextId = books.get(nextTitle)!.id;
+  // The book that gets scrubbed to its end below is the FINISHED one.
+  const durationMs = books.get(finishedTitle)!.durationMs;
   const notes: string[] = [];
 
   net.restore();
@@ -2977,6 +3496,7 @@ export async function measureCompletionAcrossBooks(spec: {
   let media: CacheSnapshot | null = null;
   const session = await launch();
   try {
+    await preflightDevice(session.page, origin);
     await session.page.goto(`${origin}/library`, {
       waitUntil: "domcontentloaded",
       timeout: 90_000,
@@ -3305,9 +3825,10 @@ export async function measureTwoDeviceResume(spec: {
 }): Promise<TwoDeviceRow> {
   const active = fixture;
   expect(active, "resumeFixture() was never built").toBeTruthy();
-  const { userId, origin, net, books, durationMs } = active!;
+  const { userId, origin, net, books } = active!;
   const bookTitle = bookTitleFor(spec.bookIndex);
   const bookId = books.get(bookTitle)!.id;
+  const durationMs = books.get(bookTitle)!.durationMs;
   const playMsA = spec.playMsA ?? 6_000;
   const playMsB = spec.playMsB ?? 8_000;
   const notes: string[] = [];

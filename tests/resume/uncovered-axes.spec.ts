@@ -42,8 +42,15 @@ import {
  * every witness, because they need a known amount of headroom.
  */
 
-/** Three books is what WebKit's Cache Storage would hold; see `ScenarioSpec`. */
-const BOOK_COUNT = 3;
+/**
+ * One book per scenario, and F2 needs two.
+ *
+ * These rows used to share three books, which is how one row losing a book's
+ * download record took it away from every later row that used it — see the
+ * matching note in `position-drift.spec.ts`. The books are ~98 KB against a
+ * measured 1 GB Cache Storage quota, so there is no reason to share them.
+ */
+const BOOK_COUNT = 6;
 
 test.beforeAll(async () => {
   test.setTimeout(900_000);
@@ -59,24 +66,64 @@ test.afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * T1's residual, converted from unprovable into bounded.
+ * T1's residual, converted from unprovable into BOUNDED BY COMPOSITION.
  *
- * T1 asks whether the app survives a real iOS backgrounding, and this
- * instrument cannot make WebKit report a page hidden for real, so T1 stays a
- * GAP and is NOT graded green anywhere. What these rows do instead is remove
- * the question. The `visibilitychange` handler is one of two things standing
- * between a backgrounded listener and a lost position; the other is a 200 ms
- * `setInterval` that reads the element directly. Delete the first — every
- * lifecycle registration the app makes — and measure what the second preserves.
+ * T1 asks whether the app survives a real iOS backgrounding. This instrument
+ * cannot make WebKit report a page hidden for real — there is no
+ * `Page.setActivityState` anywhere in `playwright-core`, and a second page plus
+ * `bringToFront()` leaves the measured page at `"visible"` and fires no
+ * `visibilitychange` at all — so T1 stays a GAP, is graded green nowhere, and
+ * `assertHiddenIsReal` keeps saying so. These rows do not cover it. What they do
+ * is make the size of what is uncovered a measured quantity instead of an
+ * unknown, and the argument is worth stating exactly, because "unknown"
+ * understates it and "covered" would be a lie.
  *
- * If the drift stays small with the handlers dead, then the backgrounding case
- * is protected whether or not iOS delivers the callback, and the size of T1's
- * residual is known from above rather than merely unmeasured.
+ * TWO INDEPENDENT MECHANISMS STAND BETWEEN A BACKGROUNDED LISTENER AND A LOST
+ * POSITION: the synchronous flush on the lifecycle edge, and a 200 ms
+ * `setInterval` that samples the element directly
+ * (`use-progress-persistence.ts`). Each has been measured working ALONE.
  *
- * WHAT THIS STILL DOES NOT COVER, and is recorded as UNCOVERED rather than
- * folded away: iOS may freeze the timer at the same moment it freezes the page.
- * These rows bound "no callback". They do not bound "no callback and no timer",
- * which needs real hardware.
+ *   (a) THE FLUSH, GIVEN THE STATE. The harness overrides
+ *       `document.visibilityState` before dispatching, so the app's handler
+ *       reads `"hidden"` — the row carries `visibilityAtCallback` as an
+ *       observation rather than an assumption, and the app gates its flush on
+ *       exactly that value. MEASURED, WebKit, build A7stcwm1IFdVIdgFWr4h9: T1
+ *       online drift 39 ms / shelf 39 ms, T1 offline 26 ms / 26 ms.
+ *
+ *   (b) THE CADENCE, WITH THE FLUSH DELETED. B1/B2 remove every lifecycle
+ *       registration the app makes before it can make it, prove the poison bit
+ *       (`lifecycleBlocked`), and prove the platform still delivered the
+ *       callback (`lifecycle`), so "the app could not use it" is distinguishable
+ *       from "it never happened". MEASURED, same build: B1 152 ms, B2 69 ms
+ *       against the 600 ms bar below. That bar is proven able to fail — at the
+ *       old 5 s cadence the same rows measured 4708 ms and 2867 ms.
+ *
+ * WHAT THE UNION ESTABLISHES. The two legs do not depend on each other, so a
+ * real backgrounding loses the user's place only if BOTH fail at once: the
+ * platform never delivers a usable `visibilitychange` AND the timer stops before
+ * its next tick. Either one surviving is enough, and each was measured surviving
+ * with the other removed. The cost of a SINGLE failure is bounded and known: one
+ * cadence interval with no callback, the flush's own latency with one.
+ *
+ * WHAT IT DOES NOT ESTABLISH, and must never be read as:
+ *
+ *   1. That iOS delivers the input (a) was handed. The state was SYNTHESISED.
+ *      (a) says the handler is correct when given a hidden `visibilitychange`;
+ *      it says nothing about whether the platform gives it one. If real iOS
+ *      fires the event with the state still `"visible"`, or does not fire it
+ *      before freezing, leg (a) contributes nothing and only (b) is left.
+ *   2. That the timer keeps running once iOS has frozen the page. B1/B2 bound
+ *      "no callback". They do not bound "no callback AND no timer".
+ *   3. The joint failure, which is the actual residual — and it is not bounded
+ *      by one interval. A backgrounded audiobook keeps PLAYING while a frozen
+ *      page writes nothing, so the loss there is the length of the background
+ *      listening, not the cadence. T3 does not cover it: T3's page was
+ *      foregrounded and ticking right up to the SIGKILL, so its timer had never
+ *      stopped.
+ *
+ * So: the real-world risk is bounded by composition, the single cell is not
+ * proven, and covering it needs an engine that can genuinely report a hidden
+ * page, or real hardware.
  *
  * THE BAR. These rows get the no-callback bar's CASE but a stricter number:
  * 600 ms, three times the cadence, instead of the 1000 ms `HARD_KILL_BAR_MS`
@@ -276,8 +323,8 @@ test("F2: opening the next book must not un-finish the one just finished", async
   test.setTimeout(600_000);
   const row = await measureCompletionAcrossBooks({
     scenario: "F2 finish then open next",
-    finishedBookIndex: 0,
-    nextBookIndex: 1,
+    finishedBookIndex: 3,
+    nextBookIndex: 4,
   });
   recordRow(row);
 
@@ -351,7 +398,7 @@ async function theTwoDeviceRun() {
   if (twoDeviceRow) return twoDeviceRow;
   twoDeviceRow = await measureTwoDeviceResume({
     scenario: "X2 two devices, stale tab foregrounded",
-    bookIndex: 2,
+    bookIndex: 5,
     playMsA: 6_000,
     playMsB: 8_000,
   });
