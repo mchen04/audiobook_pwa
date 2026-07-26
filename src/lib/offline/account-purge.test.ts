@@ -314,12 +314,20 @@ describe("account purge", () => {
     await shell.put("https://hark.test/offline", new Response("shell"));
     await shell.put("https://hark.test/_next/static/chunk.js", new Response("js"));
     await shell.put("https://hark.test/icons/icon-192.png", new Response("icon"));
-    await shell.put("https://hark.test/library", new Response("account page"));
+    // Both launch-shell keys are the SAME user-agnostic document the service
+    // worker caches, so both survive — the cold launch's static route resolves
+    // against this cache and a miss would go to the network. A page that really
+    // does name an account still goes, which is what `/settings` proves.
+    await shell.put("https://hark.test/library", new Response("shell"));
+    await shell.put("https://hark.test/library?source=pwa", new Response("shell"));
+    await shell.put("https://hark.test/settings", new Response("account page"));
     await seedAccount(USER_A);
 
     await purgeAccount(USER_A);
 
-    expect(await shell.match("https://hark.test/library")).toBeUndefined();
+    expect(await shell.match("https://hark.test/settings")).toBeUndefined();
+    expect(await shell.match("https://hark.test/library")).toBeDefined();
+    expect(await shell.match("https://hark.test/library?source=pwa")).toBeDefined();
     expect(await shell.match("https://hark.test/offline")).toBeDefined();
     expect(await shell.match("https://hark.test/_next/static/chunk.js")).toBeDefined();
     expect(await shell.match("https://hark.test/icons/icon-192.png")).toBeDefined();

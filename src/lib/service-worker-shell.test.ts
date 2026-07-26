@@ -34,6 +34,25 @@ describe("service-worker shell installation", () => {
     expect(cache.add).toHaveBeenCalledWith("/_next/static/chunks/offline.js");
   });
 
+  it("stores the shell under the manifest's start_url, character for character", async () => {
+    // The service worker's static route resolves against Cache Storage BY
+    // REQUEST URL, and a routing miss goes to the network rather than falling
+    // back to the fetch handler — so a drift of one character between the
+    // manifest and this key silently puts the whole launch document back on the
+    // wire. That regression has happened once; this is the pin against it.
+    const manifest = readFileSync(path.resolve(__dirname, "../app/manifest.ts"), "utf8");
+    const startUrl = manifest.match(/start_url:\s*"([^"]+)"/)?.[1];
+    expect(startUrl, "the manifest's start_url moved or changed shape").toBeTruthy();
+    expect(constants).toContain(`const LAUNCH_URL = "${startUrl}"`);
+
+    const cache = shellCache();
+    const precacheShell = createPrecacheShell({ open: vi.fn().mockResolvedValue(cache) });
+
+    await precacheShell();
+
+    expect(cache.put).toHaveBeenCalledWith(startUrl, expect.any(Response));
+  });
+
   it("rejects installation when a required chunk cannot be cached", async () => {
     const cache = shellCache();
     cache.add.mockRejectedValueOnce(new Error("chunk unavailable"));
@@ -50,5 +69,6 @@ function shellCache() {
       .fn()
       .mockResolvedValue(new Response('<script src="/_next/static/chunks/offline.js"></script>')),
     add: vi.fn().mockResolvedValue(undefined),
+    put: vi.fn().mockResolvedValue(undefined),
   };
 }

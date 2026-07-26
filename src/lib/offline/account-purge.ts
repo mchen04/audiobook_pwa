@@ -70,10 +70,24 @@ export type PurgeOptions = {
  * it safe across accounts. Anything else in a page cache is treated as
  * account-bearing and removed.
  */
+/**
+ * `/library` is on this list for exactly the same reason `/offline` is, and for
+ * no other: `public/sw.js` stores ONE document under both keys, and that
+ * document renders `AppShell` + `LibraryClient` with no user id, no email and
+ * no book rows — the books arrive from this device's IndexedDB mirror once the
+ * shell is running. Nothing account-bearing is in it, so surviving a sweep
+ * leaks nothing, while dropping it would send the next cold launch to the
+ * network (the service worker's static route resolves against this cache).
+ * Matched on pathname so the `?source=pwa` launch key is covered too.
+ *
+ * If `/library` ever server-renders one row of user data, it comes off this
+ * list the same day.
+ */
 function isUserAgnosticShellEntry(url: string): boolean {
   const { pathname } = new URL(url, "https://placeholder.invalid");
   return (
     pathname === "/offline" ||
+    pathname === "/library" ||
     pathname.startsWith("/icons/") ||
     pathname.startsWith("/_next/static/")
   );

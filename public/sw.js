@@ -17,6 +17,19 @@ const LEGACY_MEDIA_CACHE = "chapterline-media-v1";
  * lists this exact path as the entry a sign-in sweep may leave in place.
  */
 const OFFLINE_URL = "/offline";
+/**
+ * The manifest's `start_url`, exactly — query string and all.
+ *
+ * This is the URL a home-screen tap asks for, and it is the ONLY navigation the
+ * static route below claims. It has to be spelled out to the character because
+ * a routing rule resolves against Cache Storage by request URL: `?source=pwa`
+ * is part of the key, nothing reads it (grep: it is a marker and no code
+ * branches on it), and a rule written for a bare `/library` would miss here and
+ * fall through to the network. `src/app/manifest.ts` owns the other copy of
+ * this string; the two must not drift, and `service-worker-shell.test.ts` pins
+ * that they do not.
+ */
+const LAUNCH_URL = "/library?source=pwa";
 const PRECACHE = [OFFLINE_URL, "/icons/icon-192.png"];
 /**
  * How long a navigation the shell cannot answer may wait on the network.
@@ -30,7 +43,59 @@ const NAVIGATION_TIMEOUT_MS = 3000;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(precacheShell().then(() => self.skipWaiting()));
+  declareLaunchRoute(event);
 });
+
+/**
+ * Answer the cold launch without waking this worker at all.
+ *
+ * Serving `/library` from Cache Storage in `fetch` below is not the whole job.
+ * When a navigation arrives and the worker is not running — which on a real
+ * home-screen tap is nearly always — the browser must boot it before it can
+ * ask, and Chromium hedges that wait by speculatively fetching the same
+ * document from the network (`ServiceWorkerAutoPreload`). The paint never waits
+ * for that request and the page still comes from the cache, so it costs the
+ * user nothing; it costs the SERVER a full `/library` render and its Postgres
+ * queries on every cold launch, and the response is thrown away. Measured: six
+ * discarded renders and 24 queries per benchmark run.
+ *
+ * A static route states the answer declaratively, so the browser satisfies the
+ * navigation from the cache without starting the worker and has nothing left to
+ * hedge against.
+ *
+ * TWO THINGS HERE ARE LOAD-BEARING, and getting either wrong is worse than not
+ * doing this at all — a routing MISS goes straight to the network rather than
+ * falling back to the `fetch` handler below, which would put the entire launch
+ * document back on the wire:
+ *
+ *  - the condition matches the start_url EXACTLY, pathname and search. Every
+ *    other navigation (`/library`, `/library?device=1`, `/books/:id`) is
+ *    deliberately left to `serveNavigation`, which handles them correctly and
+ *    is not query-sensitive. A rule written as a bare pathname would claim
+ *    those too and miss on all of them.
+ *  - `precacheShell` stores the shell under this exact key, so the lookup this
+ *    rule performs is guaranteed to hit.
+ *
+ * `addRoutes` is Chromium-only and rejects a malformed rule, so it is guarded:
+ * where it is unsupported nothing changes and the `fetch` handler stays
+ * authoritative. This only ever changes WHO answers, never WHAT is answered.
+ */
+function declareLaunchRoute(event) {
+  if (typeof event.addRoutes !== "function") return;
+  try {
+    const routed = event.addRoutes({
+      condition: {
+        urlPattern: { pathname: "/library", search: "source=pwa" },
+        requestMode: "navigate",
+      },
+      source: "cache",
+    });
+    if (routed && typeof routed.catch === "function") routed.catch(() => undefined);
+  } catch {
+    // An unsupported rule shape must never fail the install. The worker then
+    // answers the same navigation itself, one speculative request later.
+  }
+}
 
 // The shell has to render with no network at all — it is what a warm launch is
 // served — so its static chunks are captured here at install time rather than
@@ -41,6 +106,12 @@ async function precacheShell() {
   await cache.addAll(PRECACHE);
   const offlinePage = await cache.match(OFFLINE_URL);
   if (!offlinePage) throw new Error("The required offline page was not cached.");
+  // The same bytes, stored a second time under the URL a launch actually asks
+  // for, because the static route declared in `install` resolves by request URL
+  // and a miss would go to the network. `serveNavigation` does not need this —
+  // it maps /library onto the /offline entry itself — so this key exists purely
+  // to make the declarative rule and the handler agree on one document.
+  await cache.put(LAUNCH_URL, offlinePage.clone());
   const html = await offlinePage.clone().text();
   const assets = [...new Set(html.match(/\/_next\/static\/[^"'\s\\]+/g) || [])];
   await Promise.all(assets.map((asset) => cache.add(asset)));
