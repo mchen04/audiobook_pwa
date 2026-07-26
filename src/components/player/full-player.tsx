@@ -50,6 +50,7 @@ export function FullPlayer({
   offlineMode = false,
   backHref = "/library",
   backLabel = "Library",
+  onBack,
   autoplay = false,
   details = null,
   nextInCollection = null,
@@ -59,6 +60,12 @@ export function FullPlayer({
   offlineMode?: boolean;
   backHref?: string;
   backLabel?: string;
+  /**
+   * Returns to the caller's own view instead of navigating. The library uses
+   * it for the player it opens in place, where a navigation is exactly what
+   * the device could not do.
+   */
+  onBack?: () => void;
   autoplay?: boolean;
   details?: BookDetails | null;
   nextInCollection?: NextInCollection | null;
@@ -156,10 +163,17 @@ export function FullPlayer({
   return (
     <div className="player-page">
       <div className="player-topbar" inert={sheetView ? true : undefined}>
-        <Link href={backHref} className="icon-text-button">
-          <ArrowLeft size={19} aria-hidden="true" />
-          <span>{backLabel}</span>
-        </Link>
+        {onBack ? (
+          <button type="button" className="icon-text-button" onClick={onBack}>
+            <ArrowLeft size={19} aria-hidden="true" />
+            <span>{backLabel}</span>
+          </button>
+        ) : (
+          <Link href={backHref} className="icon-text-button">
+            <ArrowLeft size={19} aria-hidden="true" />
+            <span>{backLabel}</span>
+          </Link>
+        )}
         <span>{currentChapter?.title || "Full audiobook"}</span>
         <div className="player-topbar-actions">
           {hasTranscript && (
@@ -339,8 +353,23 @@ export function FullPlayer({
         diagnostic={details?.chapterDiagnostic}
       />
 
-      {details && detailsOpen && (
-        <BookDetailsDialog details={details} open onClose={() => setDetailsOpen(false)} />
+      {/*
+        Mounted as soon as this book has details, not on the first click.
+
+        The dialog stays a separate chunk — the library bundle, which is what
+        launch is measured on, renders `FullPlayer` with no `details` and so
+        never fetches it. But on a book page the chunk has to arrive BEFORE the
+        connection does not: fetching it on the click threw `ChunkLoadError`
+        offline and nothing opened, which would have made the whole offline
+        edit surface unreachable exactly when the outbox matters most. The
+        element renders nothing until `showModal()` runs.
+      */}
+      {details && (
+        <BookDetailsDialog
+          details={details}
+          open={detailsOpen}
+          onClose={() => setDetailsOpen(false)}
+        />
       )}
     </div>
   );

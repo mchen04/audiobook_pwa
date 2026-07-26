@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
+import { collectionPatchSchema } from "@/server/api/mutation-schemas";
 import { withMutationParams, withRawMutationParams } from "@/server/api/route-handler";
 import { db } from "@/server/db/client";
 import { books, collectionBooks, collections } from "@/server/db/schema";
@@ -9,19 +10,9 @@ export const runtime = "nodejs";
 
 const paramsSchema = z.object({ collectionId: z.uuid() });
 
-const patchSchema = z
-  .object({
-    name: z.string().trim().min(1).max(120),
-    bookId: z.uuid(),
-    include: z.boolean(),
-  })
-  .partial()
-  .refine((value) => value.name !== undefined || value.bookId !== undefined)
-  .refine((value) => (value.bookId === undefined) === (value.include === undefined));
-
 export const PATCH = withMutationParams(
   paramsSchema,
-  patchSchema,
+  collectionPatchSchema,
   "Invalid collection update.",
   async ({ session, params, data }) => {
     const { name, bookId, include } = data;
@@ -45,10 +36,14 @@ export const PATCH = withMutationParams(
         if (!ownedBook) return "unavailable" as const;
       }
 
-      if (name !== undefined) {
+      // The collection is the sync unit for its membership (design contract
+      // section 3): `collection_books` carries no `updatedAt` of its own, so a
+      // membership change that does not bump the parent is a change no other
+      // device can ever observe. One bump covers both edits in this request.
+      if (name !== undefined || bookId !== undefined) {
         await transaction
           .update(collections)
-          .set({ name, updatedAt: new Date() })
+          .set({ ...(name !== undefined ? { name } : {}), updatedAt: new Date() })
           .where(eq(collections.id, params.collectionId));
       }
       if (bookId !== undefined && include === false) {

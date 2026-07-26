@@ -120,6 +120,20 @@
       "when": 1784273414379,
       "tag": "0016_brown_weapon_omega",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784959837240,
+      "tag": "0017_abandoned_korath",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784961474325,
+      "tag": "0018_stiff_sharon_ventura",
+      "breakpoints": true
     }
   ]
 }

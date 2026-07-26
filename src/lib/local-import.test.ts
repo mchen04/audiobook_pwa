@@ -1,8 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import "fake-indexeddb/auto";
+import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 
+// An import journals its registration in the outbox before it touches the
+// network, so the module under test needs the two browser globals that write
+// reaches for: IndexedDB for the queue, and localStorage for the device id it
+// attributes the mutation to.
 const { storeLocalBookMedia } = vi.hoisted(() => ({ storeLocalBookMedia: vi.fn() }));
 
-vi.mock("@/lib/offline/media-store", () => ({ storeLocalBookMedia }));
+// Only the byte-writing half is stubbed. `withLocalMediaSlot` is the REAL one,
+// so the lock the import holds across its whole local write is the lock the
+// product takes — a stub of it would quietly delete the ordering guarantee that
+// keeps a concurrent reattach out of the middle of an import.
+vi.mock("@/lib/offline/media-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/offline/media-store")>()),
+  storeLocalBookMedia,
+}));
 vi.mock("music-metadata", () => ({
   parseBlob: vi.fn().mockResolvedValue({
     format: {
@@ -23,6 +36,8 @@ import { importLocalMp3 } from "./local-import";
 describe("local MP3 import", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubGlobal("indexedDB", new FakeIDBFactory());
+    vi.stubGlobal("localStorage", memoryStorage());
     storeLocalBookMedia.mockReset().mockResolvedValue(undefined);
   });
 
@@ -51,6 +66,10 @@ describe("local MP3 import", () => {
       file,
       null,
       expect.any(Function),
+      // The slot the import holds names the id this device MINTED, not the one
+      // the server answered with: everything written under the minted id has to
+      // be inside one slot for a later reattach to be able to move all of it.
+      { key: expect.stringMatching(/^mobile-user:[0-9a-f-]{36}$/) },
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -89,6 +108,7 @@ describe("local MP3 import", () => {
       file,
       null,
       expect.any(Function),
+      { key: expect.stringMatching(/^mobile-user:[0-9a-f-]{36}$/) },
     );
   });
 
@@ -108,3 +128,17 @@ describe("local MP3 import", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+function memoryStorage() {
+  const map = new Map<string, string>();
+  return {
+    get length() {
+      return map.size;
+    },
+    key: (index: number) => [...map.keys()][index] ?? null,
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+    removeItem: (key: string) => void map.delete(key),
+    clear: () => map.clear(),
+  };
+}

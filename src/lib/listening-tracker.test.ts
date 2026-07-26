@@ -5,11 +5,7 @@ import { createListeningTracker } from "./listening-tracker";
 function trackerWithClock(startMs: number) {
   let currentTime = startMs;
   const post = vi.fn();
-  const tracker = createListeningTracker(
-    post,
-    () => currentTime,
-    () => true,
-  );
+  const tracker = createListeningTracker(post, () => currentTime);
   return { tracker, post, advance: (ms: number) => (currentTime += ms) };
 }
 
@@ -54,16 +50,16 @@ describe("createListeningTracker", () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
 
-  it("drops offline stretches", () => {
+  // The tracker used to consult `navigator.onLine` and discard a stretch that
+  // ended with the network down, on the reasoning that history is a nicety.
+  // A session the user has already watched accrue is a write, and it is now
+  // journalled like every other one.
+  it("records a stretch that ended while the network was down", () => {
     const post = vi.fn();
     let t = 0;
-    const tracker = createListeningTracker(
-      post,
-      () => (t += 10_000),
-      () => false,
-    );
+    const tracker = createListeningTracker(post, () => (t += 10_000));
     tracker.begin(0);
     tracker.end("book-1", 10_000);
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledTimes(1);
   });
 });

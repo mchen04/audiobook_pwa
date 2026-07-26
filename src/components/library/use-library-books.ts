@@ -1,149 +1,464 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { isLibraryPage, readJson, type LibraryPage } from "@/lib/wire";
+import type { LibraryBook } from "@/domain/library";
+import { afterLaunchPaint } from "@/lib/launch-revalidation";
+import { database, mirrorKeyTail, type OfflineBook } from "@/lib/offline/db";
+import { removeOfflineBook } from "@/lib/offline/deletion-journal";
+import { listOfflineBooks, listStoredOfflineBooks } from "@/lib/offline/library";
+import {
+  applyPullBatch,
+  getMirrorContinueBook,
+  getSyncMeta,
+  listMirrorBooks,
+  listMirrorTagNames,
+} from "@/lib/offline/mirror";
+import { isPullBatch } from "@/lib/offline/sync-protocol";
 
 import type { SortOrder, StatusFilter } from "./library-view";
 
-type LibraryOptions = {
+/**
+ * The library's only source of truth is this device.
+ *
+ * Every read below goes to IndexedDB — the mirror for metadata, `downloads`
+ * for the audio this device actually holds. There is no "am I online?" branch
+ * on this path, which is what makes search, the facets, sort and the continue
+ * card behave identically with the network off.
+ *
+ * The network appears exactly once, *after* the first paint, as revalidation:
+ * a pull is applied to the mirror and the re-read patches into the list that
+ * is already on screen.
+ */
+
+export type LibraryFilters = {
   query: string;
   status: StatusFilter;
   tag: string | null;
   sort: SortOrder;
+  onDevice: boolean;
 };
 
-export function useLibraryBooks(initialPage: LibraryPage, options: LibraryOptions) {
-  const { query, sort, status, tag } = options;
-  const [page, setPage] = useState(initialPage);
-  const [loading, setLoading] = useState(false);
-  const firstRender = useRef(true);
-  const generationRef = useRef(0);
-  const paginationAbortRef = useRef<AbortController | null>(null);
-  const firstPageAbortRef = useRef<AbortController | null>(null);
+/** Downloads keyed by book id: byte size, cover art, and the record to play. */
+export type DeviceIndex = Map<string, OfflineBook>;
 
-  useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
-    const generation = generationRef.current + 1;
-    generationRef.current = generation;
-    paginationAbortRef.current?.abort();
-    paginationAbortRef.current = null;
-    firstPageAbortRef.current?.abort();
-    const controller = new AbortController();
-    firstPageAbortRef.current = controller;
-    setLoading(true);
-    const timer = window.setTimeout(() => {
-      // Only the matching total depends on the filter; tags, the library
-      // total, and the continue card carry over from the initial page.
-      void loadPartialPage({ query, sort, status, tag }, null, controller.signal)
-        .then((next) => {
-          if (generation === generationRef.current && firstPageAbortRef.current === controller) {
-            setPage((current) => ({
-              ...current,
-              books: next.books,
-              nextCursor: next.nextCursor,
-              total: next.total ?? current.total,
-            }));
-          }
-        })
-        .catch((error) => {
-          if (error instanceof DOMException && error.name === "AbortError") return;
-        })
-        .finally(() => {
-          if (generation === generationRef.current && firstPageAbortRef.current === controller) {
-            firstPageAbortRef.current = null;
-            setLoading(false);
-          }
-        });
-    }, 200);
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [query, sort, status, tag]);
+export type LibraryListing = {
+  /** Matching rows, already filtered and sorted. */
+  books: LibraryBook[];
+  /** Every book on this device, regardless of the active filters. */
+  device: DeviceIndex;
+  /** Every book this account has anywhere, for the empty-library decision. */
+  libraryTotal: number;
+  tags: string[];
+  continueBook: LibraryBook | null;
+};
 
-  async function reload(): Promise<void> {
-    setPage(await loadPage({ query, sort, status, tag }));
-  }
+type Overview = { libraryTotal: number; tags: string[]; continueBook: LibraryBook | null };
+type Listing = { books: LibraryBook[]; device: DeviceIndex };
 
-  async function loadMore(): Promise<void> {
-    if (!page.nextCursor || loading) return;
-    const generation = generationRef.current;
-    const controller = new AbortController();
-    paginationAbortRef.current?.abort();
-    paginationAbortRef.current = controller;
-    setLoading(true);
-    try {
-      const next = await loadPartialPage(
-        { query, sort, status, tag },
-        page.nextCursor,
-        controller.signal,
-      );
-      if (generation !== generationRef.current) return;
-      setPage((current) => ({
-        ...current,
-        books: [...current.books, ...next.books],
-        nextCursor: next.nextCursor,
-        total: next.total ?? current.total,
-      }));
-    } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
-    } finally {
-      if (paginationAbortRef.current === controller) {
-        paginationAbortRef.current = null;
-        setLoading(false);
-      }
-    }
-  }
+const PULL_PAGE_LIMIT = 50;
 
-  return { page, reload, loadMore, loading };
-}
+/**
+ * How long a device that has never synced may spend on its first pull before
+ * the library stops saying "setting up" and says what is actually happening.
+ *
+ * Without a ceiling a stalled-but-alive connection would hold a first-time user
+ * on "setting up" indefinitely — the same failure the service worker's
+ * navigation budget exists to prevent. What the ceiling may NOT do is conclude
+ * the pull succeeded: it is a deadline on the wording, not on the truth.
+ */
+const FIRST_SYNC_GATE_MS = 4_000;
 
-async function loadPage(options: LibraryOptions, signal?: AbortSignal): Promise<LibraryPage> {
-  const response = await fetch(`/api/books?${librarySearch(options)}`, {
-    cache: "no-store",
-    signal,
-  });
-  const payload = await readJson(response, isLibraryPage);
-  if (!payload) throw new Error("The library could not be refreshed.");
-  return payload;
+/**
+ * How long to wait before asking again after a first pull that could not reach
+ * the server. Doubles per attempt and is capped, because a device with no
+ * mirror has nothing to show until this succeeds and equally must not turn a
+ * server outage into a retry storm.
+ */
+function retryDelayFor(attempt: number): number {
+  return Math.min(30_000, 2_000 * 2 ** Math.min(attempt, 4));
 }
 
 /**
- * Filter reloads and cursor pages skip the filter-independent overview; the
- * total is null on cursor pages (unchanged from the filter's first page).
+ * Whether this device has ever completed a pull for the signed-in account.
+ *
+ * `done` is set from exactly two facts — a sync cursor already in the mirror,
+ * or a pull that just applied one — and from nothing else. It used to be set by
+ * the gate above and by an `unreachable` pull as well, which meant a device
+ * that had never synced and could not reach the server announced that the
+ * account owns no books. It does not know that. Nobody has told it anything.
  */
-async function loadPartialPage(
-  options: LibraryOptions,
-  cursor: string | null,
-  signal?: AbortSignal,
-): Promise<{ books: LibraryPage["books"]; nextCursor: string | null; total: number | null }> {
-  const search = librarySearch(options);
-  if (cursor) search.set("cursor", cursor);
-  search.set("meta", "0");
-  const response = await fetch(`/api/books?${search}`, { cache: "no-store", signal });
-  const payload = (await response.json().catch(() => null)) as {
-    books?: LibraryPage["books"];
-    nextCursor?: string | null;
-    total?: number | null;
-  } | null;
-  if (
-    !response.ok ||
-    !payload?.books ||
-    payload.nextCursor === undefined ||
-    (cursor ? payload.total !== null : typeof payload.total !== "number")
-  ) {
-    throw new Error("The library could not be extended.");
-  }
-  return { books: payload.books, nextCursor: payload.nextCursor, total: payload.total ?? null };
+type FirstSync = "unknown" | "pending" | "done";
+
+/** What the library may say about a first pull it has not yet completed. */
+export type FirstSyncStatus = "done" | "waiting" | "slow" | "unreachable";
+
+function firstSyncStatusOf(
+  firstSync: FirstSync,
+  attempt: number,
+  slowAttempt: number,
+  unreachedAttempt: number,
+): FirstSyncStatus {
+  if (firstSync === "done") return "done";
+  if (unreachedAttempt === attempt) return "unreachable";
+  if (slowAttempt === attempt) return "slow";
+  return "waiting";
 }
 
-function librarySearch(options: LibraryOptions): URLSearchParams {
-  const search = new URLSearchParams({ status: options.status, sort: options.sort });
-  if (options.query.trim()) search.set("query", options.query.trim());
-  if (options.tag) search.set("tag", options.tag);
-  return search;
+export function useLibraryBooks(userId: string | null, filters: LibraryFilters) {
+  const { query, status, tag, sort, onDevice } = filters;
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [listing, setListing] = useState<Listing | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [nonce, setNonce] = useState(0);
+  const [reconnects, setReconnects] = useState(0);
+  const [firstSync, setFirstSync] = useState<FirstSync>("unknown");
+  /**
+   * Which pull attempt ran past the gate, and which one could not reach the
+   * server at all. Both are recorded as the attempt number rather than as a
+   * boolean, so a retry clears them by moving on instead of by a second state
+   * write racing the effect that starts the attempt they belong to.
+   */
+  const [slowAttempt, setSlowAttempt] = useState(-1);
+  const [unreachedAttempt, setUnreachedAttempt] = useState(-1);
+
+  const reread = useCallback(() => setNonce((current) => current + 1), []);
+
+  // Filter-independent: the tag vocabulary, the continue card and the total
+  // the readiness marker is decided from. Keystrokes never re-read these.
+  useEffect(() => {
+    if (!userId) return;
+    let active = true;
+    void readOverview(userId)
+      .then((next) => {
+        if (active) setOverview(next);
+      })
+      .catch(() => {
+        if (active) setUnavailable(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [userId, nonce]);
+
+  // The list itself. The previous list stays mounted while this runs, so a
+  // re-read patches rows in place instead of unmounting the grid.
+  useEffect(() => {
+    if (!userId) return;
+    let active = true;
+    void readListing(userId, { query, status, tag, sort, onDevice })
+      .then((next) => {
+        if (active) setListing(next);
+      })
+      .catch(() => {
+        if (active) setUnavailable(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [userId, query, status, tag, sort, onDevice, nonce]);
+
+  // Revalidation, after paint and never before.
+  //
+  // An earlier version scheduled this on `requestAnimationFrame` from mount,
+  // which fires while the mirror is still being read — before there is any
+  // paint to be "after". `afterLaunchPaint` waits for the render that puts the
+  // user's real library on screen and then for the browser to go quiet, so the
+  // pull competes with nothing that launch is measured on.
+  //
+  // The cold start is the exception, and it is the one section 10 asks for: a
+  // device that has never completed a pull has no mirror to paint, so it would
+  // be telling someone with a library that they have no books. There is nothing
+  // to protect, so the first pull runs at once and the library waits for it.
+  // The test is the sync cursor, not "the list looks empty" — an account that
+  // genuinely owns no books has a cursor, and must not re-pull eagerly on every
+  // launch forever.
+  useEffect(() => {
+    if (!userId) return;
+    let active = true;
+    let cancelWait = () => {};
+    let gate = 0;
+    let backoff = 0;
+    let firstPull = false;
+    const attempt = reconnects;
+    const run = () => {
+      void revalidate(userId).then((outcome) => {
+        if (!active) return;
+        // An expired or revoked session must never strand the user on a
+        // cached library. Purging belongs to the sign-in/sign-out path,
+        // which owns it; doing it here would destroy the only copy of the
+        // audio over a session that has merely timed out.
+        if (outcome === "unauthorized") {
+          window.location.replace("/login");
+          return;
+        }
+        window.clearTimeout(gate);
+        // Only a pull that actually applied proves this device now knows what
+        // the account holds. `unreachable` proves the opposite.
+        if (outcome === "applied") setFirstSync("done");
+        else {
+          setUnreachedAttempt(attempt);
+          // A device with no mirror cannot show a library at all, so its first
+          // pull is retried on its own rather than waiting for the user to
+          // notice. One dropped request must not cost a launch. The delay grows
+          // and is capped, so a server that is down is asked politely rather
+          // than hammered, and every later pull is still reconnect-driven.
+          if (firstPull) backoff = window.setTimeout(retryFirstPull, retryDelayFor(attempt));
+        }
+        reread();
+      });
+    };
+    const retryFirstPull = () => {
+      if (active) setReconnects((current) => current + 1);
+    };
+    void getSyncMeta(userId)
+      .catch(() => undefined)
+      .then((meta) => {
+        if (!active) return;
+        if (meta?.cursor) {
+          setFirstSync("done");
+          cancelWait = afterLaunchPaint(run);
+          return;
+        }
+        firstPull = true;
+        setFirstSync("pending");
+        gate = window.setTimeout(() => {
+          if (active) setSlowAttempt(attempt);
+        }, FIRST_SYNC_GATE_MS);
+        run();
+      });
+    return () => {
+      active = false;
+      window.clearTimeout(gate);
+      window.clearTimeout(backoff);
+      cancelWait();
+    };
+  }, [userId, reconnects, reread]);
+
+  // Section 6: pull runs on launch and on reconnect. Nothing else listens for
+  // connectivity, and nothing on the read path does.
+  useEffect(() => {
+    const onOnline = () => setReconnects((current) => current + 1);
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
+
+  const retry = useCallback(() => {
+    setUnavailable(false);
+    // Also re-runs the pull, which is what a device that has never synced is
+    // actually retrying — re-reading an empty mirror would tell it nothing.
+    setReconnects((current) => current + 1);
+    reread();
+  }, [reread]);
+
+  /** After an import: pull it back down, then re-read. */
+  const reload = useCallback(async () => {
+    if (!userId) return;
+    await revalidate(userId);
+    reread();
+  }, [userId, reread]);
+
+  const removeDownload = useCallback(
+    async (bookId: string) => {
+      if (!userId) return false;
+      try {
+        // Journaled before any bytes move, so a failure retries on next load.
+        // This removes the media this device holds and nothing else: the book,
+        // its chapters, tags, progress and history are untouched.
+        await removeOfflineBook(userId, bookId);
+      } catch {
+        return false;
+      }
+      reread();
+      return true;
+    },
+    [userId, reread],
+  );
+
+  const snapshot: LibraryListing | null = overview && listing ? { ...listing, ...overview } : null;
+
+  return {
+    snapshot,
+    /**
+     * This device has never completed a pull for this account, so an empty
+     * mirror does not mean an empty library — it means nobody has asked yet.
+     * The caller must not present that as the genuine "no books" state.
+     */
+    preparing: firstSync !== "done",
+    /**
+     * How that first pull is going, for the wording only — every value but
+     * `done` means this device does not know what the account holds, and none
+     * of them may carry the readiness marker.
+     *
+     * `slow` and `unreachable` are deliberately separate. A pull still in
+     * flight past the gate has not failed, and telling the user it did would be
+     * as wrong as telling them their library is empty.
+     */
+    firstSyncStatus: firstSyncStatusOf(firstSync, reconnects, slowAttempt, unreachedAttempt),
+    unavailable,
+    reload,
+    retry,
+    removeDownload,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Local reads
+// ---------------------------------------------------------------------------
+
+async function readOverview(userId: string): Promise<Overview> {
+  const [tags, continueBook, mirrorIds, records] = await Promise.all([
+    listMirrorTagNames(userId),
+    getMirrorContinueBook(userId),
+    readMirrorBookIds(userId),
+    listStoredOfflineBooks(userId),
+  ]);
+  const deviceOnly = records.filter((record) => !mirrorIds.has(record.book.id)).length;
+  return { libraryTotal: mirrorIds.size + deviceOnly, tags, continueBook };
+}
+
+async function readListing(userId: string, filters: LibraryFilters): Promise<Listing> {
+  const [rows, records, mirrorIds] = await Promise.all([
+    listMirrorBooks(userId, {
+      query: filters.query.trim() || undefined,
+      status: filters.status,
+      tag: filters.tag || undefined,
+      sort: filters.sort,
+    }),
+    listStoredOfflineBooks(userId),
+    readMirrorBookIds(userId),
+  ]);
+  const device: DeviceIndex = new Map(records.map((record) => [record.book.id, record]));
+  const merged = withDeviceOnlyBooks(rows, records, mirrorIds, filters);
+  return { books: filters.onDevice ? merged.filter((row) => device.has(row.id)) : merged, device };
+}
+
+/** Ids only — no record is deserialized, so this stays cheap on big libraries. */
+async function readMirrorBookIds(userId: string): Promise<Set<string>> {
+  const db = await database();
+  const keys = await db.getAllKeysFromIndex("books", "by-user", userId);
+  return new Set(keys.map(mirrorKeyTail));
+}
+
+/**
+ * A book can be on this device before it exists in the mirror: a local import
+ * lands in `downloads` at once, and the first pull after an upgrade or after
+ * the mirror was evicted has not run yet (design contract sections 10 and 12).
+ * Those records are projected into rows and filtered by the same rules rather
+ * than dropped, so the library never hides a book this device can play.
+ */
+function withDeviceOnlyBooks(
+  rows: LibraryBook[],
+  records: OfflineBook[],
+  mirrorIds: Set<string>,
+  filters: LibraryFilters,
+): LibraryBook[] {
+  const extras = records
+    .filter((record) => !mirrorIds.has(record.book.id))
+    .map(asLibraryBook)
+    .filter((row) => matchesDeviceOnly(row, filters));
+  if (!extras.length) return rows;
+  return [...rows, ...extras].sort(comparatorFor(filters.sort));
+}
+
+function asLibraryBook(record: OfflineBook): LibraryBook {
+  return {
+    id: record.book.id,
+    title: record.book.title,
+    author: record.book.author,
+    narrator: null,
+    series: null,
+    chapterDiagnostic: null,
+    archivedAt: null,
+    createdAt: record.downloadedAt,
+    updatedAt: record.downloadedAt,
+    tags: [],
+    durationMs: record.book.durationMs,
+    positionMs: record.book.initialPositionMs || 0,
+    completed: record.book.completed || false,
+    progressUpdatedAt: record.book.initialProgressOccurredAt,
+  };
+}
+
+/** The mirror's own rules, applied to a row the mirror does not hold yet. */
+function matchesDeviceOnly(row: LibraryBook, filters: LibraryFilters): boolean {
+  // A row the mirror has never seen carries no tag edges, so any tag facet
+  // excludes it rather than silently widening the filter.
+  if (filters.tag) return false;
+  const completed = row.completed || false;
+  const positionMs = row.positionMs || 0;
+  if (filters.status === "archived") return false;
+  if (filters.status === "finished" && !completed) return false;
+  if (filters.status === "in-progress" && (completed || positionMs === 0)) return false;
+  if (filters.status === "not-started" && (completed || positionMs > 0)) return false;
+  const needle = filters.query.trim().toLowerCase();
+  return !needle || `${row.title} ${row.author}`.toLowerCase().includes(needle);
+}
+
+/**
+ * Mirrors `comparatorFor` in `lib/offline/mirror.ts`. It is needed only to
+ * splice device-only rows into an already-sorted list; the mirror stays the
+ * single implementation for everything it holds.
+ */
+function comparatorFor(sort: SortOrder): (left: LibraryBook, right: LibraryBook) => number {
+  if (sort === "title" || sort === "author") {
+    return (left, right) =>
+      left[sort].toLowerCase().localeCompare(right[sort].toLowerCase()) ||
+      left.id.localeCompare(right.id);
+  }
+  if (sort === "added") {
+    return (left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
+  }
+  return (left, right) =>
+    activityAt(right).localeCompare(activityAt(left)) || right.id.localeCompare(left.id);
+}
+
+function activityAt(book: LibraryBook): string {
+  return book.progressUpdatedAt && book.progressUpdatedAt > book.updatedAt
+    ? book.progressUpdatedAt
+    : book.updatedAt;
+}
+
+// ---------------------------------------------------------------------------
+// Revalidation — the only network on this path, and only after paint
+// ---------------------------------------------------------------------------
+
+type PullOutcome = "applied" | "unauthorized" | "unreachable";
+
+async function revalidate(userId: string): Promise<PullOutcome> {
+  const outcome = await pull(userId);
+  // Reconciling downloads against Cache Storage is how evicted audio is
+  // detected: the stale record is dropped, and the book keeps its metadata and
+  // is marked "not on this device" instead of continuing to look playable.
+  await listOfflineBooks(userId).catch(() => undefined);
+  return outcome;
+}
+
+async function pull(userId: string): Promise<PullOutcome> {
+  // Bounded: a server that keeps reporting `complete: false` without advancing
+  // its cursor must not spin here.
+  for (let page = 0; page < PULL_PAGE_LIMIT; page += 1) {
+    const meta = await getSyncMeta(userId).catch(() => undefined);
+    const since = meta?.cursor ? `?since=${encodeURIComponent(meta.cursor)}` : "";
+    let response: Response;
+    try {
+      response = await fetch(`/api/sync/pull${since}`, { cache: "no-store" });
+    } catch {
+      return "unreachable";
+    }
+    if (response.status === 401 || response.status === 403) return "unauthorized";
+    if (!response.ok) return "unreachable";
+    const batch: unknown = await response.json().catch(() => null);
+    if (!isPullBatch(batch)) return "unreachable";
+    try {
+      await applyPullBatch(userId, batch);
+    } catch {
+      // The batch is all-or-nothing and the cursor moves with it, so a failed
+      // apply leaves the mirror exactly as it was and the next pull retries.
+      return "unreachable";
+    }
+    if (batch.complete) return "applied";
+  }
+  return "applied";
 }

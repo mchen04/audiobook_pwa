@@ -20,7 +20,8 @@ import type {
   PlayerChapter,
 } from "@/domain/player";
 import { ACTIVE_USER_KEY, PROGRESS_CONFLICT_EVENT, UNLOAD_PLAYER_EVENT } from "@/lib/app-keys";
-import { createListeningTracker } from "@/lib/listening-tracker";
+import { afterLaunchPaint } from "@/lib/launch-revalidation";
+import { createListeningTracker, queueListeningSession } from "@/lib/listening-tracker";
 import {
   loadPlaybackHistory,
   PLAYBACK_HISTORY_LIMIT,
@@ -94,7 +95,7 @@ const PlaybackTimeContext = createContext<PlaybackTimeStore | null>(null);
 export function PlaybackProvider({ children, userId }: { children: ReactNode; userId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const activeBookRef = useRef<PlayerBook | null>(null);
-  const trackerRef = useRef(createListeningTracker());
+  const trackerRef = useRef(createListeningTracker(queueListeningSession(userId)));
   const suppressNextPauseRef = useRef(false);
   const preferencesRef = useRef<PlayerPreferences>(DEFAULT_PREFERENCES);
   const positionSyncKeyRef = useRef("");
@@ -173,26 +174,30 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   useEffect(() => {
     localStorage.setItem(ACTIVE_USER_KEY, userId);
     let active = true;
+    const refresh = () => {
+      void fetchPreferences(userId)
+        .then((fresh) => {
+          if (active) setPreferences(fresh);
+        })
+        .catch(() => undefined);
+    };
+    // This device's own answer is applied at once; the server's is revalidation
+    // and waits for the launch to paint. `fetchPreferences` used to fire from
+    // mount, which put a network round trip and a Postgres query in front of
+    // the frame the launch is measured on for every page carrying the player.
     void Promise.resolve()
       .then(() => {
         if (active) setPreferences(readCachedPreferences(userId));
-        return fetchPreferences(userId);
-      })
-      .then((fresh) => {
-        if (active) setPreferences(fresh);
       })
       .catch(() => undefined);
-    const refresh = () => {
-      void fetchPreferences(userId).then((fresh) => {
-        if (active) setPreferences(fresh);
-      });
-    };
+    const cancelRevalidation = afterLaunchPaint(refresh);
     const replayHistory = () => void replayPlaybackHistory(userId).catch(() => undefined);
     if (navigator.onLine) replayHistory();
     window.addEventListener("online", refresh);
     window.addEventListener("online", replayHistory);
     return () => {
       active = false;
+      cancelRevalidation();
       window.removeEventListener("online", refresh);
       window.removeEventListener("online", replayHistory);
     };
@@ -281,10 +286,17 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const actions = useMemo(() => {
     return {
       updatePreferences(patch: Partial<PlayerPreferences>) {
-        setPreferences((current) => {
-          void savePreferences(userId, current, patch);
-          return { ...current, ...patch };
-        });
+        // The save is deliberately OUTSIDE the state updater. React may invoke
+        // an updater more than once for a single call — StrictMode does it on
+        // every render in development — so a PATCH fired from inside one is
+        // sent twice, and a state updater is required to be pure regardless.
+        // The ref is written here rather than left to its effect so two
+        // updates in the same tick still compose.
+        const current = preferencesRef.current;
+        const next = { ...current, ...patch };
+        preferencesRef.current = next;
+        setPreferences(next);
+        void savePreferences(userId, current, patch);
       },
       loadBook(nextBook: PlayerBook, autoplay = false, historySnapshot?: PlaybackHistorySnapshot) {
         const audio = audioRef.current;

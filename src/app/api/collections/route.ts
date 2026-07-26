@@ -1,6 +1,7 @@
 import { asc, count, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
+import { collectionCreateSchema } from "@/server/api/mutation-schemas";
 import { withMutation, withQuery } from "@/server/api/route-handler";
 import { db } from "@/server/db/client";
 import { collectionBooks, collections } from "@/server/db/schema";
@@ -30,11 +31,10 @@ export const GET = withQuery(async ({ request, session }) => {
   return Response.json({ collections: rows });
 });
 
-const createSchema = z.object({ name: z.string().trim().min(1).max(120) });
 const MAX_COLLECTIONS = 100;
 
 export const POST = withMutation(
-  createSchema,
+  collectionCreateSchema,
   "Give the collection a name.",
   async ({ session, data }) => {
     const created = await db.transaction(async (transaction) => {

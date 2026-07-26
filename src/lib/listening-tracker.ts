@@ -1,25 +1,30 @@
+import { replayQueuedMutations } from "@/lib/offline-sync";
+import { commitHistoryEvent } from "@/lib/offline/outbox";
+import { getDeviceId } from "@/lib/playback-core";
+
 const MIN_SESSION_MS = 5_000;
 
-type PostSession = (
-  bookId: string,
-  payload: {
-    startedAt: string;
-    endedAt: string;
-    startPositionMs: number;
-    endPositionMs: number;
-  },
-) => void;
+export type ListeningStretch = {
+  startedAt: string;
+  endedAt: string;
+  startPositionMs: number;
+  endPositionMs: number;
+};
+
+type PostSession = (bookId: string, payload: ListeningStretch) => void;
 
 /**
  * Records contiguous listening stretches. `begin` on play, `end` on
- * pause/finish/book-switch; stretches under five seconds are dropped and
- * offline stretches are skipped (history is a nicety, not queued state).
+ * pause/finish/book-switch; stretches under five seconds are dropped.
+ *
+ * Nothing here asks whether the network is up. It used to: an offline stretch
+ * was discarded on the spot, and an online one was posted with a bare
+ * `void fetch` that swallowed its own failure — so a session lost to a
+ * connection that dropped mid-request was gone, silently, after the user had
+ * already been shown the time as listened. Both are the same bug, and the fix
+ * for both is that `post` journals rather than sends.
  */
-export function createListeningTracker(
-  post: PostSession = defaultPost,
-  now: () => number = Date.now,
-  isOnline: () => boolean = () => navigator.onLine,
-) {
+export function createListeningTracker(post: PostSession, now: () => number = Date.now) {
   let started: { startedAtMs: number; startPositionMs: number } | null = null;
 
   return {
@@ -29,7 +34,7 @@ export function createListeningTracker(
     end(bookId: string, endPositionMs: number): void {
       const current = started;
       started = null;
-      if (!current || !isOnline()) return;
+      if (!current) return;
       const endedAtMs = now();
       if (endedAtMs - current.startedAtMs < MIN_SESSION_MS) return;
       post(bookId, {
@@ -45,11 +50,18 @@ export function createListeningTracker(
   };
 }
 
-function defaultPost(bookId: string, payload: Parameters<PostSession>[1]): void {
-  void fetch(`/api/books/${bookId}/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    keepalive: true,
-  }).catch(() => undefined);
+/**
+ * The production sink: one outbox row per stretch, drained immediately.
+ *
+ * `history` is the mutation kind that never coalesces — its key carries a fresh
+ * `mutationId` — so two stretches of the same book can never collapse into one.
+ * The drain is a best-effort head start, not the delivery mechanism: whatever it
+ * does not manage is still in the outbox for the next launch or reconnect.
+ */
+export function queueListeningSession(userId: string): PostSession {
+  return (bookId, payload) => {
+    void commitHistoryEvent({ userId, deviceId: getDeviceId() }, bookId, payload)
+      .then(() => replayQueuedMutations(userId))
+      .catch(() => undefined);
+  };
 }

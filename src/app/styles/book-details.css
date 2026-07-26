@@ -212,6 +212,12 @@
   font-size: var(--text-sm);
 }
 
+.dialog-notice {
+  margin: 1rem 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 @media (max-width: 700px) {
   .dialog-columns {
     grid-template-columns: 1fr;

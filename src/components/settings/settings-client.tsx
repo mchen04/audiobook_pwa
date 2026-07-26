@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
 import { usePlayback } from "@/components/player/playback-provider";
-import { clearLocalDataForUser } from "@/lib/offline/library";
+import { purgeAccount } from "@/lib/offline/account-purge";
 import { SKIP_CHOICES_MS } from "@/lib/preferences";
 
 export function SettingsClient({ email }: { email: string }) {
@@ -36,12 +36,20 @@ export function SettingsClient({ email }: { email: string }) {
       setDeleteError("The account could not be deleted. Check your connection and try again.");
       return;
     }
+    // The whole sweep, not just the audio. `clearLocalDataForUser` covers the
+    // downloads, transcripts and cache entries; it does not touch the mirror,
+    // the deletion journal, the device sequences, the cached pages or the
+    // active-user key. Deleting your account used to leave your entire mirrored
+    // library — every book row, chapter, tag and position — readable on this
+    // device. `/api/account/delete` ends the session server-side, so none of
+    // the auth client's sign-out hooks fire on this path and this is the only
+    // place the sweep can be asked for.
     try {
-      await clearLocalDataForUser(userId);
+      await purgeAccount(userId);
     } catch {
       setDeleting(false);
       setDeleteError(
-        "Your account was deleted, but this browser could not clear every local audio file. Clear Hark's website data in browser settings.",
+        "Your account was deleted, but this browser could not clear every local file. Clear Hark's website data in browser settings.",
       );
       return;
     }

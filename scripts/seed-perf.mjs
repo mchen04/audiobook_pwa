@@ -3,26 +3,25 @@
 // ONE existing user. Storage objects are not created; media routes are not the
 // target of these measurements.
 //
-// Usage: node scripts/seed-perf.mjs <account-email>
+// Usage: node scripts/seed-perf.mjs <account-email> [--env-file=.env.test]
+//
+// Reads .env.local by default; point it at the local test database with
+// --env-file=.env.test or HARK_ENV_FILE=.env.test.
 
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 
 import postgres from "postgres";
 
+import { loadEnvFile, resolveEnvFile } from "./lib/env-file.mjs";
+
 const email = process.argv[2];
-if (!email) {
-  console.error("Usage: node scripts/seed-perf.mjs <account-email>");
+if (!email || email.startsWith("-")) {
+  console.error("Usage: node scripts/seed-perf.mjs <account-email> [--env-file=<path>]");
   process.exit(1);
 }
 
-const env = Object.fromEntries(
-  readFileSync(".env.local", "utf8")
-    .split("\n")
-    .filter((line) => line.includes("=") && !line.startsWith("#"))
-    .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
-);
-const sql = postgres(env.DATABASE_URL, { max: 4 });
+loadEnvFile(resolveEnvFile({ fallback: ".env.local" }));
+const sql = postgres(process.env.DATABASE_URL, { max: 4 });
 
 const BOOKS = 1000;
 const CHAPTERS_PER_BOOK = 20;
