@@ -286,10 +286,17 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const actions = useMemo(() => {
     return {
       updatePreferences(patch: Partial<PlayerPreferences>) {
-        setPreferences((current) => {
-          void savePreferences(userId, current, patch);
-          return { ...current, ...patch };
-        });
+        // The save is deliberately OUTSIDE the state updater. React may invoke
+        // an updater more than once for a single call — StrictMode does it on
+        // every render in development — so a PATCH fired from inside one is
+        // sent twice, and a state updater is required to be pure regardless.
+        // The ref is written here rather than left to its effect so two
+        // updates in the same tick still compose.
+        const current = preferencesRef.current;
+        const next = { ...current, ...patch };
+        preferencesRef.current = next;
+        setPreferences(next);
+        void savePreferences(userId, current, patch);
       },
       loadBook(nextBook: PlayerBook, autoplay = false, historySnapshot?: PlaybackHistorySnapshot) {
         const audio = audioRef.current;
