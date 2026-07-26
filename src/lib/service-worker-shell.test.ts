@@ -6,11 +6,19 @@ import { describe, expect, it, vi } from "vitest";
 const source = readFileSync(path.resolve(__dirname, "../../public/sw.js"), "utf8");
 const constants = source.match(/const CACHE_VERSION[\s\S]*?const PRECACHE = \[[\s\S]*?\];/)?.[0];
 const functionSource = source.match(/async function precacheShell\(\) \{[\s\S]*?\n\}/)?.[0];
-if (!constants || !functionSource) throw new Error("The service-worker shell contract moved.");
+// `precacheShell` calls this, so the extracted source does not run without it.
+// Pulled separately and asserted separately, so a rename shows up as "the
+// contract moved" rather than as a ReferenceError from inside a `new Function`.
+const sweepSource = source.match(
+  /async function dropSupersededChunks\(cache, assets\) \{[\s\S]*?\n\}/,
+)?.[0];
+if (!constants || !functionSource || !sweepSource) {
+  throw new Error("The service-worker shell contract moved.");
+}
 
 const createPrecacheShell = new Function(
   "caches",
-  `${constants}; ${functionSource}; return precacheShell;`,
+  `${constants}; ${functionSource}; ${sweepSource}; return precacheShell;`,
 ) as (cacheStorage: unknown) => () => Promise<void>;
 
 describe("service-worker shell installation", () => {
@@ -32,6 +40,32 @@ describe("service-worker shell installation", () => {
 
     expect(cache.addAll).toHaveBeenCalledWith(["/offline", "/icons/icon-192.png"]);
     expect(cache.add).toHaveBeenCalledWith("/_next/static/chunks/offline.js");
+  });
+
+  it("forgets chunks the refreshed shell no longer references", async () => {
+    // Every deployment renames /_next/static, and this runs again on each
+    // REFRESH_SHELL. Without the sweep the shell cache grows by a full chunk
+    // set per deploy, against the same origin quota the downloaded audio
+    // competes for — and that audio is the only copy in existence.
+    const cache = shellCacheWithStaleChunk();
+    const precacheShell = createPrecacheShell({ open: vi.fn().mockResolvedValue(cache) });
+
+    await precacheShell();
+
+    const deleted = cache.delete.mock.calls.map(([request]) => new URL(request.url).pathname);
+    expect(deleted).toStrictEqual(["/_next/static/chunks/from-last-deploy.js"]);
+  });
+
+  it("never sweeps the shell document, the launch key or the icons", async () => {
+    const cache = shellCacheWithStaleChunk();
+    const precacheShell = createPrecacheShell({ open: vi.fn().mockResolvedValue(cache) });
+
+    await precacheShell();
+
+    const deleted = cache.delete.mock.calls.map(([request]) => new URL(request.url).pathname);
+    expect(deleted).not.toContain("/offline");
+    expect(deleted).not.toContain("/library");
+    expect(deleted).not.toContain("/icons/icon-192.png");
   });
 
   it("stores the shell under the manifest's start_url, character for character", async () => {
@@ -62,6 +96,18 @@ describe("service-worker shell installation", () => {
   });
 });
 
+/** A cache already holding one superseded chunk from an earlier deployment. */
+function shellCacheWithStaleChunk() {
+  const cache = shellCache();
+  cache.keys.mockResolvedValue([
+    new Request("https://hark.test/_next/static/chunks/offline.js"),
+    new Request("https://hark.test/_next/static/chunks/from-last-deploy.js"),
+    new Request("https://hark.test/offline"),
+    new Request("https://hark.test/icons/icon-192.png"),
+  ]);
+  return cache;
+}
+
 function shellCache() {
   return {
     addAll: vi.fn().mockResolvedValue(undefined),
@@ -70,5 +116,7 @@ function shellCache() {
       .mockResolvedValue(new Response('<script src="/_next/static/chunks/offline.js"></script>')),
     add: vi.fn().mockResolvedValue(undefined),
     put: vi.fn().mockResolvedValue(undefined),
+    keys: vi.fn().mockResolvedValue([]),
+    delete: vi.fn().mockResolvedValue(true),
   };
 }

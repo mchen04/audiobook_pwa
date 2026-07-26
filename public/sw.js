@@ -115,6 +115,32 @@ async function precacheShell() {
   const html = await offlinePage.clone().text();
   const assets = [...new Set(html.match(/\/_next\/static\/[^"'\s\\]+/g) || [])];
   await Promise.all(assets.map((asset) => cache.add(asset)));
+  await dropSupersededChunks(cache, assets);
+}
+
+/**
+ * Forget the chunks the shell no longer references.
+ *
+ * Every deployment gives the build new `/_next/static` names, and this function
+ * re-runs on each `REFRESH_SHELL`. Without a sweep the old names stay cached
+ * forever: the shell cache grows by a full chunk set per deploy, against the
+ * same origin quota the downloaded audio competes for — and that audio is the
+ * only copy in existence, so the eviction this would eventually provoke costs
+ * the user something unrecoverable. The cache-version bump in `activate` does
+ * not cover it either, since the version changes with the cache's MEANING, not
+ * with the build.
+ *
+ * Deliberately conservative: only `/_next/static` entries are considered, and
+ * only ones the freshly-read shell does not reference. The shell document, the
+ * launch key and the icons are never touched here.
+ */
+async function dropSupersededChunks(cache, assets) {
+  const keep = new Set(assets);
+  const stale = (await cache.keys()).filter((request) => {
+    const { pathname } = new URL(request.url);
+    return pathname.startsWith("/_next/static/") && !keep.has(pathname);
+  });
+  await Promise.all(stale.map((request) => cache.delete(request)));
 }
 
 self.addEventListener("activate", (event) => {
