@@ -104,7 +104,7 @@ test("imports from iPhone Downloads, plays, seeks, relaunches, and works offline
   // Everything the Downloads screen could show, shown on the card: that the
   // book is on this device, what it costs there, and how to remove it.
   const card = page.locator(".book-item", { hasText: "iPhone Downloads Test" });
-  await expect(card.getByText(/On this device · [\d.]+ (KB|MB|GB)/)).toBeVisible();
+  await expect(card.getByText(/^[\d.]+ (KB|MB|GB) on this device$/)).toBeVisible();
   await expect(
     card.getByRole("button", { name: "Remove download of iPhone Downloads Test" }),
   ).toBeVisible();

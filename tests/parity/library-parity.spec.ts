@@ -335,7 +335,10 @@ test("books not on this device are marked, browsable, searchable and never playa
     expect(card, `"${seed.title}" is not in the library at all with the network gone`).toBeTruthy();
     if (seed.onDevice) {
       expect(card!.onDevice).toBe(true);
-      expect(card!.deviceLine).toMatch(/^On this device · [\d.]+ (B|KB|MB|GB)/);
+      // The size lives in the meta line, and still says what it means to a
+      // screen reader rather than being a bare number next to a progress figure.
+      expect(card!.deviceSize).toMatch(/^[\d.]+ (B|KB|MB|GB) on this device$/);
+      expect(card!.deviceLine, "a downloaded book needs no missing-audio notice").toBe("");
       expect(card!.removeDownloadButton, "a downloaded book must offer removal").toBe(true);
       expect(card!.playLink, "a downloaded book must be playable offline").toBe(true);
       expect(card!.offDeviceBadge).toBe(false);
