@@ -5,71 +5,100 @@ import { tmpdir } from "node:os";
 /**
  * One sign-in budget, shared by every suite that drives this app server.
  *
- * `src/server/auth.ts` rate-limits sign-in per window, and the limiter lives in
- * the SERVER — so it does not care which Playwright project spent the attempts.
- * The parity suite has always paced itself against this, deliberately spending
- * only part of the allowance and leaving "headroom for the other suites that
- * share this server". The other suites never claimed that headroom, they simply
- * assumed it: sync signed in whenever it liked, and passed only because it
- * usually ran when parity had not just finished.
+ * `src/server/auth.ts` rate-limits `/sign-in/email` to 8 per 60s, and the
+ * limiter lives in the SERVER — in memory, so `db:test:reset` does not clear it
+ * and it does not care which Playwright project spent the attempts.
  *
- * Running the full gate list back to back is what exposed it — parity spends its
- * five, sync immediately asks for more, and `outbox-durability` fails on a
- * 60-second `waitForURL` that reads exactly like a product bug and is not one.
+ * THE WINDOW IS NOT ROLLING, and assuming it was is what made the first version
+ * of this file fail. better-auth keeps a count and a `lastRequest` per key and
+ * resets the count only when a request arrives more than `window` seconds after
+ * the previous one:
  *
- * So the budget moved here and both harnesses now go through it. The window is
- * kept ON DISK rather than in memory, because Playwright starts a fresh worker
- * after a failing test and consecutive runs share one app process, while an
- * in-memory counter would forget both and the server would not.
+ *     if (now - lastRequest > window) count = 1; else count += 1;
+ *     if (count > max) reject;
+ *
+ * So the counter resets on a full IDLE GAP, never on elapsed time alone. A
+ * harness that merely spaces sign-ins out — five per rolling minute, say — keeps
+ * the server permanently inside one window and the count climbs until it trips.
+ * That is exactly what happened: parity spent seven (including a 44s pause,
+ * comfortably under the 60s the reset actually needs), sync asked for three
+ * more, and the tenth was refused. The failure surfaced in a sync spec as a bare
+ * `waitForURL` timeout, which reads as a product bug and was not one.
+ *
+ * This models the server's rule instead of approximating it: count spends, and
+ * when the next one would pass SAFE_MAX, sleep until a full window has elapsed
+ * since the LAST attempt, which is the only thing that makes the server forget.
+ *
+ * The state is kept ON DISK because Playwright starts a fresh worker after a
+ * failing test and consecutive runs share one app process, while an in-memory
+ * counter would forget both and the server would not.
  */
 
 const WINDOW_MS = 60_000;
 
 /**
- * Five, against the limiter's eight. The remaining three are headroom for a
- * retry and for anything signing in outside this helper.
+ * Six, against the server's eight. The headroom absorbs a retry and any sign-in
+ * that reaches the server without passing through here — of which there should
+ * be none, but the cost of being wrong is a confusing red suite.
  */
-const BUDGET = 5;
+const SAFE_MAX = 6;
 
-const LOG = path.join(tmpdir(), "hark-signins.json");
+const STATE = path.join(tmpdir(), "hark-signins.json");
 
-function read(): number[] {
+type Budget = { count: number; lastAt: number };
+
+function read(): Budget {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(LOG, "utf8"));
-    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "number") : [];
+    const parsed: unknown = JSON.parse(readFileSync(STATE, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      const { count, lastAt } = parsed as Partial<Budget>;
+      if (typeof count === "number" && typeof lastAt === "number") return { count, lastAt };
+    }
   } catch {
-    return [];
+    // No state yet, or an older shape: start clean.
+  }
+  return { count: 0, lastAt: 0 };
+}
+
+function write(budget: Budget): void {
+  try {
+    writeFileSync(STATE, JSON.stringify(budget), "utf8");
+  } catch {
+    // Losing the state only costs a throttled attempt, which callers surface.
   }
 }
 
-function write(times: number[]): void {
-  try {
-    writeFileSync(LOG, JSON.stringify(times), "utf8");
-  } catch {
-    // Losing the log only costs a throttled attempt, which the callers retry.
-  }
-}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Marks the window as spent, so the next attempt waits a full one out. */
 export function burnSignInWindow(): void {
-  const now = Date.now();
-  write(Array.from({ length: BUDGET }, () => now));
+  write({ count: SAFE_MAX, lastAt: Date.now() });
 }
 
 /**
- * Blocks until spending one sign-in stays inside the window, then records it.
- * `label` only names the waiting suite in the log line.
+ * Blocks until spending one sign-in is safe, then records it. `label` only
+ * names the waiting suite in the log line.
  */
 export async function awaitSignInBudget(label: string): Promise<void> {
-  for (;;) {
-    const now = Date.now();
-    const times = read().filter((at) => now - at <= WINDOW_MS);
-    if (times.length < BUDGET) {
-      write([...times, now]);
-      return;
-    }
-    const waitMs = WINDOW_MS - (now - times[0]!) + 750;
-    console.log(`[${label}] pausing ${Math.ceil(waitMs / 1000)}s to stay inside the sign-in limit`);
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  let budget = read();
+  const idleFor = Date.now() - budget.lastAt;
+
+  // The server has already forgotten: a full window passed with no attempt.
+  if (idleFor > WINDOW_MS) budget = { count: 0, lastAt: 0 };
+
+  if (budget.count >= SAFE_MAX) {
+    // Only an idle gap clears the server's counter, so wait out the remainder
+    // of one measured from the LAST attempt — not from when this window began.
+    const waitMs = WINDOW_MS - (Date.now() - budget.lastAt) + 1_500;
+    console.log(
+      `[${label}] pausing ${Math.ceil(waitMs / 1000)}s for an idle window; the sign-in limiter ` +
+        `only resets after ${WINDOW_MS / 1000}s with no attempt`,
+    );
+    await sleep(waitMs);
+    budget = { count: 0, lastAt: 0 };
   }
+
+  const next = { count: budget.count + 1, lastAt: Date.now() };
+  write(next);
+  console.log(`[${label}] sign-in ${next.count}/${SAFE_MAX} in this window`);
 }

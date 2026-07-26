@@ -17,6 +17,7 @@ import postgres from "postgres";
 
 import { assertLocalDatabase } from "../../scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "../../scripts/lib/env-file.mjs";
+import { awaitSignInBudget } from "../shared/sign-in-budget";
 
 import {
   PROBE_PATH,
@@ -872,6 +873,8 @@ test("library paints real content in under 500ms on every network profile", asyn
 
     proxy.setDelay(0);
     const setup: Page = await context.newPage();
+    // Shares the sign-in window with every other suite driving this server.
+    await awaitSignInBudget("launch-benchmark");
     await setup.goto(`${proxy.origin}/login`, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await setup.getByLabel("Email").fill(account.email);
     await setup.getByLabel("Password").fill(account.password);
