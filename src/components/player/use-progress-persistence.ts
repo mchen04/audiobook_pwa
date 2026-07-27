@@ -159,6 +159,24 @@ export function useProgressPersistence(
         playbackRate: audio?.playbackRate || 1,
         completed: completed ?? completionRef.current.get(activeBook.id) ?? activeBook.completed,
         source,
+        /**
+         * WAS THERE STILL A SESSION RUNNING? Read off the element at the moment
+         * of the write, from every path, for the same reason `source` is: the
+         * record has to be able to describe itself.
+         *
+         * It matters most on the hide edge. `visibility-flush` and
+         * `pagehide-flush` fire whether the user backgrounded a playing book or
+         * a paused one, and only the first can be followed by listening the
+         * device is unable to record. `detectSuspendedSession` reads this to
+         * tell them apart; without it, closing a paused book would look exactly
+         * like a suspended session and the user would be offered a jump forward
+         * over content that never played.
+         *
+         * No new write occasion and no new read: `audio` is already in hand,
+         * `paused` is a property access, and the field only appears on the
+         * record when it is true.
+         */
+        playing: !!audio && !audio.paused,
       });
     },
     [activeBookRef, audioRef, userId],

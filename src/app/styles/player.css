@@ -1005,6 +1005,86 @@
   text-align: center;
 }
 
+/* ---- Recovering a listen the device could not record ----
+ *
+ * Built entirely from the player's existing vocabulary: the panel radius and
+ * bordered surface of the sheets, the pill control of `.download-button` and
+ * `.player-options > label`, and `.up-next`'s muted extra-small type for the
+ * caveat. It is deliberately NOT an alert colour — this is an offer about
+ * something that may not have happened, not a warning, and it must sit quietly
+ * above the scrubber rather than compete with the transport. */
+.resume-recovery {
+  display: grid;
+  gap: 0.5rem;
+  justify-items: center;
+  width: 100%;
+  max-width: 26rem;
+  margin: 0.75rem auto 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface-muted);
+  padding: 0.7rem 0.85rem;
+  text-align: center;
+}
+
+.resume-recovery p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.resume-recovery small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.resume-recovery-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.resume-recovery-jump {
+  display: inline-flex;
+  min-height: var(--control);
+  align-items: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  padding: 0.4rem 0.9rem;
+  font-size: var(--text-sm);
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+}
+
+.resume-recovery-jump:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+/* A peer of the jump, at the same tap size: saying no must be exactly as easy
+ * as saying yes. */
+.resume-recovery-dismiss {
+  display: inline-flex;
+  min-width: var(--control);
+  min-height: var(--control);
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.resume-recovery-dismiss:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .up-next a {
   color: var(--accent);
   font-weight: 650;

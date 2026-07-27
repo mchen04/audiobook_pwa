@@ -99,7 +99,8 @@ redo the check if in doubt.
   survives backgrounding. Nothing to do; the residual is closed.
 - Resumes near the **30-second** mark — i.e. roughly where the screen locked, having lost
   the whole 5 minutes → both writers are suspended. Report that; it is a real defect and the
-  fix would be to record the position from a source that survives suspension.
+  fix would be to record the position from a source that survives suspension. **The app will
+  have told you so itself** — see the next section.
 - Resumes **ahead** of where the audio was → report immediately, whatever the readout says.
   Skipping content the user never heard is treated as a blocker in this codebase regardless
   of size.
@@ -117,3 +118,46 @@ parse; they simply cannot answer this question.
 Run it once on wifi and once in airplane mode. Airplane mode matters because the server
 write is unavailable there, so the local write is the only thing standing between you and a
 lost position.
+
+## If the player offers to "jump to about …", the answer is FAIL
+
+The check above needs you to open Settings and read a diagnostic. There is also a reading you
+cannot miss, because it appears on the player itself:
+
+> **This was playing when the app closed, and about 5 min went unrecorded.**
+> `Jump to about 32:07` ✕
+> _An estimate from the time away and 1× speed. Your saved place is 27:07._
+
+**Seeing this IS the failing answer to the open question above.** It appears only when the
+last durable write was a hide-edge flush (`visibility-flush`/`pagehide-flush`) that caught
+audio still playing, with nothing written after it and a projected advance over a minute. On
+this device there is exactly one durable record per book and every write overwrites it, so
+"the record still names the hide edge" is the same statement as "**neither cadence writer ran
+once between the screen locking and the app dying**". That is precisely the both-suspended
+case, observed rather than inferred, on the hardware the automated suite cannot reach.
+
+So the check has two readings that must agree, and the affordance is the louder one:
+
+| what you see                                | what it means                                                                     |
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
+| no offer, `media-tick`/`cadence-timer`      | a writer survived the backgrounding — **pass**, residual closed                   |
+| the offer, `visibility-flush`               | both writers were frozen for the whole listen — **fail**, and this is the finding |
+| the offer, but a cadence writer in Settings | the two witnesses disagree; report that, it is a defect in its own right          |
+
+**What the offer does and does not do.** The app has already resumed at the position it
+actually saved, and it will never move past that on its own — projecting a position forward
+without the user asking would skip content they never heard, which is a blocker in this
+codebase at any magnitude, and it would simply be wrong if iOS had stopped the audio early
+rather than merely stopped recording it. The jump is a one-tap offer, labelled an estimate,
+computed as `saved position + time away × playback rate`, clamped to the book. Dismissing it
+is remembered for that specific gap (keyed by the write's own `writtenAt`), so it will not ask
+again about the same lost stretch — a later suspension is a different loss and is offered
+afresh.
+
+For the measurement run, prefer the Settings readout: it names the mechanism. The offer is
+what a real user gets, and what makes the failure survivable for them rather than silent.
+
+The behavioural rows for all of this are `tests/resume/suspension-recovery.spec.ts` (R1 the
+seeded signature, R2 that an ordinary background offers nothing, R3 that a dismissal sticks);
+the detection rule and the projection arithmetic are `detectSuspendedSession` in
+`src/lib/playback-core.ts`.

@@ -43,11 +43,11 @@ const book: PlayerBook = {
   completed: false,
 };
 
-function mountHook() {
+function mountHook({ paused = true }: { paused?: boolean } = {}) {
   const audio = {
     currentTime: 12,
     playbackRate: 1,
-    paused: true,
+    paused,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   } as unknown as HTMLAudioElement;
@@ -545,5 +545,43 @@ describe("the provenance of a lifecycle write", () => {
       await result.current.persistProgress(source, 12_000);
       expect(storedSource()).toBe(source);
     }
+  });
+
+  const storedLiveness = () =>
+    (JSON.parse(localStorage.getItem(KEY)!) as { playingAtWrite?: boolean }).playingAtWrite;
+
+  /**
+   * THE OTHER HALF OF THE SIGNATURE. `visibility-flush` with a stale
+   * `writtenAt` says nothing wrote after the page was hidden — but a hide edge
+   * is taken on EVERY backgrounding, and only one taken while audio was live
+   * can have unrecorded listening behind it. `detectSuspendedSession` reads
+   * this to tell a suspended listening session from a user who paused and put
+   * the phone in their pocket, and the whole recovery offer hangs off it.
+   */
+  it("records that the hidden edge caught a live listening session", () => {
+    mountHook({ paused: false });
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden" as DocumentVisibilityState);
+    document.dispatchEvent(new Event("visibilitychange"));
+    visibility.mockRestore();
+    expect(storedSource()).toBe("visibility-flush");
+    expect(
+      storedLiveness(),
+      "the hide-edge write does not record that audio was playing, so a suspended listening " +
+        "session is indistinguishable from a book backgrounded while paused and no lost " +
+        "stretch can ever be detected",
+    ).toBe(true);
+  });
+
+  it("records nothing of the sort for a hide edge taken while paused", () => {
+    mountHook({ paused: true });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(storedSource()).toBe("pagehide-flush");
+    expect(
+      storedLiveness(),
+      "a hide edge taken while the book was PAUSED claims audio was live, which would offer to " +
+        "move the user forward over content that never played",
+    ).toBeUndefined();
   });
 });

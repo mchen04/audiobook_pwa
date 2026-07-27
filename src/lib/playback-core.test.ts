@@ -3,17 +3,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlayerChapter } from "@/domain/player";
 
 import {
+  clearLocalPlaybackState,
+  detectSuspendedSession,
+  dismissSuspensionGap,
   freshestPosition,
   isChapterEnding,
   localWinsOver,
+  markPausedNow,
+  readDismissedSuspensionGap,
   readLatestLocalPlayback,
   readLocalPosition,
   readLocalProgress,
+  readMsSinceLastPause,
   resolveStartPosition,
   rewindForAbsence,
   saveLocalPlaybackState,
   saveLocalPosition,
   selectCurrentChapter,
+  SUSPENSION_GAP_FLOOR_MS,
+  type LocalPosition,
 } from "./playback-core";
 
 const chapters: PlayerChapter[] = [
@@ -368,5 +376,264 @@ describe("durable write provenance", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * The recovery path for a listen this device could not record.
+ *
+ * `docs/resume-durability-device-check.md` states the one question no
+ * instrument here can answer: does iOS suspend BOTH the 200 ms cadence timer
+ * and the media element's `timeupdate` while a PWA is backgrounded with audio
+ * playing? The cost if it does is measured — the both-writers-dead row in
+ * `tests/resume` loses 9644 ms of a 9500 ms session, all of it, scaling with
+ * the length of the listen.
+ *
+ * These cover the predicate and the projection maths. The three behavioural
+ * assertions — resumes at the recorded position and never forward, the offer
+ * appears for the real signature, the offer does NOT appear after an ordinary
+ * background — are `tests/resume/suspension-recovery.spec.ts`, in WebKit.
+ */
+describe("detectSuspendedSession", () => {
+  const DURATION_MS = 3_600_000;
+  const WRITTEN_AT = 1_000_000;
+  const RECORDED_MS = 1_800_000;
+
+  /** The exact signature: hidden with audio live, and nothing wrote after. */
+  function suspended(overrides: Partial<LocalPosition> = {}): LocalPosition {
+    return {
+      positionMs: RECORDED_MS,
+      occurredAt: WRITTEN_AT,
+      writtenAt: WRITTEN_AT,
+      source: "visibility-flush",
+      playingAtWrite: true,
+      playbackRate: 1,
+      ...overrides,
+    };
+  }
+
+  const detect = (record: LocalPosition | null, elapsedMs: number, durationMs = DURATION_MS) =>
+    detectSuspendedSession({ record, durationMs, now: WRITTEN_AT + elapsedMs });
+
+  it("reports the gap and where playback would have reached", () => {
+    const gap = detect(suspended(), 300_000);
+    expect(gap).toStrictEqual({
+      recordedPositionMs: RECORDED_MS,
+      writtenAt: WRITTEN_AT,
+      elapsedMs: 300_000,
+      playbackRate: 1,
+      // Five minutes at 1x. The RECORDED position is untouched and stays the
+      // source of truth; this is only what is offered.
+      projectedPositionMs: RECORDED_MS + 300_000,
+    });
+  });
+
+  it("fires for the pagehide edge as well as the visibility edge", () => {
+    expect(detect(suspended({ source: "pagehide-flush" }), 300_000)).not.toBeNull();
+  });
+
+  /**
+   * The rate is part of how far the audio got. Ignoring it would under-report a
+   * fast listener's loss by the same factor they chose to speed the book up by.
+   */
+  it("scales the projection by the rate the book was playing at", () => {
+    expect(detect(suspended({ playbackRate: 1.5 }), 300_000)?.projectedPositionMs).toBe(
+      RECORDED_MS + 450_000,
+    );
+    expect(detect(suspended({ playbackRate: 0.5 }), 300_000)?.projectedPositionMs).toBe(
+      RECORDED_MS + 150_000,
+    );
+  });
+
+  /**
+   * A record written before rates were durable, or one holding a value no
+   * player could have been at, falls back to 1x. The alternative is scaling a
+   * number shown to the user by a number nobody wrote.
+   */
+  it("falls back to 1x rather than trusting a rate that is not one", () => {
+    for (const playbackRate of [undefined, 0, -2, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const gap = detect(suspended({ playbackRate }), 300_000);
+      expect(gap?.playbackRate, `rate ${String(playbackRate)}`).toBe(1);
+      expect(gap?.projectedPositionMs).toBe(RECORDED_MS + 300_000);
+    }
+  });
+
+  it("never projects past the end of the book", () => {
+    // Four hours away, at 2x, from halfway through a one-hour book.
+    const gap = detect(suspended({ playbackRate: 2 }), 4 * 3_600_000);
+    expect(gap?.projectedPositionMs).toBe(DURATION_MS);
+  });
+
+  /**
+   * THE HEART OF THE PREDICATE. There is one durable record per (user, book)
+   * and every write overwrites it, so a record naming any writer other than the
+   * hide edge is proof that something DID write after the app went away — and
+   * then there is no unrecorded stretch to recover.
+   */
+  it("refuses every source that means something wrote after the hide edge", () => {
+    for (const source of [
+      "cadence-timer",
+      "media-tick",
+      "pause",
+      "seek",
+      "ended",
+      "rate-change",
+      "book-switch",
+      "book-unload",
+    ] as const) {
+      expect(detect(suspended({ source }), 300_000), source).toBeNull();
+    }
+    expect(detect(suspended({ source: undefined }), 300_000)).toBeNull();
+  });
+
+  /**
+   * A hide edge is taken on EVERY backgrounding. Only one taken while audio was
+   * live can have listening behind it; closing a paused book must never offer
+   * to move the user forward over content that never played.
+   */
+  it("refuses a hide edge taken while the book was paused", () => {
+    expect(detect(suspended({ playingAtWrite: undefined }), 300_000)).toBeNull();
+    expect(detect(suspended({ playingAtWrite: false }), 300_000)).toBeNull();
+  });
+
+  /** No write timestamp is no gap: there is nothing to measure the loss from. */
+  it("refuses a record with no usable write timestamp", () => {
+    for (const writtenAt of [undefined, 0, -1, Number.NaN]) {
+      expect(detect(suspended({ writtenAt }), 300_000), String(writtenAt)).toBeNull();
+    }
+  });
+
+  /**
+   * The floor is what keeps this from being an interruption the user meets
+   * several times a day. A gap the ordinary writers plainly covered gets
+   * nothing, and the boundary is asserted on both sides.
+   */
+  it("says nothing about a gap too small to be worth an interruption", () => {
+    expect(detect(suspended(), SUSPENSION_GAP_FLOOR_MS - 1)).toBeNull();
+    expect(detect(suspended(), SUSPENSION_GAP_FLOOR_MS)).not.toBeNull();
+    expect(detect(suspended(), 1_000)).toBeNull();
+  });
+
+  /**
+   * The floor is stated on the PROJECTED ADVANCE, not on the wall clock, so a
+   * slow listener needs proportionally longer away before the offer is worth
+   * making — the same number means the same amount of content at every rate.
+   */
+  it("holds the floor against the content lost, not the time away", () => {
+    expect(detect(suspended({ playbackRate: 0.5 }), SUSPENSION_GAP_FLOOR_MS)).toBeNull();
+    expect(detect(suspended({ playbackRate: 0.5 }), SUSPENSION_GAP_FLOOR_MS * 2)).not.toBeNull();
+  });
+
+  /**
+   * A book parked at its end restarts from zero (`resolveStartPosition`), so a
+   * projection from its stored position describes a place the player is not
+   * going to be. There is no explicit branch for it: the clamp plus the floor
+   * refuse it by arithmetic, which is why the assertions below are stated as
+   * behaviour rather than pointed at a line. `SUSPENSION_GAP_FLOOR_MS`'s
+   * comment records that an explicit check was written and then removed for
+   * being unkillable by any test.
+   */
+  it("refuses when there is no room left in the book to project into", () => {
+    expect(detect(suspended({ positionMs: DURATION_MS }), 300_000)).toBeNull();
+    expect(detect(suspended({ positionMs: DURATION_MS - 500 }), 300_000)).toBeNull();
+    // Ten seconds of headroom against a five-minute gap: the clamp leaves ten
+    // seconds on offer, which is under the floor.
+    expect(detect(suspended({ positionMs: DURATION_MS - 10_000 }), 300_000)).toBeNull();
+  });
+
+  it("refuses a finished book, which has no unheard stretch behind it", () => {
+    expect(detect(suspended({ completed: true }), 300_000)).toBeNull();
+    expect(detect(suspended({ completed: false }), 300_000)).not.toBeNull();
+  });
+
+  it("refuses junk inputs rather than projecting from them", () => {
+    expect(detect(null, 300_000)).toBeNull();
+    expect(detect(suspended(), 300_000, 0)).toBeNull();
+    expect(detect(suspended(), 300_000, Number.NaN)).toBeNull();
+    // The device clock moved backwards between the write and the launch.
+    expect(detect(suspended(), -300_000)).toBeNull();
+  });
+});
+
+describe("the suspension record and the answer to it", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      get length() {
+        return store.size;
+      },
+      key: (index: number) => [...store.keys()][index] ?? null,
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as Storage);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("round-trips liveness, and writes nothing for a write made while paused", () => {
+    saveLocalPlaybackState("user-a", "book-1", {
+      positionMs: 1_000,
+      source: "visibility-flush",
+      playing: true,
+    });
+    expect(readLocalProgress("user-a", "book-1")?.playingAtWrite).toBe(true);
+
+    saveLocalPlaybackState("user-a", "book-2", {
+      positionMs: 1_000,
+      source: "visibility-flush",
+      playing: false,
+    });
+    expect(readLocalProgress("user-a", "book-2")?.playingAtWrite).toBeUndefined();
+  });
+
+  /**
+   * The one field that can authorise moving a user's position forward, so only
+   * a literal `true` counts. A coerced value would let a future field name
+   * collision, or a hand-edited record, produce an offer out of nothing.
+   */
+  it("refuses to coerce anything but a literal true into liveness", () => {
+    for (const playingAtWrite of ["true", 1, {}, [], "yes"]) {
+      localStorage.setItem(
+        "chapterline:position:user-a:book-1",
+        JSON.stringify({ positionMs: 1_000, occurredAt: 5_000, playingAtWrite }),
+      );
+      expect(
+        readLocalProgress("user-a", "book-1")?.playingAtWrite,
+        JSON.stringify(playingAtWrite),
+      ).toBeUndefined();
+    }
+  });
+
+  /**
+   * A dismissal answers ONE unrecorded stretch, identified by the hide-edge
+   * write's own timestamp. A later suspension is a different loss and the
+   * user's last answer said nothing about it.
+   */
+  it("remembers the answer per gap, not per book", () => {
+    expect(readDismissedSuspensionGap("user-a", "book-1")).toBeNull();
+    dismissSuspensionGap("user-a", "book-1", 1_000_000);
+    expect(readDismissedSuspensionGap("user-a", "book-1")).toBe(1_000_000);
+    expect(readDismissedSuspensionGap("user-a", "book-2")).toBeNull();
+    expect(readDismissedSuspensionGap("user-b", "book-1")).toBeNull();
+    dismissSuspensionGap("user-a", "book-1", 2_000_000);
+    expect(readDismissedSuspensionGap("user-a", "book-1")).toBe(2_000_000);
+  });
+
+  /**
+   * Deleting a book takes it with the position and the pause marker. A
+   * re-import of the same file is matched to the same book id by fingerprint,
+   * so a surviving answer would silence an offer about a book the user deleted.
+   */
+  it("goes with the book when the book is deleted", () => {
+    saveLocalPlaybackState("user-a", "book-1", { positionMs: 1_000, source: "pause" });
+    markPausedNow("user-a", "book-1");
+    dismissSuspensionGap("user-a", "book-1", 1_000_000);
+    clearLocalPlaybackState("user-a", "book-1");
+    expect(readLocalProgress("user-a", "book-1")).toBeNull();
+    expect(readMsSinceLastPause("user-a", "book-1")).toBeNull();
+    expect(readDismissedSuspensionGap("user-a", "book-1")).toBeNull();
   });
 });

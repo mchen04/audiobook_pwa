@@ -673,6 +673,130 @@ function poisonScript(): string | null {
       })();
     `;
   }
+  /**
+   * The fail-demo for R2 — "the recovery offer must NOT appear after an
+   * ordinary background".
+   *
+   * Running R2 against the pre-change source proves nothing: a build with no
+   * affordance at all passes it vacuously. What has to be shown is that the row
+   * goes RED when the detector over-fires, which is the regression that would
+   * actually reach a user — a prompt every time they glance at another app.
+   *
+   * So this makes every durable record READ BACK look like the suspension
+   * signature: written at a hide edge, with audio live, five minutes ago. It
+   * rewrites only the three fields the detector reads and leaves `positionMs`
+   * and `occurredAt` exactly as the app wrote them, so the player still resumes
+   * in the same place and the only thing that changes is what the detector is
+   * handed. A build whose R2 row stays green under this is a build whose R2 row
+   * is not looking at anything.
+   */
+  if (poison === "recovery-always-offers") {
+    return `
+      (() => {
+        const getItem = Storage.prototype.getItem;
+        Storage.prototype.getItem = function (key) {
+          const value = getItem.call(this, key);
+          if (typeof key !== "string" || !key.startsWith("chapterline:position:")) return value;
+          if (typeof value !== "string") return value;
+          try {
+            const parsed = JSON.parse(value);
+            if (!parsed || typeof parsed.positionMs !== "number") return value;
+            return JSON.stringify({
+              ...parsed,
+              source: "visibility-flush",
+              playingAtWrite: true,
+              writtenAt: Date.now() - 300000,
+            });
+          } catch {
+            return value;
+          }
+        };
+      })();
+    `;
+  }
+  /**
+   * The fail-demo for the BLOCKER rule — "never resume or seek forward
+   * automatically".
+   *
+   * The rule is about the app moving a user without them acting, so the seeded
+   * fault is exactly that: as soon as the recovery offer exists, its jump is
+   * pressed by something that is not a person. From outside the page that is
+   * indistinguishable from a build that applied its own projection on launch,
+   * which is the regression the rule forbids — and R1's never-forward assertion
+   * has to go red for it.
+   *
+   * A `MutationObserver` rather than a poll so the press lands in the same frame
+   * the control appears in, which is the worst case and the one worth grading.
+   *
+   * IT OBSERVES `document`, NOT `document.documentElement`, and that is not a
+   * style choice. An init script runs at document_start, where
+   * `documentElement` is still null — `observe(null, ...)` throws, and MEASURED
+   * in this harness a throw from a CONTEXT-level init script takes the
+   * PAGE-level ones down with it: `killCadenceWriters` silently stopped biting
+   * and the row died with `writersBlocked: []`, looking like a product finding.
+   * A `Document` node is a valid observation target and always exists.
+   */
+  if (poison === "recovery-seeks-forward") {
+    return `
+      (() => {
+        const press = () => {
+          const jump = document.querySelector("button.resume-recovery-jump");
+          if (jump) jump.click();
+        };
+        new MutationObserver(press).observe(document, { childList: true, subtree: true });
+        addEventListener("DOMContentLoaded", press);
+      })();
+    `;
+  }
+  /**
+   * The fail-demo for R1's and R3's "the offer appears" assertions.
+   *
+   * The pre-change source demonstrates the same thing more broadly — it has no
+   * affordance at all — but it fails those rows at the SIGNATURE assertion
+   * first, because it does not write `playingAtWrite` either, so the offer
+   * checks downstream are never reached. This removes only the affordance, on a
+   * build that still leaves a perfect signature, so the "shown" assertion is
+   * the one that has to catch it.
+   *
+   * Removed on insertion rather than hidden with CSS: `readRecoveryOffer` asks
+   * whether the control is VISIBLE and then reads its node, so a display:none
+   * would also do, and taking the node out is the stronger fault of the two.
+   */
+  if (poison === "recovery-never-offers") {
+    return `
+      (() => {
+        const strip = () => {
+          document.querySelectorAll("[data-resume-recovery]").forEach((node) => node.remove());
+        };
+        // \`document\`, never \`document.documentElement\` — see the note on
+        // \`recovery-seeks-forward\`.
+        new MutationObserver(strip).observe(document, { childList: true, subtree: true });
+        addEventListener("DOMContentLoaded", strip);
+      })();
+    `;
+  }
+  /**
+   * The fail-demo for R3 — "a dismissed estimate stays dismissed".
+   *
+   * The dismissal is a promise about the NEXT launch, so the regression that
+   * breaks it is a dismissal that never becomes durable: the offer disappears
+   * when pressed and is back the next time the book is opened. This drops the
+   * write and leaves everything else alone, which is what a dismissal kept only
+   * in component state looks like from outside.
+   */
+  if (poison === "recovery-forgets-dismissal") {
+    return `
+      (() => {
+        const setItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key, value) {
+          if (typeof key === "string" && key.startsWith("chapterline:suspension-dismissed:")) {
+            return undefined;
+          }
+          return setItem.call(this, key, value);
+        };
+      })();
+    `;
+  }
   throw new Error(`unknown HARK_RESUME_POISON value: ${process.env.HARK_RESUME_POISON}`);
 }
 
@@ -2049,6 +2173,15 @@ export type LocalRecord = {
   occurredAt: number | null;
   completed: boolean | null;
   playbackRate: number | null;
+  /**
+   * The three fields the suspension signature is made of. `source` names the
+   * mechanism that wrote last — so a record still naming a hide edge is proof
+   * nothing wrote after it — `writtenAt` is the real moment of that write, and
+   * `playingAtWrite` says whether it caught a live listening session.
+   */
+  source: string | null;
+  writtenAt: number | null;
+  playingAtWrite: boolean | null;
 };
 
 async function readLocalRecord(page: Page, userId: string, bookId: string): Promise<LocalRecord> {
@@ -2059,6 +2192,9 @@ async function readLocalRecord(page: Page, userId: string, bookId: string): Prom
         occurredAt: null,
         completed: null,
         playbackRate: null,
+        source: null,
+        writtenAt: null,
+        playingAtWrite: null,
       };
       try {
         const raw = localStorage.getItem(`chapterline:position:${user}:${book}`);
@@ -2069,6 +2205,9 @@ async function readLocalRecord(page: Page, userId: string, bookId: string): Prom
           occurredAt: typeof parsed.occurredAt === "number" ? parsed.occurredAt : null,
           completed: typeof parsed.completed === "boolean" ? parsed.completed : null,
           playbackRate: typeof parsed.playbackRate === "number" ? parsed.playbackRate : null,
+          source: typeof parsed.source === "string" ? parsed.source : null,
+          writtenAt: typeof parsed.writtenAt === "number" ? parsed.writtenAt : null,
+          playingAtWrite: typeof parsed.playingAtWrite === "boolean" ? parsed.playingAtWrite : null,
         };
       } catch {
         return empty;
@@ -2129,6 +2268,10 @@ async function resetBookEverywhere(page: Page, userId: string, bookId: string): 
           try {
             localStorage.removeItem(`chapterline:position:${user}:${book}`);
             localStorage.removeItem(`chapterline:last-paused-at:${user}:${book}`);
+            // The user's answer to a recovery offer is this book's state too, and
+            // a row that inherited one from an earlier row would measure a
+            // silenced offer as an absent one.
+            localStorage.removeItem(`chapterline:suspension-dismissed:${user}:${book}`);
           } catch {
             /* storage blocked; the stores below are still worth clearing */
           }
@@ -2344,7 +2487,8 @@ export function recordRow(
     | StaleAheadRow
     | CompletionRow
     | TwoDeviceRow
-    | WriteRateRow,
+    | WriteRateRow
+    | RecoveryRow,
 ): void {
   mkdirSync(path.dirname(LEDGER), { recursive: true });
   appendFileSync(LEDGER, `${JSON.stringify(row)}\n`, "utf8");
@@ -4384,5 +4528,423 @@ export async function measureTwoDeviceResume(spec: {
     // B's renderer belongs to this run, so a later scenario's SIGKILL would
     // find it. It does not outlive this row.
     await contextB?.close().catch(() => undefined);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R1 / R2 / R3 — recovering a listen the device could not record
+// ---------------------------------------------------------------------------
+
+/** What the player's recovery affordance says, or its absence. */
+export type RecoveryOffer = {
+  shown: boolean;
+  /** The unrounded numbers the affordance is built from, off its own node. */
+  recordedMs: number | null;
+  projectedMs: number | null;
+  elapsedMs: number | null;
+  playbackRate: number | null;
+  /** The jump control's own text — what the user is actually asked to press. */
+  jumpLabel: string | null;
+  dismissLabel: string | null;
+  /** `role`, and whether anything about it blocks the transport underneath. */
+  role: string | null;
+  modal: boolean;
+  /** Is the transport still usable with the offer on screen? */
+  transportUsable: boolean;
+};
+
+export type RecoveryRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  bookTitle: string;
+  durationMs: number;
+  ticks: number;
+  playedMs: number;
+  /** Which of the app's two cadence writers this row deleted, if any. */
+  writersBlocked: string[];
+  lifecycle: string[];
+  hiddenTransition: HiddenTransition;
+  visibilityAtCallback: string | null;
+  /**
+   * The durable record that survived the kill, read on the restore stub before
+   * any app code has run. This is the signature itself.
+   */
+  recordAfterKill: LocalRecord;
+  /** How far the hide-edge write's clock was moved back. Null when untouched. */
+  agedGapMs: number | null;
+  /** What `writtenAt` became — the identity of the gap the app is offered. */
+  agedWrittenAt: number | null;
+  /** Wall clock at the moment of the ageing, and at the moment the offer was read. */
+  agedAtMs: number | null;
+  offerReadAtMs: number;
+  /** Where the player came back, and where it came back RELATIVE TO THE RECORD. */
+  resumedPositionMs: number;
+  resumedAheadOfRecordMs: number | null;
+  expectedRewindMs: number;
+  offer: RecoveryOffer;
+  /** The projection recomputed from the offer's own inputs. */
+  recomputedProjectionMs: number | null;
+  projectionErrorMs: number | null;
+  /** Set only when the row dismissed the offer and opened the book again. */
+  offerAfterDismissal: RecoveryOffer | null;
+  positionAfterDismissal: number | null;
+  /**
+   * The durable record as it stands on the SECOND open, after the dismissal.
+   *
+   * Without this the dismissal row can pass for the wrong reason: if anything
+   * overwrote the hide-edge record between the two opens, the signature is gone
+   * and the offer would be absent whether or not the dismissal was remembered.
+   * The row carries the record so the spec can refuse that green.
+   */
+  recordAtReopen: LocalRecord | null;
+  shelf: ShelfReading;
+  notes: string[];
+};
+
+/**
+ * How long to wait for the offer before concluding there is not one.
+ *
+ * It is rendered from an effect, so "not there yet" and "not there" are the
+ * same DOM read. The negative row's whole value is the difference between them,
+ * so it waits this long before it is allowed to say no — generously, because a
+ * false NEGATIVE here would let a build that shows the prompt after every
+ * ordinary backgrounding pass as green.
+ */
+const RECOVERY_OFFER_TIMEOUT_MS = 15_000;
+
+async function readRecoveryOffer(page: Page): Promise<RecoveryOffer> {
+  const shown = await page
+    .locator("[data-resume-recovery]")
+    .first()
+    .waitFor({ state: "visible", timeout: RECOVERY_OFFER_TIMEOUT_MS })
+    .then(() => true)
+    .catch(() => false);
+  const read = await page.evaluate(() => {
+    const node = document.querySelector("[data-resume-recovery]");
+    const play = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Play"], button[aria-label="Pause"]',
+    );
+    const number = (name: string) => {
+      const raw = node?.getAttribute(name);
+      const value = raw === null || raw === undefined ? Number.NaN : Number(raw);
+      return Number.isFinite(value) ? value : null;
+    };
+    return {
+      present: !!node,
+      recordedMs: number("data-recorded-ms"),
+      projectedMs: number("data-projected-ms"),
+      elapsedMs: number("data-elapsed-ms"),
+      playbackRate: number("data-playback-rate"),
+      jumpLabel: (node?.querySelector("button.resume-recovery-jump")?.textContent ?? "").trim(),
+      dismissLabel:
+        node?.querySelector("button.resume-recovery-dismiss")?.getAttribute("aria-label") ?? null,
+      role: node?.getAttribute("role") ?? null,
+      // A modal would block the transport, which the offer is forbidden to do.
+      // Both spellings, because either one alone is enough to trap the user.
+      modal: !!node && (!!node.closest("dialog") || node.getAttribute("aria-modal") === "true"),
+      // The transport must still be reachable with the offer on screen: not
+      // disabled, not behind an `inert` subtree, not hidden.
+      transportUsable:
+        !!play && !play.disabled && !play.closest("[inert]") && play.offsetParent !== null,
+    };
+  });
+  return {
+    shown: shown && read.present,
+    recordedMs: read.recordedMs,
+    projectedMs: read.projectedMs,
+    elapsedMs: read.elapsedMs,
+    playbackRate: read.playbackRate,
+    jumpLabel: read.jumpLabel || null,
+    dismissLabel: read.dismissLabel,
+    role: read.role,
+    modal: read.modal,
+    transportUsable: read.transportUsable,
+  };
+}
+
+/**
+ * Move the hide-edge write's own clock `gapMs` into the past.
+ *
+ * THE SAME INSTRUMENT AS `ageAbsenceMarker`, AND UNDER THE SAME RULE: it
+ * REFUSES TO CREATE. It touches only a record the APP wrote, that already names
+ * a hide edge and already says audio was live — the whole signature — and it
+ * returns null otherwise, so the caller fails instead of grading a suspension
+ * the harness invented. `writtenAt` is the one field it moves. `occurredAt`,
+ * which is what `localWinsOver` compares and what the X3 regression is about,
+ * is left exactly as the app wrote it.
+ *
+ * WHY A CLOCK ADVANCE IS NEEDED AT ALL. Everything else in this row is real:
+ * both cadence writers are deleted before the app can install them, the app
+ * takes its own hide edge with the audio genuinely playing, and the renderer is
+ * then SIGKILLed with the book still running. What cannot be real is the SIZE
+ * of the gap — the case this exists for is a screen-off listen of minutes to
+ * hours, and the harness relaunches in seconds. The alternative is lowering the
+ * app's floor to whatever a relaunch happens to cost, which would make the
+ * offer fire after an ordinary backgrounding: the exact bug R2 exists to catch.
+ * So the app writes the signature and the harness moves only the clock.
+ */
+async function ageSuspensionWrite(
+  page: Page,
+  userId: string,
+  bookId: string,
+  gapMs: number,
+): Promise<{ before: number; after: number } | null> {
+  return page.evaluate(
+    ({ id, book, gap }) => {
+      const key = `chapterline:position:${id}:${book}`;
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        // Refuses to CREATE the signature. Only a record the app already wrote
+        // at a hide edge, with audio live and a real write timestamp, is aged.
+        const hideEdge = parsed.source === "visibility-flush" || parsed.source === "pagehide-flush";
+        if (!hideEdge || parsed.playingAtWrite !== true) return null;
+        if (typeof parsed.writtenAt !== "number" || !(parsed.writtenAt > 0)) return null;
+        const after = Date.now() - gap;
+        localStorage.setItem(key, JSON.stringify({ ...parsed, writtenAt: after }));
+        return { before: parsed.writtenAt, after };
+      } catch {
+        return null;
+      }
+    },
+    { id: userId, book: bookId, gap: gapMs },
+  );
+}
+
+/**
+ * One recovery row, end to end, in the engine of record.
+ *
+ * THE SHAPE OF THE POSITIVE ROW. Delete both of the app's cadence writers
+ * before it can install them — the same `killDurableTimer` + media-tick poisons
+ * that together produce the measured 9644 ms both-writers-dead loss — then play
+ * for real, let the app take its own hide edge with the audio still running,
+ * and SIGKILL the renderer. What survives is exactly the signature a suspended
+ * iOS PWA leaves: one durable record, written at the hide edge, saying audio
+ * was live, with nothing after it. The clock on that write is then aged (see
+ * `ageSuspensionWrite`) so the gap is the size of a real screen-off listen
+ * rather than the size of a relaunch.
+ *
+ * THE LIFECYCLE FLUSH IS DELIBERATELY LEFT ALIVE, which is the difference
+ * between this and B3/B4. Those rows delete it to measure what a single cadence
+ * writer preserves; this one needs the hide-edge write, because the hide-edge
+ * write IS the record under test. A row that killed it too would have no
+ * signature to detect — which is, correctly, the app-switcher case where
+ * nothing can be recovered because nothing was ever recorded.
+ *
+ * WHAT THE ROW REFUSES TO DECIDE. It measures and returns; every bar is the
+ * spec's. It does assert the things that would make its own numbers meaningless
+ * — that something really played, that the audio was still running at the hide
+ * edge, that the ageing found a record the app wrote rather than inventing one.
+ */
+export async function measureSuspensionRecovery(spec: {
+  scenario: string;
+  bookIndex: number;
+  /** Milliseconds of real playback before the hide edge. */
+  playMs?: number;
+  /** Delete both cadence writers, leaving the hide-edge flush as the last write. */
+  killCadenceWriters?: boolean;
+  /** Age the hide-edge write this far into the past. Omit to leave it alone. */
+  gapMs?: number;
+  /** Dismiss the offer, leave the player, open the book again, and look. */
+  dismissAndReopen?: boolean;
+}): Promise<RecoveryRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books } = active!;
+  const bookTitle = bookTitleFor(spec.bookIndex);
+  const book = books.get(bookTitle);
+  expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
+  const bookId = book!.id;
+  const durationMs = book!.durationMs;
+  const playMs = spec.playMs ?? 8_500;
+  const notes: string[] = [];
+
+  net.restore();
+  net.reset();
+
+  let media: CacheSnapshot | null = null;
+  let session = await launch();
+  try {
+    await preflightDevice(session.page, origin);
+    // Before the first navigation, so the app's own registrations are the ones
+    // dropped and the probe's are not.
+    if (spec.killCadenceWriters) {
+      await session.page.addInitScript({ content: DURABLE_TIMER_BLOCK_SCRIPT });
+      await session.page.addInitScript({ content: MEDIA_TICK_BLOCK_SCRIPT });
+    }
+    await session.page.goto(`${origin}/library`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await session.page.waitForSelector("[data-launch-ready]", {
+      state: "attached",
+      timeout: 90_000,
+    });
+    await resetBookEverywhere(session.page, userId, bookId);
+    await openPlayer(session.page, origin, bookId, bookTitle);
+    await session.page.evaluate((key) => localStorage.removeItem(key), LIFECYCLE_KEY);
+    media = await snapshotCaches(session.page);
+
+    const { startedAtMs } = await playForReal(session.page, playMs);
+    const advancedToMs = await readAudioPositionMs(session.page);
+
+    // The hide edge, taken by the APP's own handler on a page whose audio is
+    // demonstrably still running. Both halves are asserted: an element that had
+    // already stopped would write `playingAtWrite` absent, and the row would
+    // then be measuring the paused case wearing this one's name.
+    const beforeHide = await session.page.evaluate(() => {
+      const audio = document.querySelector("audio");
+      const probe = (
+        window as unknown as { __resumeProbe?: { ticks: number }; __writersBlocked?: string[] }
+      ).__resumeProbe;
+      return {
+        paused: audio?.paused ?? true,
+        ticks: probe?.ticks ?? 0,
+        writersBlocked:
+          (window as unknown as { __writersBlocked?: string[] }).__writersBlocked ?? [],
+      };
+    });
+    expect(
+      beforeHide.paused,
+      `${spec.scenario}: the audio had already stopped before the hide edge, so this row is not ` +
+        "measuring a listening session that was interrupted",
+    ).toBe(false);
+
+    const hiddenTransition = await background(session.page);
+    await session.page.waitForTimeout(300);
+    const witness = await readVisibilityWitness(session.page);
+    if (!witness.hiddenObserved) {
+      notes.push(
+        'the page\'s own visibilitychange handler did not see visibilityState === "hidden", so ' +
+          "this row did not exercise the backgrounded path at all",
+      );
+    }
+    const lifecycleBeforeKill = await readLifecycle(session.page);
+    const killedPids = hardKill();
+    await expectPageDead(session.page, killedPids);
+
+    // ----------------------------------------------------------- the relaunch
+    const relaunched = await relaunch(origin, media);
+    session = { page: relaunched.page };
+    const lifecycle = mergeLifecycle(lifecycleBeforeKill, relaunched.carried);
+
+    // Read on the restore stub, which mounts no app code: this is the record as
+    // the kill left it, before anything can have repaired or overwritten it.
+    const recordAfterKill = await readLocalRecord(session.page, userId, bookId);
+
+    let agedGapMs: number | null = null;
+    let agedWrittenAt: number | null = null;
+    let agedAtMs: number | null = null;
+    if (spec.gapMs !== undefined) {
+      const aged = await ageSuspensionWrite(session.page, userId, bookId, spec.gapMs);
+      expect(
+        aged,
+        `${spec.scenario}: there was no hide-edge record for the harness to age — the app did ` +
+          `not leave the signature this row is about (record: ${JSON.stringify(recordAfterKill)}, ` +
+          `writers the poison dropped: ${JSON.stringify(beforeHide.writersBlocked)}). ` +
+          "The harness refuses to CREATE one, so this row measures nothing rather than measuring " +
+          "itself.",
+      ).not.toBeNull();
+      agedGapMs = spec.gapMs;
+      agedWrittenAt = aged!.after;
+      agedAtMs = Date.now();
+    }
+
+    const shelf = await readShelf(session.page, origin, bookId, bookTitle, userId, durationMs);
+    await openPlayer(session.page, origin, bookId, bookTitle);
+
+    const settled = await readSettledPosition(session.page);
+    const offer = await readRecoveryOffer(session.page);
+    const offerReadAtMs = Date.now();
+
+    const rewindInputs = await readRewindInputs(session.page, userId, bookId);
+    assertMarkerKeyShape(spec.scenario, userId, rewindInputs.markerKeysSeen);
+    const rewind = expectedRewindMs(rewindInputs);
+    if (rewind > 0) {
+      notes.push(
+        `smart rewind was due to apply ${rewind}ms (absence ${rewindInputs.msSinceLastPause}ms)`,
+      );
+    }
+
+    // The projection, recomputed from the offer's OWN inputs rather than read
+    // back from it: the row grades the arithmetic, not the app's opinion of it.
+    const recomputedProjectionMs =
+      offer.recordedMs === null || offer.elapsedMs === null || offer.playbackRate === null
+        ? null
+        : Math.min(offer.recordedMs + offer.elapsedMs * offer.playbackRate, durationMs);
+    const projectionErrorMs =
+      recomputedProjectionMs === null || offer.projectedMs === null
+        ? null
+        : Math.abs(offer.projectedMs - recomputedProjectionMs);
+
+    // ------------------------------------------------- the dismissal, if asked
+    let offerAfterDismissal: RecoveryOffer | null = null;
+    let positionAfterDismissal: number | null = null;
+    let recordAtReopen: LocalRecord | null = null;
+    if (spec.dismissAndReopen) {
+      expect(
+        offer.shown,
+        `${spec.scenario}: there was no offer to dismiss, so the dismissal below would pass ` +
+          "vacuously",
+      ).toBe(true);
+      await session.page
+        .getByRole("button", { name: "Dismiss the estimate and keep the saved place" })
+        .click({ timeout: 30_000 });
+      await expect(
+        session.page.locator("[data-resume-recovery]"),
+        `${spec.scenario}: the offer was still on screen after its dismiss control was pressed`,
+      ).toHaveCount(0, { timeout: 10_000 });
+      positionAfterDismissal = await readAudioPositionMs(session.page);
+      // Leave the player and open the book again: a dismissal that only lives
+      // in component state comes back here, which is the whole question.
+      await playerBackControl(session.page).click();
+      await session.page.waitForURL(/\/library/, { timeout: 60_000 });
+      await openPlayer(session.page, origin, bookId, bookTitle);
+      offerAfterDismissal = await readRecoveryOffer(session.page);
+      // The signature has to still BE there on the second open, or the absent
+      // offer says nothing about the dismissal.
+      recordAtReopen = await readLocalRecord(session.page, userId, bookId);
+    }
+
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      bookTitle,
+      durationMs,
+      ticks: beforeHide.ticks,
+      playedMs: Math.round(advancedToMs - startedAtMs),
+      writersBlocked: beforeHide.writersBlocked,
+      lifecycle,
+      hiddenTransition,
+      visibilityAtCallback: witness.visibilityAtCallback,
+      recordAfterKill,
+      agedGapMs,
+      agedWrittenAt,
+      agedAtMs,
+      offerReadAtMs,
+      resumedPositionMs: Math.round(settled.positionMs),
+      resumedAheadOfRecordMs:
+        recordAfterKill.positionMs === null
+          ? null
+          : Math.round(settled.positionMs - recordAfterKill.positionMs),
+      expectedRewindMs: rewind,
+      offer,
+      recomputedProjectionMs:
+        recomputedProjectionMs === null ? null : Math.round(recomputedProjectionMs),
+      projectionErrorMs: projectionErrorMs === null ? null : Math.round(projectionErrorMs),
+      offerAfterDismissal,
+      positionAfterDismissal:
+        positionAfterDismissal === null ? null : Math.round(positionAfterDismissal),
+      recordAtReopen,
+      shelf,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await session.page.close().catch(() => undefined);
+    await healDevice(origin, media);
   }
 }

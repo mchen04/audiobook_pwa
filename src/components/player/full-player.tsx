@@ -24,8 +24,9 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import type { BookDetails } from "@/components/book/book-details-dialog";
 import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
 import type { TranscriptSentence } from "@/domain/transcript";
-import { formatClock } from "@/lib/format-time";
+import { formatClock, formatDurationRounded } from "@/lib/format-time";
 import { getChapterTranscript, getTranscriptChapterIndexes } from "@/lib/offline/transcript-store";
+import type { SuspendedSession } from "@/lib/playback-core";
 
 import { PlayerSheet, type PlayerSheetView } from "./chapter-sheet";
 import {
@@ -36,6 +37,7 @@ import {
 } from "./playback-provider";
 import { CoverNowReading, TranscriptPane } from "./transcript-pane";
 import type { SleepMode } from "./use-sleep-timer";
+import { useSuspensionRecovery } from "./use-suspension-recovery";
 
 // The details dialog is a heavy edit form most sessions never open; load it
 // on first use and keep it out of the player bundle.
@@ -74,6 +76,22 @@ export function FullPlayer({
   const playback = usePlayback();
   const currentChapter = useCurrentChapter();
   const { loadBook } = playback;
+  /**
+   * DECLARED BEFORE EVERY OTHER EFFECT IN THIS COMPONENT, and specifically
+   * before the one that calls `loadBook`.
+   *
+   * Effects run in declaration order, and what this hook reads is the durable
+   * record as the LAUNCH found it. The signature it looks for is "nothing wrote
+   * after the hide edge", so the first durable write of the new session — which
+   * an `?autoplay=1` open makes within 200 ms of `loadBook` — destroys it.
+   * Reading first is what keeps the offer available on the one path where the
+   * user is least able to notice they lost their place.
+   */
+  const recovery = useSuspensionRecovery({
+    userId: playback.userId,
+    bookId: playerBook.id,
+    durationMs: playerBook.durationMs,
+  });
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sheetView, setSheetView] = useState<PlayerSheetView | null>(null);
   const mountedEndedAtRef = useRef(playback.lastEndedAt);
@@ -159,6 +177,10 @@ export function FullPlayer({
 
   const skipBackSeconds = Math.round(playback.preferences.skipBackMs / 1000);
   const skipForwardSeconds = Math.round(playback.preferences.skipForwardMs / 1000);
+  // Bound to a const so the jump handler closes over a value TypeScript has
+  // narrowed, rather than re-reading a property it cannot narrow inside a
+  // callback and needing a non-null assertion to say so.
+  const suspensionGap = recovery.gap;
 
   return (
     <div className="player-page">
@@ -240,6 +262,22 @@ export function FullPlayer({
               )}
             </div>
           </div>
+
+          {suspensionGap && (
+            <SuspensionRecovery
+              gap={suspensionGap}
+              onJump={() => {
+                // The user pressing this IS the authorisation. Nothing on any
+                // other path in this app may move the position forward. The
+                // seek goes through the ordinary transport, so it is clamped to
+                // the book, made durable as a `seek`, and recorded in history —
+                // which is also how the user takes it back.
+                playback.seek(suspensionGap.projectedPositionMs);
+                recovery.dismiss();
+              }}
+              onDismiss={recovery.dismiss}
+            />
+          )}
 
           <Scrubber durationMs={playerBook.durationMs} onSeek={playback.seek} />
 
@@ -371,6 +409,74 @@ export function FullPlayer({
           onClose={() => setDetailsOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * The recovery offer: quiet, dismissible, and never a decision the app makes.
+ *
+ * WHAT IT IS FOR. `useSuspensionRecovery` has found the signature of a listen
+ * this device could not record — the app was backgrounded with the book
+ * playing, and nothing wrote after that. The saved place is still the source of
+ * truth and is where the player has already resumed; this offers a one-tap jump
+ * to where the audio would have got to, and says in as many words that it is an
+ * estimate.
+ *
+ * THE RULES IT KEEPS, all of which are the point rather than decoration:
+ *
+ *   - `role="status"`, not a dialog. It announces politely and traps nothing;
+ *     the transport underneath it stays live and the user can simply play.
+ *   - the dismiss control is a peer of the jump, not a corner afterthought, so
+ *     "no" is exactly as easy as "yes";
+ *   - the saved place is printed next to the estimate, because the number the
+ *     user is being asked to leave matters as much as the one on offer;
+ *   - "about" leads both figures. Neither is a measurement.
+ *
+ * The data attributes carry the unrounded numbers for `tests/resume`, which
+ * grades the projection against the elapsed time and rate rather than against a
+ * clock string quantised to the second.
+ */
+function SuspensionRecovery({
+  gap,
+  onJump,
+  onDismiss,
+}: {
+  gap: SuspendedSession;
+  onJump: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="resume-recovery"
+      role="status"
+      data-resume-recovery=""
+      data-recorded-ms={Math.round(gap.recordedPositionMs)}
+      data-projected-ms={Math.round(gap.projectedPositionMs)}
+      data-elapsed-ms={Math.round(gap.elapsedMs)}
+      data-playback-rate={gap.playbackRate}
+    >
+      <p>
+        This was playing when the app closed, and about{" "}
+        <strong>{formatDurationRounded(gap.elapsedMs)}</strong> went unrecorded.
+      </p>
+      <div className="resume-recovery-actions">
+        <button type="button" className="resume-recovery-jump" onClick={onJump}>
+          Jump to about {formatClock(gap.projectedPositionMs)}
+        </button>
+        <button
+          type="button"
+          className="resume-recovery-dismiss"
+          aria-label="Dismiss the estimate and keep the saved place"
+          onClick={onDismiss}
+        >
+          <X size={16} aria-hidden="true" />
+        </button>
+      </div>
+      <small>
+        An estimate from the time away and {gap.playbackRate}× speed. Your saved place is{" "}
+        {formatClock(gap.recordedPositionMs)}.
+      </small>
     </div>
   );
 }

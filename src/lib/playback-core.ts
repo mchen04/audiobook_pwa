@@ -139,6 +139,21 @@ export type LocalPosition = {
    * Absent on records written before writes carried their provenance.
    */
   writtenAt?: number;
+  /**
+   * WAS THE AUDIO ACTUALLY PLAYING at the instant of this write?
+   *
+   * The one fact a durable record could not previously answer, and the one
+   * `detectSuspendedSession` cannot do without. Everything else it needs is
+   * already here: `positionMs` is where the user was, `writtenAt` is when, and
+   * `playbackRate` is how fast the book was moving. What none of those say is
+   * whether there was a listening session still running at that moment — and a
+   * hide-edge write happens on EVERY backgrounding, paused or playing. A paused
+   * one has no lost stretch behind it and must never produce an offer.
+   *
+   * Written only when true, so absent means "not playing, or a build that
+   * predates this field" — both of which are correctly read as "do not offer".
+   */
+  playingAtWrite?: boolean;
 };
 
 /**
@@ -168,6 +183,8 @@ export function saveLocalPlaybackState(
     completed?: boolean;
     occurredAt?: number;
     source?: PlaybackWriteSource;
+    /** Was the media element playing at the instant of this write? */
+    playing?: boolean;
   },
 ): boolean {
   const positionMs = Math.round(state.positionMs);
@@ -182,6 +199,7 @@ export function saveLocalPlaybackState(
   }
   if (typeof state.completed === "boolean") record.completed = state.completed;
   if (state.source) record.source = state.source;
+  if (state.playing === true) record.playingAtWrite = true;
   try {
     localStorage.setItem(localPositionKey(userId, bookId), JSON.stringify(record));
     return true;
@@ -254,12 +272,15 @@ export function saveLocalPosition(
  * The pause marker goes with it. It is the same book's state, it is what smart
  * rewind reads, and a re-import of the same file is matched to the same book id
  * by fingerprint — so a stale marker would hand a freshly imported book a
- * rewind earned by a copy the user deleted months ago.
+ * rewind earned by a copy the user deleted months ago. The dismissed-suspension
+ * marker goes for the same reason: it is an answer about one deleted book's
+ * unrecorded stretch, and the fingerprint match would hand it to the re-import.
  */
 export function clearLocalPlaybackState(userId: string, bookId: string): void {
   try {
     localStorage.removeItem(localPositionKey(userId, bookId));
     localStorage.removeItem(lastPausedKey(userId, bookId));
+    localStorage.removeItem(suspensionDismissedKey(userId, bookId));
   } catch {
     // A device with storage blocked has nothing stored to remove.
   }
@@ -327,6 +348,172 @@ export function readLatestLocalPlayback(
     if (!latest || (entry.state.writtenAt ?? 0) > (latest.state.writtenAt ?? 0)) latest = entry;
   }
   return latest;
+}
+
+/* ------------------------------------------------------------------ *
+ * Recovering a listening session the device could not record
+ * ------------------------------------------------------------------ */
+
+/**
+ * The write occasions that mean "the app was going away".
+ *
+ * Only these two can leave the signature below, and that is the whole trick:
+ * there is ONE durable record per (user, book) and every write overwrites it,
+ * so a record still saying `visibility-flush` or `pagehide-flush` is proof that
+ * NOTHING wrote after the hide edge. No extra bookkeeping, no second key, and
+ * nothing for a later write to forget to clear — the absence of a later write
+ * is the absence of a later write.
+ */
+const HIDE_EDGE_SOURCES: readonly PlaybackWriteSource[] = ["visibility-flush", "pagehide-flush"];
+
+/**
+ * How much unrecorded listening is worth telling the user about.
+ *
+ * The cadence writes every 200 ms, so anything the normal writers covered is
+ * off by a fifth of a second and would never reach a record that still names
+ * the hide edge in the first place. This floor is the second, independent
+ * guard: 60 s is three hundred cadence intervals, and it is stated on the
+ * PROJECTED ADVANCE rather than on the elapsed wall clock so that the same
+ * number means the same thing at 0.5x and at 3x, and so that a projection the
+ * duration clamp has flattened cannot be offered as a jump to nowhere.
+ *
+ * BEING STATED ON THE ADVANCE IS ALSO WHAT COVERS THE END OF THE BOOK, and
+ * there is deliberately no second check for it. A book parked within
+ * `BOOK_END_EPSILON_MS` of its end restarts from zero on the next open
+ * (`resolveStartPosition`), so a projection from its stored position describes
+ * a place the player is not going to be — but the clamp already leaves at most
+ * `BOOK_END_EPSILON_MS` of advance there, and this floor is sixty times that,
+ * so the offer is withdrawn by arithmetic. An explicit end-of-book branch was
+ * written first and then removed: no test could make it fail, which is the
+ * definition of a line that is not doing anything.
+ *
+ * It is deliberately coarse. A recovery prompt is an interruption, and one that
+ * appears after an ordinary thirty-second glance at another app is a bug the
+ * user meets several times a day. Erring long costs a user who really did lose
+ * fifty seconds nothing they cannot fix by scrubbing.
+ */
+export const SUSPENSION_GAP_FLOOR_MS = 60_000;
+
+/**
+ * A stretch of listening the device could not record, and where it MIGHT have
+ * reached. Every field is evidence; `projectedPositionMs` alone is a guess.
+ */
+export type SuspendedSession = {
+  /**
+   * The position the hide-edge write recorded. THIS REMAINS THE SOURCE OF
+   * TRUTH: the app resumes here, and nothing in this module may move it.
+   */
+  recordedPositionMs: number;
+  /** Wall clock of the hide-edge write. Identifies this gap for dismissal. */
+  writtenAt: number;
+  /** How long the device went without recording anything. */
+  elapsedMs: number;
+  /** The rate the book was playing at when the app went away. */
+  playbackRate: number;
+  /**
+   * Where playback WOULD have reached if it ran for the whole gap at that rate,
+   * clamped to the book. An estimate, and must be labelled as one wherever it
+   * is shown — if iOS stopped the audio early, this is simply wrong, which is
+   * exactly why it is offered and never applied.
+   */
+  projectedPositionMs: number;
+};
+
+/**
+ * Did this device stop being able to record a session that was still playing?
+ *
+ * THE SIGNATURE. The last durable write was made at the hide edge, it says
+ * audio was live at that moment, and the wall clock has since moved far enough
+ * that the cadence cannot account for it. On a phone that means: the app was
+ * backgrounded with the book playing, iOS suspended both the 200 ms timer and
+ * the media element's `timeupdate` — the one question this repo cannot answer
+ * on a development machine, see `docs/resume-durability-device-check.md` — and
+ * the process was then reaped with no further callback. The measured cost of
+ * that case is the entire session: `tests/resume`'s both-writers-dead row loses
+ * 9644 ms out of 9500 ms of listening, scaling linearly.
+ *
+ * WHAT THIS IS NOT. It is not a claim that iOS does suspend both writers, and
+ * it does not need one. If either writer survives a real backgrounding the last
+ * record names that writer, the predicate returns null, and the user never sees
+ * anything. The cost in the good case is one `localStorage` read at launch.
+ *
+ * WHAT IT MUST NEVER DO is move anybody. The returned position is a PROPOSAL
+ * for a control the user has to press. Resuming forward on the strength of an
+ * extrapolation would skip content the user never heard — the worst failure
+ * this player has, and a blocker here at any magnitude — and it would be
+ * straightforwardly wrong in the case where iOS stopped the audio too.
+ *
+ * The bounds, all of them refusals rather than adjustments:
+ *
+ *   - a record that names any other writer is a record something wrote after
+ *     the hide edge, so there is no unrecorded stretch;
+ *   - a hide edge taken while PAUSED has nothing behind it to recover;
+ *   - a finished book has no unheard stretch behind it;
+ *   - a missing or nonsensical rate falls back to 1x rather than scaling the
+ *     estimate by a number nobody wrote;
+ *   - the projection is clamped to the book, and the offer is withdrawn when
+ *     what survives the clamp is under the floor.
+ */
+export function detectSuspendedSession(input: {
+  record: LocalPosition | null;
+  durationMs: number;
+  /** Injected so the maths is testable; defaults to the wall clock. */
+  now?: number;
+}): SuspendedSession | null {
+  const { record, durationMs } = input;
+  if (!record || record.playingAtWrite !== true || record.completed === true) return null;
+  if (!record.source || !HIDE_EDGE_SOURCES.includes(record.source)) return null;
+  const writtenAt = record.writtenAt;
+  if (typeof writtenAt !== "number" || !Number.isFinite(writtenAt) || writtenAt <= 0) return null;
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
+  const elapsedMs = (input.now ?? Date.now()) - writtenAt;
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  const rate =
+    typeof record.playbackRate === "number" &&
+    Number.isFinite(record.playbackRate) &&
+    record.playbackRate > 0
+      ? record.playbackRate
+      : 1;
+  const projectedPositionMs = Math.min(record.positionMs + elapsedMs * rate, durationMs);
+  if (projectedPositionMs - record.positionMs < SUSPENSION_GAP_FLOOR_MS) return null;
+  return {
+    recordedPositionMs: record.positionMs,
+    writtenAt,
+    elapsedMs,
+    playbackRate: rate,
+    projectedPositionMs,
+  };
+}
+
+/**
+ * The gap this device has already been told to stop asking about.
+ *
+ * Keyed by the hide-edge write's own `writtenAt`, which is what makes "the same
+ * gap" a decidable question: a dismissal is a statement about one specific
+ * unrecorded stretch, not a permanent opt-out. A LATER suspension writes a
+ * later `writtenAt` and is offered again, which is right — it is a different
+ * loss, and the user's last answer said nothing about it.
+ */
+export function readDismissedSuspensionGap(userId: string, bookId: string): number | null {
+  try {
+    const raw = Number(localStorage.getItem(suspensionDismissedKey(userId, bookId)) || 0);
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function dismissSuspensionGap(userId: string, bookId: string, writtenAt: number): void {
+  try {
+    localStorage.setItem(suspensionDismissedKey(userId, bookId), String(writtenAt));
+  } catch {
+    // Storage is blocked. The offer reappears next launch, which is a nuisance
+    // and not a lost position; nothing else in the player may fail for it.
+  }
+}
+
+function suspensionDismissedKey(userId: string, bookId: string): string {
+  return `chapterline:suspension-dismissed:${userId}:${bookId}`;
 }
 
 /**
@@ -447,6 +634,11 @@ function validLocalPosition(parsed: unknown, occurredAtOverride: number | undefi
   if (typeof writtenAt === "number" && Number.isFinite(writtenAt) && writtenAt >= 0) {
     record.writtenAt = writtenAt;
   }
+  // Only a literal `true` carries through. Anything else — a string, a 1, a
+  // field a future build repurposes — is not evidence that a listening session
+  // was running, and `detectSuspendedSession` must never offer to move the
+  // user's position on the strength of a value it had to coerce.
+  if (entry?.playingAtWrite === true) record.playingAtWrite = true;
   return record;
 }
 
