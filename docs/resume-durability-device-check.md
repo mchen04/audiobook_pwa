@@ -38,7 +38,20 @@ iOS may suspend a backgrounded page's JavaScript. The automated suite cannot obs
   background suspension** — so it would not answer this question either.
 - The iOS Simulator needs Xcode; only the Command Line Tools are installed here.
 
-So the open question is precisely this, and nothing broader:
+### Why "installed PWA" is not a separate gap
+
+It is reasonable to ask whether running from the Home Screen exercises code the suite never
+touches. It does not. The app contains **no PWA-mode detection at all** — no
+`navigator.standalone`, no `display-mode` query, and no `matchMedia` call anywhere in
+`src/` (zero in the persistence layer). `display: "standalone"` appears once, in the
+manifest, where it tells iOS how to launch the app; nothing reads it back.
+
+So the installed PWA runs the same code as the suite, in the same engine, with the same
+service worker, Cache Storage and IndexedDB. Installation changes the **operating system's**
+treatment of the process — lifecycle and suspension — not the app's behaviour. That is the
+one residual below, not a second one.
+
+### The open question, stated as narrowly as it actually is
 
 > While the PWA is backgrounded with the screen off and audio still playing, does iOS
 > suspend **both** the 200 ms timer **and** the media element's `timeupdate`?
