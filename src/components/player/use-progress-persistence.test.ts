@@ -195,3 +195,235 @@ describe("the server half of a progress write", () => {
     });
   });
 });
+
+/**
+ * The two durable writers, and the one gate between them.
+ *
+ * The position is offered by a timer AND by `timeupdate` because iOS throttles
+ * those two through completely different machinery: a backgrounded page loses
+ * its timers, while `timeupdate` is produced by the media pipeline that is
+ * still decoding the audio the user is listening to. Each has to be able to
+ * carry the position ALONE — that is the whole reason for having two — and
+ * together they must not raise the write rate, which is what the shared
+ * `DURABLE_SAVE_INTERVAL_MS` gate is for.
+ *
+ * `tests/resume`'s B3/B4 rows measure the same property end to end in WebKit,
+ * against a real audio element and a real process kill. These are the fast,
+ * deterministic version: they can disable a source outright and count writes
+ * exactly, which the browser rows cannot.
+ */
+describe("the durable cadence, with two sources", () => {
+  const KEY = "chapterline:position:user-a:book-1";
+  const INTERVAL_MS = 200;
+
+  /** A minimal media element whose `paused` this test controls. */
+  class FakeAudio extends EventTarget {
+    currentTime = 12;
+    playbackRate = 1;
+    paused = true;
+  }
+
+  let writes: number[];
+
+  beforeEach(() => {
+    writes = [];
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      get length() {
+        return store.size;
+      },
+      key: (index: number) => [...store.keys()][index] ?? null,
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (key === KEY) writes.push((JSON.parse(value) as { positionMs: number }).positionMs);
+        store.set(key, value);
+      },
+      removeItem: (key: string) => void store.delete(key),
+    } as Storage);
+    vi.stubGlobal("crypto", { randomUUID: () => "device-1" } as Crypto);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+    replayQueuedMutations.mockReset().mockResolvedValue(undefined);
+    mirrorProgress.mockReset().mockResolvedValue(undefined);
+    commitProgress.mockReset().mockResolvedValue(undefined);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Mounts the hook on a playing element and returns both halves of it. */
+  function playing() {
+    const audio = new FakeAudio();
+    const audioRef = { current: audio as unknown as HTMLAudioElement };
+    const activeBookRef = { current: book };
+    const { result, unmount } = renderHook(() =>
+      useProgressPersistence("user-a", audioRef, activeBookRef),
+    );
+    result.current.markInProgress();
+    audio.paused = false;
+    audio.dispatchEvent(new Event("play"));
+    return { audio, result, unmount };
+  }
+
+  /** Plays for `ms`, delivering a `timeupdate` every `tickMs` if asked. */
+  function listen(
+    audio: FakeAudio,
+    result: { current: { onListeningTick: (positionMs: number) => void } },
+    { ms, tickMs }: { ms: number; tickMs: number | null },
+  ) {
+    const step = 10;
+    let sinceTick = 0;
+    for (let elapsed = 0; elapsed < ms; elapsed += step) {
+      vi.advanceTimersByTime(step);
+      audio.currentTime += step / 1000;
+      if (tickMs === null) continue;
+      sinceTick += step;
+      if (sinceTick < tickMs) continue;
+      sinceTick = 0;
+      if (!audio.paused) result.current.onListeningTick(audio.currentTime * 1000);
+    }
+  }
+
+  /**
+   * B4's unit twin: `timeupdate` never reaches the hook, so the timer is the
+   * only writer left. This is the source iOS is MOST likely to keep, and the
+   * one that was already there — but if it ever stopped being able to carry the
+   * position on its own, B4 would be the only thing to notice.
+   */
+  it("keeps writing with no timeupdate at all", () => {
+    const { audio, result, unmount } = playing();
+    listen(audio, result, { ms: 2_000, tickMs: null });
+    expect(writes.length, "the timer alone wrote nothing over two seconds").toBeGreaterThanOrEqual(
+      9,
+    );
+    expect(writes.at(-1)).toBeGreaterThan(writes[0]!);
+    unmount();
+  });
+
+  /**
+   * B3's unit twin, and the regression `8afb574` introduced: with the timer
+   * frozen — which is what iOS does to a backgrounded page — the position has
+   * to keep being recorded off the media pipeline's own tick. Before this fix
+   * the count here was ZERO for the entire session.
+   */
+  it("keeps writing with the timer frozen", () => {
+    const frozen = vi.spyOn(window, "setTimeout").mockImplementation(() => 0 as never);
+    const { audio, result, unmount } = playing();
+    listen(audio, result, { ms: 2_000, tickMs: 250 });
+    frozen.mockRestore();
+    expect(
+      writes.length,
+      "with the timer dead the timeupdate tick wrote nothing, so a backgrounded listening " +
+        "session would record no position at all",
+    ).toBeGreaterThanOrEqual(7);
+    expect(writes.at(-1)).toBeGreaterThan(writes[0]!);
+    unmount();
+  });
+
+  /**
+   * The never-cross rule. Two sources must not mean two write rates: the gate
+   * is shared, so the ceiling is one write per interval however fast the engine
+   * ticks. A 60 Hz engine is the adversarial case — it offers a position 12
+   * times per interval.
+   */
+  it("does not amplify the write rate when both sources are alive", () => {
+    const { audio, result, unmount } = playing();
+    listen(audio, result, { ms: 4_000, tickMs: 16 });
+    const ceiling = 4_000 / INTERVAL_MS + 1;
+    expect(
+      writes.length,
+      `${writes.length} durable writes in 4s with a 60Hz tick and a ${INTERVAL_MS}ms timer; the ` +
+        `shared gate caps this at ${ceiling}`,
+    ).toBeLessThanOrEqual(ceiling);
+    // And it must not have COST anything either: the cadence still has to be met.
+    expect(writes.length, "the cadence stopped being met").toBeGreaterThanOrEqual(18);
+    unmount();
+  });
+
+  /**
+   * The regression the shared gate introduced, and the reason the timer
+   * reschedules to `remaining` rather than to a fixed interval.
+   *
+   * A gate that any path can satisfy means any path can also CLOSE it. The
+   * terminal flush, the 15 s server heartbeat, a seek and a pause all write
+   * unconditionally, at whatever phase the user happened to act — and a timer
+   * that answers a refused turn by waiting a full interval from the refusal
+   * puts the next cadence write up to TWO intervals after the last one.
+   *
+   * That is not theoretical. MEASURED in WebKit on the build that had it: T2
+   * pagehide (the flush fires, then the audio plays on until the process is
+   * killed) came back 345 ms and 338 ms behind a 250 ms bar, where the same row
+   * reads single digits with this fixed. The bars are stated in "one interval",
+   * so the gap has to BE one interval whoever wrote and whenever.
+   */
+  it("an out-of-band write must not stretch the cadence to two intervals", () => {
+    const { audio, result, unmount } = playing();
+    const at: number[] = [];
+    const store = localStorage.setItem.bind(localStorage);
+    vi.stubGlobal("localStorage", {
+      ...localStorage,
+      setItem: (key: string, value: string) => {
+        if (key === KEY) at.push(Date.now());
+        store(key, value);
+      },
+    } as unknown as Storage);
+
+    // Settle onto the cadence, then have somebody else write mid-interval —
+    // which is exactly what the flush and the heartbeat do.
+    listen(audio, result, { ms: 1_000, tickMs: null });
+    vi.advanceTimersByTime(90);
+    result.current.saveDurableState(audio.currentTime * 1000);
+    listen(audio, result, { ms: 2_000, tickMs: null });
+
+    const gaps = at.slice(1).map((value, index) => value - at[index]!);
+    expect(gaps.length, "not enough writes to measure a gap").toBeGreaterThan(8);
+    expect(
+      Math.max(...gaps),
+      `the longest gap between two durable writes was ${Math.max(...gaps)}ms after an out-of-band ` +
+        `write landed mid-interval (gaps ${JSON.stringify(gaps)}). The cadence is ${INTERVAL_MS}ms ` +
+        "and every bar in `tests/resume` is stated as one interval, so a write that closes the " +
+        "gate must delay the next cadence write to when it is DUE, not to a full interval after " +
+        "the turn it refused.",
+    ).toBeLessThanOrEqual(INTERVAL_MS + 20);
+    unmount();
+  });
+
+  it("writes nothing at all while the element is paused", () => {
+    const { audio, result, unmount } = playing();
+    listen(audio, result, { ms: 1_000, tickMs: 250 });
+    const whilePlaying = writes.length;
+    expect(whilePlaying).toBeGreaterThan(0);
+
+    audio.paused = true;
+    audio.dispatchEvent(new Event("pause"));
+    writes.length = 0;
+    // A tick after `pause()` is not hypothetical — WebKit dispatches one.
+    listen(audio, result, { ms: 5_000, tickMs: 250 });
+    result.current.onListeningTick(99_000);
+    expect(
+      writes,
+      "a paused player wrote its position, so the write rate is not zero at rest",
+    ).toStrictEqual([]);
+    unmount();
+  });
+
+  /** Neither source may put a book's position under a different book's key. */
+  it("writes nothing once the active book is gone", () => {
+    const audio = new FakeAudio();
+    const audioRef = { current: audio as unknown as HTMLAudioElement };
+    const activeBookRef: { current: PlayerBook | null } = { current: book };
+    const { result, unmount } = renderHook(() =>
+      useProgressPersistence("user-a", audioRef, activeBookRef),
+    );
+    result.current.markInProgress();
+    audio.paused = false;
+    audio.dispatchEvent(new Event("play"));
+    activeBookRef.current = null;
+    writes.length = 0;
+    listen(audio, result, { ms: 2_000, tickMs: 250 });
+    expect(writes).toStrictEqual([]);
+    unmount();
+  });
+});

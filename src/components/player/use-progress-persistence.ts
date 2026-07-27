@@ -16,17 +16,34 @@ import { commitProgress, mirrorProgress } from "@/lib/offline/outbox";
 import { getDeviceId, saveLocalPlaybackState } from "@/lib/playback-core";
 
 /**
- * How often the durable local position is refreshed while audio is playing.
+ * The MINIMUM GAP between two cadence-driven durable local writes — and, since
+ * the timer below offers one every time it fires, also the cadence itself.
  *
- * 200 ms, on a timer of this hook's own rather than on `timeupdate`.
+ * TWO SOURCES, ONE GATE. The durable position is offered by both a timer of
+ * this hook's own AND the audio element's `timeupdate`, and `writeDurableIfDue`
+ * lets through whichever arrives first after this much time has passed. That is
+ * deliberate, and it is about backgrounded audio specifically: the two sources
+ * are throttled by completely different parts of the platform.
  *
- * WHY A TIMER AND NOT THE TICK. `timeupdate` fires about every 250 ms in
- * WebKit and up to 60 Hz elsewhere, so any policy expressed in ticks has a
- * write rate set by the engine rather than by us — and a throttle layered on
- * top of it still inherits the tick's PHASE, which is what decides whether the
- * last write before a kill happened 10 ms ago or 250 ms ago. A `setInterval`
- * that samples `audio.currentTime` gives a worst-case staleness of exactly one
- * interval on every engine, which is the property the bars are stated in.
+ *   - `setInterval`/`setTimeout` is exactly what iOS suspends or coalesces when
+ *     a page is backgrounded.
+ *   - `timeupdate` is driven by the MEDIA PIPELINE, which is the one thing that
+ *     is still running in a backgrounded audiobook, because it is what is
+ *     producing the sound the user is listening to.
+ *
+ * Neither is guaranteed, and this repo cannot observe which of them survives a
+ * real iOS backgrounding — that needs hardware. So the position rides on both,
+ * and the user's place is lost only if BOTH stop at once. `tests/resume`'s
+ * B3/B4 rows disable each source in turn and measure that the survivor alone
+ * still bounds the loss.
+ *
+ * WHY A TIMER IS STILL HERE, given that `timeupdate` exists. `timeupdate` fires
+ * about every 250 ms in WebKit and up to 60 Hz elsewhere, so a policy expressed
+ * only in ticks has a write PHASE set by the engine — which is what decides
+ * whether the last write before a kill happened 10 ms ago or 250 ms ago. The
+ * timer samples `audio.currentTime` on a schedule of our own, so the worst-case
+ * staleness is one interval on every engine, which is the property the bars are
+ * stated in. The tick is the backstop for the timer, not a replacement for it.
  *
  * WHY 200 ms. Two failure shapes bound it, and they are the two the oracle
  * grades. A process killed with no callback at all (the app-switcher swipe, an
@@ -39,23 +56,30 @@ import { getDeviceId, saveLocalPlaybackState } from "@/lib/playback-core";
  * 250 ms bar. 250 ms of cadence would sit exactly ON that bar with no margin
  * for the write itself, and 500 ms (measured) misses it outright.
  *
- * WHY THAT IS NOT WRITE AMPLIFICATION. The rate is a constant, not a function
- * of the tick rate, the device, or how fast the book is playing; it is five
- * writes per second of one ~130-byte string, and only while audio is actually
- * playing — a paused or idle player writes nothing at all. That is ~650 B/s of
- * logical writes, and WebKit backs `localStorage` with a coalescing write-behind
- * flush, so the disk sees roughly one small row update per second rather than
- * five. Ten hours of listening is on the order of 20 MB of logical writes
- * against a flash endurance budget measured in hundreds of terabytes, and one
- * timer callback per 200 ms is invisible next to the audio decode that is
- * already running.
+ * WHY ADDING A SECOND SOURCE IS NOT WRITE AMPLIFICATION. The gate is shared:
+ * `saveDurableState` stamps `lastDurableWriteAtRef` on every write it performs,
+ * from any path, and `writeDurableIfDue` refuses any write inside the gap. So
+ * the ceiling is one write per 200 ms — five per second — no matter how fast
+ * the engine ticks, how many sources offer a position, or how fast the book is
+ * playing. That is the same ceiling the single-writer build had; the second
+ * source changes which writer satisfies the cadence, not how often it is
+ * satisfied. And the timer skipping a turn because a tick beat it to it does
+ * not stretch the gap: it reschedules a full interval from ITSELF, so the worst
+ * case stays one interval plus the timer's own lateness. (MEASURED in WebKit
+ * over the oracle's play window: 4.7-5.0 writes/s, and 0 while paused.)
+ *
+ * Both writers refuse a paused element, so a paused or idle player writes
+ * nothing at all: five writes per second of one ~130-byte string is ~650 B/s of
+ * logical writes only while audio is actually playing, and WebKit backs
+ * `localStorage` with a coalescing write-behind flush, so the disk sees roughly
+ * one small row update per second rather than five. Ten hours of listening is
+ * on the order of 20 MB of logical writes against a flash endurance budget
+ * measured in hundreds of terabytes.
  *
  * This is NOT a substitute for the lifecycle flush, and must not be read as
- * one. Neither a timer nor `timeupdate` is guaranteed to keep running once iOS
- * has backgrounded the PWA, and this repo cannot observe which of them does —
- * that needs real hardware. The synchronous write on the lifecycle edge is what
- * has to be correct; the cadence exists for the case where no edge is delivered
- * at all, and for the window between an edge and the kill that follows it.
+ * one. The synchronous write on the lifecycle edge is what has to be correct;
+ * the cadence exists for the case where no edge is delivered at all, and for
+ * the window between an edge and the kill that follows it.
  */
 const DURABLE_SAVE_INTERVAL_MS = 200;
 const SERVER_SAVE_INTERVAL_MS = 15_000;
@@ -76,6 +100,16 @@ export function useProgressPersistence(
   activeBookRef: RefObject<PlayerBook | null>,
 ) {
   const lastServerSaveRef = useRef(0);
+  /**
+   * When the durable local record was last written, by ANY path.
+   *
+   * This is the shared gate that keeps two cadence sources from becoming two
+   * write rates. It is stamped inside `saveDurableState` rather than at the
+   * call sites, so a user-driven write (a seek, a pause, the terminal flush)
+   * counts against the same budget as a cadence write and cannot be doubled by
+   * a tick arriving a millisecond later.
+   */
+  const lastDurableWriteAtRef = useRef(0);
   const completionRef = useRef(new Map<string, boolean>());
   /**
    * Has anything happened to this book's position since it was opened?
@@ -107,6 +141,7 @@ export function useProgressPersistence(
       const audio = audioRef.current;
       const position = positionMs ?? (audio ? audio.currentTime * 1000 : 0);
       if (!Number.isFinite(position) || position < 0) return;
+      lastDurableWriteAtRef.current = Date.now();
       saveLocalPlaybackState(userId, activeBook.id, {
         positionMs: position,
         playbackRate: audio?.playbackRate || 1,
@@ -114,6 +149,28 @@ export function useProgressPersistence(
       });
     },
     [activeBookRef, audioRef, userId],
+  );
+
+  /**
+   * The cadence write, from whichever source reaches it first.
+   *
+   * Both the timer and `timeupdate` come through here, so the guards are stated
+   * once and cannot drift apart. NOTHING is written for an element that is gone
+   * or paused: a `timeupdate` can still be dispatched after `pause()` (and is,
+   * in WebKit), and the book-switch path in `playback-provider` pauses the
+   * element before it re-points `activeBookRef`, so this check is also what
+   * stops one book's position being written under another book's key. The
+   * caller's `positionMs` is used rather than a re-read of `currentTime`,
+   * because the tick's own value is the one the engine reported.
+   */
+  const writeDurableIfDue = useCallback(
+    (positionMs: number) => {
+      const audio = audioRef.current;
+      if (!audio || audio.paused || !activeBookRef.current) return;
+      if (Date.now() - lastDurableWriteAtRef.current < DURABLE_SAVE_INTERVAL_MS) return;
+      saveDurableState(positionMs, false);
+    },
+    [activeBookRef, audioRef, saveDurableState],
   );
 
   /**
@@ -218,20 +275,28 @@ export function useProgressPersistence(
   );
 
   /**
-   * The server heartbeat, from the timeupdate loop. The DURABLE write is not
-   * here: it is on the interval below, so that how often this device knows
-   * where the user is does not depend on how often the engine feels like
-   * reporting it.
+   * The listening loop: the durable write offered by the MEDIA PIPELINE, and
+   * the server heartbeat.
+   *
+   * The durable write here is not a second cadence — it is the same cadence,
+   * offered by a second source. It goes through `writeDurableIfDue`, so a fast
+   * engine cannot raise the write rate above one per `DURABLE_SAVE_INTERVAL_MS`
+   * and a slow one cannot lower the timer's. What it buys is the case this app
+   * is actually used in: audio playing with the screen off, where iOS may
+   * suspend the timer and the tick is the only thing still running. Removing it
+   * (which this hook briefly did) means a backgrounded listening session with a
+   * frozen timer records NO position for its entire length.
    */
   const onListeningTick = useCallback(
     (positionMs: number) => {
       if (!activeBookRef.current) return;
+      writeDurableIfDue(positionMs);
       if (Date.now() - lastServerSaveRef.current > SERVER_SAVE_INTERVAL_MS) {
         lastServerSaveRef.current = Date.now();
         void persistProgress(positionMs, false);
       }
     },
-    [activeBookRef, persistProgress],
+    [activeBookRef, persistProgress, writeDurableIfDue],
   );
 
   const markInProgress = useCallback(() => {
@@ -245,27 +310,60 @@ export function useProgressPersistence(
     positionChangedRef.current = false;
   }, []);
 
-  // The cadence. Runs only while audio is actually playing, and reads the
-  // element's own `currentTime` rather than anything the app has cached.
+  /**
+   * The cadence's own writer. Runs only while audio is actually playing, and
+   * reads the element's own `currentTime` rather than anything the app cached.
+   *
+   * A SELF-RESCHEDULING TIMEOUT, not `setInterval`, and it reschedules to when
+   * the next write is DUE rather than to a fixed grid.
+   *
+   * Both details are load-bearing, and the second was measured the hard way. A
+   * shared gate means some other path — the terminal flush, the 15 s server
+   * heartbeat, a seek, a pause — can write at an arbitrary phase and close the
+   * gate on a timer callback that was already scheduled. Skipping that turn and
+   * waiting a FULL interval from the skip puts the next cadence write up to two
+   * intervals after the last one, which is not what the bars are stated in.
+   * MEASURED, WebKit, that exact build: T2 pagehide came back 345 ms and 338 ms
+   * behind against a 250 ms bar — the flush wrote, the timer's next turn was
+   * refused, and the audio played on into the gap until the kill. Rescheduling
+   * to `remaining` instead keeps the worst case one interval no matter who
+   * wrote or when.
+   *
+   * THE FIRST ARM IS ALWAYS EXACTLY `DURABLE_SAVE_INTERVAL_MS`, and so is the
+   * one after a write. Only the catch-up delay is shorter. `tests/resume`'s
+   * `killDurableTimer` poison identifies this writer by that delay, and because
+   * the chain can only ever START at the exact value, blocking it stops the
+   * writer outright — no catch-up delay is ever scheduled for the poison to
+   * miss, so B3 cannot go vacuously green.
+   */
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
     let timer: number | null = null;
     const stop = () => {
       if (timer === null) return;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
       timer = null;
+    };
+    const tick = () => {
+      timer = null;
+      const element = audioRef.current;
+      // Nothing is playing any more, so the chain ends here rather than
+      // spinning a timer for a paused player. `play` starts it again.
+      if (!element || element.paused || !activeBookRef.current) return;
+      const remaining = DURABLE_SAVE_INTERVAL_MS - (Date.now() - lastDurableWriteAtRef.current);
+      if (remaining > 0) {
+        // Somebody else wrote inside this interval. Come back when the next
+        // write is actually due, not a whole interval from now.
+        timer = window.setTimeout(tick, remaining);
+        return;
+      }
+      writeDurableIfDue(element.currentTime * 1000);
+      timer = window.setTimeout(tick, DURABLE_SAVE_INTERVAL_MS);
     };
     const start = () => {
       if (timer !== null) return;
-      timer = window.setInterval(() => {
-        const element = audioRef.current;
-        if (!element || element.paused || !activeBookRef.current) {
-          stop();
-          return;
-        }
-        saveDurableState(element.currentTime * 1000, false);
-      }, DURABLE_SAVE_INTERVAL_MS);
+      timer = window.setTimeout(tick, DURABLE_SAVE_INTERVAL_MS);
     };
     audio.addEventListener("play", start);
     audio.addEventListener("pause", stop);
@@ -277,7 +375,7 @@ export function useProgressPersistence(
       audio.removeEventListener("pause", stop);
       audio.removeEventListener("ended", stop);
     };
-  }, [activeBookRef, audioRef, saveDurableState]);
+  }, [activeBookRef, audioRef, writeDurableIfDue]);
 
   useEffect(() => {
     /**

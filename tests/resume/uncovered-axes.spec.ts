@@ -7,6 +7,7 @@ import {
   closeResumeFixture,
   measure,
   measureCompletionAcrossBooks,
+  measureDurableWriteRate,
   measureStaleAheadReplay,
   measureTwoDeviceResume,
   recordRow,
@@ -32,6 +33,13 @@ import {
  *       handler deleted. T1 cannot be covered here (see `assertHiddenIsReal`),
  *       and stays an engine GAP; this bounds the damage of the case T1 is
  *       worried about instead of leaving its size unknown.
+ *   B3/B4
+ *       The cell B1/B2's own comment names as UNCOVERED: no callback AND one of
+ *       the two position writers gone. Each row deletes a different writer and
+ *       measures what the survivor holds alone.
+ *   W1  What the second writer COSTS: the durable write rate, playing and at
+ *       rest. Two writers is the shape that silently doubles somebody's write
+ *       amplification, and none of the drift rows can see it.
  *   X2  One device republishing over another device's newer position. A
  *       single-device oracle has no other device.
  *   F2  Opening the next book un-finishing the previous one. A single-book
@@ -50,7 +58,7 @@ import {
  * matching note in `position-drift.spec.ts`. The books are ~98 KB against a
  * measured 1 GB Cache Storage quota, so there is no reason to share them.
  */
-const BOOK_COUNT = 6;
+const BOOK_COUNT = 9;
 
 test.beforeAll(async () => {
   test.setTimeout(900_000);
@@ -78,10 +86,11 @@ test.afterAll(async () => {
  * unknown, and the argument is worth stating exactly, because "unknown"
  * understates it and "covered" would be a lie.
  *
- * TWO INDEPENDENT MECHANISMS STAND BETWEEN A BACKGROUNDED LISTENER AND A LOST
- * POSITION: the synchronous flush on the lifecycle edge, and a 200 ms
- * `setInterval` that samples the element directly
- * (`use-progress-persistence.ts`). Each has been measured working ALONE.
+ * THREE INDEPENDENT MECHANISMS STAND BETWEEN A BACKGROUNDED LISTENER AND A LOST
+ * POSITION: the synchronous flush on the lifecycle edge, a 200 ms self-
+ * rescheduling timer that samples the element directly, and the media element's
+ * own `timeupdate` (all in `use-progress-persistence.ts`). Each has been
+ * measured working ALONE.
  *
  *   (a) THE FLUSH, GIVEN THE STATE. The harness overrides
  *       `document.visibilityState` before dispatching, so the app's handler
@@ -113,13 +122,20 @@ test.afterAll(async () => {
  *      fires the event with the state still `"visible"`, or does not fire it
  *      before freezing, leg (a) contributes nothing and only (b) is left.
  *   2. That the timer keeps running once iOS has frozen the page. B1/B2 bound
- *      "no callback". They do not bound "no callback AND no timer".
- *   3. The joint failure, which is the actual residual — and it is not bounded
- *      by one interval. A backgrounded audiobook keeps PLAYING while a frozen
- *      page writes nothing, so the loss there is the length of the background
- *      listening, not the cadence. T3 does not cover it: T3's page was
+ *      "no callback". They do not bound "no callback AND no timer" — B3/B4 do,
+ *      and the size of the hole they close is measured: with the callback gone
+ *      and BOTH writers deleted the same row loses 9644 ms and writes nothing
+ *      at all, because a backgrounded audiobook keeps PLAYING while a frozen
+ *      page records nothing, so the loss is the length of the background
+ *      session and not one interval. T3 does not cover that: T3's page was
  *      foregrounded and ticking right up to the SIGKILL, so its timer had never
  *      stopped.
+ *   3. The three-way joint failure that is left: no callback, no timer, and no
+ *      tick. It is smaller than the two-way one it replaces, because the tick
+ *      is emitted by the media pipeline — if that has stopped, the audio has
+ *      stopped, and there is no new position to lose. It is not nothing: this
+ *      instrument cannot see whether iOS coalesces `timeupdate` on a
+ *      backgrounded page, only that it fires while the page is foreground.
  *
  * So: the real-world risk is bounded by composition, the single cell is not
  * proven, and covering it needs an engine that can genuinely report a hidden
@@ -226,6 +242,216 @@ for (const spec of BACKSTOP) {
     ).toBeLessThanOrEqual(CADENCE_ONLY_BAR_MS);
   });
 }
+
+// ---------------------------------------------------------------------------
+// B3 / B4 — no callback, and only ONE of the two position writers
+// ---------------------------------------------------------------------------
+
+/**
+ * The ceiling the app's own shared gate claims: one durable write per 200 ms.
+ *
+ * 6/s rather than a bare 5/s only because the window is wall clock and the
+ * count is integral — a 10 s window can honestly contain 51 writes if it opens
+ * a hair before a write and closes a hair after one. It is NOT slack for a
+ * second writer: a build that dropped the gate measures 200+/s here (that is
+ * what the unit twin in `use-progress-persistence.test.ts` records), so this
+ * bar is nowhere near the failure it is placed to catch.
+ */
+const WRITE_RATE_BAR_PER_SEC = 6;
+
+/**
+ * The cell B1/B2 could only name.
+ *
+ * B1/B2's comment states the residual exactly: "B1/B2 bound 'no callback'. They
+ * do not bound 'no callback AND no timer'." That was true, and it was the
+ * largest remaining real-world risk, because the way this app is used is audio
+ * playing with the screen off — the one state in which iOS suspends timers.
+ *
+ * The app now writes the durable position from TWO sources, and the point of
+ * two is that the platform throttles them through different machinery:
+ *
+ *   - the 200 ms timer is what iOS suspends or coalesces on a backgrounded page;
+ *   - `timeupdate` is emitted by the MEDIA PIPELINE, which is by definition
+ *     still running in a backgrounded audiobook, because it is producing the
+ *     sound.
+ *
+ * Neither is guaranteed. So the requirement is not "one of them works" — it is
+ * that EITHER ONE ALONE bounds the loss, because then the position is lost only
+ * if both stop at once. That is a composition argument, and it is only worth
+ * anything if each leg is measured with the other leg REMOVED. These two rows
+ * are those measurements: same no-callback world as B1/B2, with one writer
+ * deleted before the app can install it.
+ *
+ * WHAT THEY STILL DO NOT COVER, and must never be read as covering: a real iOS
+ * backgrounding. The state is synthesised here exactly as it is in T1, and
+ * `assertHiddenIsReal` keeps saying so. What changes is the size of the
+ * residual: the joint failure now needs the platform to deliver no callback AND
+ * suspend the timer AND stop the media pipeline's tick — and if it stops the
+ * tick, it has stopped decoding, which means the audiobook is not playing and
+ * there is no new position to lose.
+ *
+ * THE BAR is `CADENCE_ONLY_BAR_MS`, the same 600 ms B1/B2 are held to and
+ * stricter than the 1000 ms this repo gives a no-callback case. It is the right
+ * number for both writers: the timer's worst case is one 200 ms interval, and
+ * WebKit's `timeupdate` arrives about every 250 ms, so either survivor should
+ * land far inside it. A row near the bar would mean the survivor is not doing
+ * the job, which is the finding, not an excuse to widen it.
+ */
+const SINGLE_WRITER: Array<ScenarioSpec & { blocked: string; survivor: string }> = [
+  {
+    scenario: "B3 pagehide, no callback and the durable TIMER dead",
+    bookIndex: 6,
+    termination: "pagehide",
+    network: "online",
+    killLifecycleHandlers: true,
+    killDurableTimer: true,
+    resetBookFirst: true,
+    blocked: "setTimeout:200",
+    survivor: "the media element's `timeupdate`",
+  },
+  {
+    scenario: "B4 pagehide, no callback and the TIMEUPDATE writer dead",
+    bookIndex: 7,
+    termination: "pagehide",
+    network: "online",
+    killLifecycleHandlers: true,
+    killMediaTickWriter: true,
+    resetBookFirst: true,
+    blocked: "timeupdate",
+    survivor: "the 200ms timer",
+  },
+];
+
+for (const spec of SINGLE_WRITER) {
+  test(`${spec.scenario}: ${spec.survivor} alone still bounds the loss`, async () => {
+    test.setTimeout(300_000);
+    const row = await measure(spec);
+    recordRow(row);
+    assertMeasured(row);
+
+    // Both poisons have to have BITTEN, or the row measured the ordinary build.
+    expect(
+      row.lifecycleBlocked,
+      `${row.scenario}: no lifecycle registration was taken away, so the pagehide flush was still ` +
+        "alive and this row is not measuring a single writer at all",
+    ).toContain("pagehide");
+    expect(
+      row.writersBlocked,
+      `${row.scenario}: the harness dropped no "${spec.blocked}" registration, so the writer this ` +
+        `row exists to delete was never deleted (dropped: ${JSON.stringify(row.writersBlocked)}). ` +
+        "Either the app stopped using that writer, or it changed how it schedules it — in which " +
+        "case this poison names nothing and its green is vacuous.",
+    ).toContain(spec.blocked);
+
+    // The ENGINE must still have been ticking, or "the app was deaf to the
+    // tick" is indistinguishable from "the media pipeline stalled". The probe
+    // registers on `window` with capture, before the block script runs, so this
+    // count is the platform's behaviour and not the app's.
+    expect(
+      row.ticks,
+      `${row.scenario}: the engine delivered no timeupdate events, so the media pipeline had ` +
+        "stopped and there was no position for either writer to record",
+    ).toBeGreaterThan(2);
+
+    // And the platform must still have delivered the lifecycle callback the app
+    // was made deaf to, same as B1/B2.
+    expect(
+      row.lifecycle.map((entry) => entry.split("@")[0]),
+      `${row.scenario}: the platform delivered no lifecycle callback at all, so this row is a ` +
+        "SIGKILL wearing a backgrounding's name rather than a deaf app",
+    ).not.toStrictEqual([]);
+
+    expect(
+      row.aheadMs,
+      `${row.scenario}: the app resumed ${row.aheadMs}ms AHEAD of where the user was`,
+    ).toBeLessThanOrEqual(AHEAD_BAR_MS);
+
+    expect(
+      row.driftMs,
+      `${row.scenario}: with no lifecycle callback and ${spec.blocked} deleted, ${spec.survivor} ` +
+        `was the only thing left recording the position — and the app came back ${row.behindMs}ms ` +
+        `behind (true ${row.truePositionMs}ms, resumed ${row.resumedPositionMs}ms, ${row.ticks} ` +
+        `ticks over ${row.playedMs}ms, ${row.durableWrites} durable writes at ` +
+        `${row.durableWritesPerSecond}/s). If this survivor cannot hold the position alone, then ` +
+        "a backgrounded listener loses their place whenever iOS takes the other one away, and " +
+        `the whole point of writing from two sources is gone. Bar ${CADENCE_ONLY_BAR_MS}ms.`,
+    ).toBeLessThanOrEqual(CADENCE_ONLY_BAR_MS);
+
+    expect(
+      row.shelf.sourceMs,
+      `${row.scenario}: the shelf had no position for this book at all`,
+    ).not.toBeNull();
+    expect(
+      row.shelfDriftMs,
+      `${row.scenario}: with ${spec.survivor} the only writer, the library card was ` +
+        `${row.shelfDriftMs}ms off the true position (card showed ${row.shelf.percent}%, ` +
+        `underlying ${row.shelf.sourceMs}ms, true ${row.truePositionMs}ms)`,
+    ).toBeLessThanOrEqual(CADENCE_ONLY_BAR_MS);
+
+    // A single writer must not be a FASTER writer either. Losing one source is
+    // not licence for the other to make up the difference in write volume.
+    expect(
+      row.durableWritesPerSecond,
+      `${row.scenario}: ${spec.survivor} wrote ${row.durableWrites} times in ` +
+        `${row.durableWriteWindowMs}ms — ${row.durableWritesPerSecond}/s — against a 200ms ` +
+        "minimum gap, so the surviving writer is not honouring the shared gate",
+    ).toBeLessThanOrEqual(WRITE_RATE_BAR_PER_SEC);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// W1 — what the second writer costs
+// ---------------------------------------------------------------------------
+
+test("W1: two writers must not mean two write rates, and a paused player must write nothing", async () => {
+  test.setTimeout(600_000);
+  const row = await measureDurableWriteRate({
+    scenario: "W1 durable write rate, playing and at rest",
+    bookIndex: 8,
+    playMs: 12_000,
+    pausedMs: 12_000,
+  });
+  recordRow(row);
+
+  expect(row.ticks, "W1: nothing played, so no rate was measured").toBeGreaterThan(2);
+  expect(
+    row.playedMs,
+    `W1: the position advanced ${row.playedMs}ms, which is not a listening session — a rate of ` +
+      "zero from a player that never played is not a pass",
+  ).toBeGreaterThan(4_000);
+  expect(row.playingWindowMs, "W1: the playing window was too short to divide by").toBeGreaterThan(
+    4_000,
+  );
+  expect(
+    row.pausedWindowMs,
+    "W1: the at-rest window was too short for an idle writer to show itself",
+  ).toBeGreaterThan(4_000);
+  // The rate has to be REAL before the ceiling means anything: a build that
+  // wrote nothing at all would sail under any upper bound.
+  expect(
+    row.writesWhilePlaying,
+    `W1: only ${row.writesWhilePlaying} durable writes over ${row.playingWindowMs}ms of playback. ` +
+      "The cadence is not being met at all, so the ceiling below is being applied to a build " +
+      "that has stopped recording the position.",
+  ).toBeGreaterThan(row.playingWindowMs / 1_000);
+
+  expect(
+    row.writesPerSecond,
+    `W1: the app wrote its durable position ${row.writesWhilePlaying} times in ` +
+      `${row.playingWindowMs}ms — ${row.writesPerSecond}/s. Two sources offer the position (the ` +
+      "200ms timer and the media element's tick, which fires up to 60Hz), and they share one " +
+      `gate precisely so this stays at one write per 200ms. Bar ${WRITE_RATE_BAR_PER_SEC}/s.`,
+  ).toBeLessThanOrEqual(WRITE_RATE_BAR_PER_SEC);
+
+  expect(
+    row.writesWhilePaused,
+    `W1: a PAUSED player performed ${row.writesWhilePaused} durable writes over ` +
+      `${row.pausedWindowMs}ms (${row.writesAroundPause} more were attributed to the pause ` +
+      "itself and its 800ms seek debounce, which are legitimate). A phone sitting in a pocket " +
+      "with this app open must write nothing at all; both writers refuse a paused element, so " +
+      "the correct number here is exactly zero.",
+  ).toBe(0);
+});
 
 // ---------------------------------------------------------------------------
 // S1 — the server left ahead of the user

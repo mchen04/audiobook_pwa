@@ -237,6 +237,23 @@ export type Row = {
    * nothing about the no-callback world.
    */
   lifecycleBlocked: string[];
+  /**
+   * Durable-position WRITERS the harness took away before the app could use
+   * them (`DURABLE_TIMER_BLOCK_SCRIPT`, `MEDIA_TICK_BLOCK_SCRIPT`). Empty on
+   * every ordinary row. A B3/B4 row whose list is empty measured the ordinary
+   * two-writer build and proves nothing about a single writer.
+   */
+  writersBlocked: string[];
+  /**
+   * The write RATE, measured over the listening window rather than claimed.
+   *
+   * Two writers is the shape that can silently double the rate, so every row
+   * carries the number. Counted from `PROBE_SCRIPT`'s `setItem` wrapper, over
+   * the window that begins when the audio was first observed advancing.
+   */
+  durableWrites: number;
+  durableWriteWindowMs: number;
+  durableWritesPerSecond: number;
   settleMs: number;
   settleTrail: number[];
   playbackRateBefore: number;
@@ -448,6 +465,23 @@ const PROBE_SCRIPT = `
     state.livePositionAtMs = Date.now();
     state.liveSamples += 1;
   }, ${TEARDOWN_SAMPLE_MS});
+  // THE WRITE RATE, COUNTED RATHER THAN ASSERTED.
+  //
+  // The app writes the durable position from two sources — a timer and the
+  // media element's \`timeupdate\` — precisely because iOS throttles those two
+  // through different machinery, and a page that is backgrounded may keep one
+  // and lose the other. Two sources is also the shape that can silently double
+  // the write rate, so every row carries the number instead of a claim, and
+  // \`W1\` grades it. Counting only, on the one key the player writes; the
+  // wrapper is a string comparison and does not perturb what it measures.
+  state.durableWrites = 0;
+  const setItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (key, value) {
+    if (typeof key === "string" && key.startsWith("chapterline:position:")) {
+      state.durableWrites += 1;
+    }
+    return setItem.call(this, key, value);
+  };
   // The harness's OWN documents never journal.
   //
   // The lifecycle journal answers "what did the APP's page see", and it is one
@@ -684,6 +718,98 @@ const LIFECYCLE_BLOCK_SCRIPT = `
   EventTarget.prototype.addEventListener = function (type, listener, options) {
     if (typeof type === "string" && doomed.has(type)) {
       blocked.push(type);
+      return undefined;
+    }
+    return original.call(this, type, listener, options);
+  };
+})();
+`;
+
+/**
+ * The app's own durable cadence, in milliseconds.
+ *
+ * Mirrored here because the two poisons below have to be able to NAME one of
+ * the app's writers, and this is the only handle the timer offers from outside
+ * the page: it schedules itself with exactly this delay, every time, and the
+ * app says so in a comment that points back at these rows. If the two ever
+ * drift apart, `assertWriterPoisonBit` fails loudly rather than letting B3 pass
+ * on a poison that bit nothing.
+ */
+const APP_DURABLE_INTERVAL_MS = 200;
+
+/**
+ * Kills the TIMER half of the durable position writer, leaving the media
+ * element's `timeupdate` as the only source.
+ *
+ * WHY THIS IS THE INTERESTING POISON. `setInterval`/`setTimeout` is exactly
+ * what iOS suspends or coalesces when a page is backgrounded, and a backgrounded
+ * audiobook is how this app is actually used. B1/B2 already bound "no lifecycle
+ * callback"; this bounds "no lifecycle callback AND no timer", which the
+ * comment on those rows explicitly records as the cell they do NOT cover. It is
+ * still not a real backgrounding — no instrument here can produce one — but it
+ * removes the same writer iOS would, so what is left is measured rather than
+ * assumed.
+ *
+ * HOW IT IDENTIFIES THE WRITER. By the scheduling delay, which is the only
+ * thing distinguishable from outside the page. Nothing else in `src/` schedules
+ * anything at 200 ms (checked: the other timers are 0, 500, 800, 2000, 3000,
+ * 4000, 30000 and the sleep timer's user-chosen value), and both timer
+ * primitives are covered so the poison cannot be defeated by swapping one for
+ * the other. A blocked callback is replaced by a real no-op timer, so an id is
+ * still returned and `clearTimeout` on it still behaves.
+ *
+ * THE APP ALSO SCHEDULES SHORTER CATCH-UP DELAYS, and this does not need to
+ * match them. Its cadence chain can only be STARTED at exactly this value —
+ * from the `play` handler, or from the effect finding an already-playing
+ * element — and the shorter delays are only ever scheduled from inside a
+ * callback that has already run. Block the start and nothing downstream is ever
+ * scheduled, so the writer is dead rather than slowed. The `writersBlocked`
+ * assertion in the spec is what keeps that honest if the app ever changes.
+ *
+ * Every drop is pushed onto `window.__writersBlocked`, which the row carries: a
+ * run where nothing was dropped measured the ordinary build, and its green
+ * would be vacuous.
+ */
+const DURABLE_TIMER_BLOCK_SCRIPT = `
+(() => {
+  const DELAY = ${APP_DURABLE_INTERVAL_MS};
+  const blocked = (window.__writersBlocked = window.__writersBlocked || []);
+  for (const name of ["setTimeout", "setInterval"]) {
+    const original = window[name];
+    window[name] = function (handler, delay, ...args) {
+      if (typeof handler === "function" && delay === DELAY) {
+        blocked.push(name + ":" + DELAY);
+        return original.call(this, () => {}, DELAY);
+      }
+      return original.call(this, handler, delay, ...args);
+    };
+  }
+})();
+`;
+
+/**
+ * Kills the TICK half, leaving the 200 ms timer as the only source.
+ *
+ * The symmetric proof. `timeupdate` is driven by the media pipeline, so it is
+ * the source most likely to survive a backgrounding — which is exactly why the
+ * app must not come to depend on it either. This drops every `timeupdate`
+ * registration the APP makes on a media element, so `onListeningTick` never
+ * runs: no durable write from the tick, and no 15 s server heartbeat.
+ *
+ * THE PROBE SURVIVES ON PURPOSE. `PROBE_SCRIPT` listens on `window` with
+ * capture and is added to the context before this is added to the page, so the
+ * row still counts real ticks and still knows the engine delivered them. That
+ * is what makes "the app was deaf to the tick" distinguishable from "the engine
+ * stopped ticking" — without it a green here could mean the media pipeline had
+ * simply stalled, and the row would say nothing.
+ */
+const MEDIA_TICK_BLOCK_SCRIPT = `
+(() => {
+  const blocked = (window.__writersBlocked = window.__writersBlocked || []);
+  const original = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (type === "timeupdate" && this instanceof HTMLMediaElement) {
+      blocked.push("timeupdate");
       return undefined;
     }
     return original.call(this, type, listener, options);
@@ -2182,6 +2308,18 @@ export type ScenarioSpec = {
    */
   killLifecycleHandlers?: boolean;
   /**
+   * Delete the TIMER half of the durable position writer, so the row measures
+   * what the media element's `timeupdate` preserves ON ITS OWN — the case where
+   * iOS has frozen the page's timers but the audio is still decoding. See
+   * `DURABLE_TIMER_BLOCK_SCRIPT`.
+   */
+  killDurableTimer?: boolean;
+  /**
+   * Delete the TICK half, so the row measures what the 200 ms timer preserves
+   * on its own. The symmetric proof. See `MEDIA_TICK_BLOCK_SCRIPT`.
+   */
+  killMediaTickWriter?: boolean;
+  /**
    * Put the book back to "never opened" on every witness before the row runs.
    *
    * `measure()` clears the SERVER row for isolation but deliberately leaves this
@@ -2199,7 +2337,14 @@ const LEDGER =
   process.env.HARK_RESUME_LEDGER ?? path.join(tmpdir(), "hark-resume-oracle", "rows.jsonl");
 
 export function recordRow(
-  row: Row | CumulativeRow | CrossBookRow | StaleAheadRow | CompletionRow | TwoDeviceRow,
+  row:
+    | Row
+    | CumulativeRow
+    | CrossBookRow
+    | StaleAheadRow
+    | CompletionRow
+    | TwoDeviceRow
+    | WriteRateRow,
 ): void {
   mkdirSync(path.dirname(LEDGER), { recursive: true });
   appendFileSync(LEDGER, `${JSON.stringify(row)}\n`, "utf8");
@@ -2307,7 +2452,25 @@ async function ageAbsenceMarker(
   );
 }
 
-async function playForReal(page: Page, playMs: number): Promise<{ startedAtMs: number }> {
+/** Writes per second, to two decimals. A zero-length window reads as 0. */
+function writesPerSecond(writes: number, windowMs: number): number {
+  if (windowMs <= 0) return 0;
+  return Math.round((writes / (windowMs / 1000)) * 100) / 100;
+}
+
+/** The probe's running count of durable local position writes on this page. */
+async function readDurableWrites(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const probe = (window as unknown as { __resumeProbe?: { durableWrites?: number } })
+      .__resumeProbe;
+    return probe?.durableWrites ?? 0;
+  });
+}
+
+async function playForReal(
+  page: Page,
+  playMs: number,
+): Promise<{ startedAtMs: number; playingSinceMs: number; durableWritesAtStart: number }> {
   const startedAtMs = await page.evaluate(() => {
     const audio = document.querySelector("audio");
     return audio ? audio.currentTime * 1000 : -1;
@@ -2328,8 +2491,15 @@ async function playForReal(page: Page, playMs: number): Promise<{ startedAtMs: n
       },
     )
     .toBeGreaterThan(startedAtMs + 500);
+  // The write-rate window opens HERE, not at the click: the tap, the poll and
+  // the first frames of decode are time in which nothing is playing, and
+  // folding them in would divide the same number of writes by a longer window
+  // and report a rate lower than the app's real one. The bound has to be an
+  // upper bound.
+  const durableWritesAtStart = await readDurableWrites(page);
+  const playingSinceMs = Date.now();
   await page.waitForTimeout(playMs);
-  return { startedAtMs };
+  return { startedAtMs, playingSinceMs, durableWritesAtStart };
 }
 
 /**
@@ -2372,6 +2542,12 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
     if (spec.killLifecycleHandlers) {
       await session.page.addInitScript({ content: LIFECYCLE_BLOCK_SCRIPT });
     }
+    if (spec.killDurableTimer) {
+      await session.page.addInitScript({ content: DURABLE_TIMER_BLOCK_SCRIPT });
+    }
+    if (spec.killMediaTickWriter) {
+      await session.page.addInitScript({ content: MEDIA_TICK_BLOCK_SCRIPT });
+    }
     if (spec.resetBookFirst) {
       await session.page.goto(`${origin}/library`, {
         waitUntil: "domcontentloaded",
@@ -2408,7 +2584,10 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       await proveOffline(session.page, origin);
     }
 
-    const { startedAtMs } = await playForReal(session.page, playMs);
+    const { startedAtMs, playingSinceMs, durableWritesAtStart } = await playForReal(
+      session.page,
+      playMs,
+    );
 
     // Liveness is "how far did this run actually play", which is NOT the same
     // as "where did it end up". A scenario that deliberately presses Back 15
@@ -2436,15 +2615,20 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
     const sampledAt = Date.now();
     const sample = await session.page.evaluate(() => {
       const audio = document.querySelector("audio");
-      const probe = (window as unknown as { __resumeProbe?: { ticks: number } }).__resumeProbe;
+      const probe = (
+        window as unknown as { __resumeProbe?: { ticks: number; durableWrites: number } }
+      ).__resumeProbe;
       return {
         positionMs: audio ? audio.currentTime * 1000 : -1,
         paused: audio?.paused ?? true,
         ticks: probe?.ticks ?? 0,
+        durableWrites: probe?.durableWrites ?? 0,
         // Read from the page that is about to die, so a backstop row carries
         // proof that the app really did try to register the handlers this run
         // took away from it.
         blocked: (window as unknown as { __lifecycleBlocked?: string[] }).__lifecycleBlocked ?? [],
+        writersBlocked:
+          (window as unknown as { __writersBlocked?: string[] }).__writersBlocked ?? [],
         // The page's own clock, so a position can be carried forward to an
         // instant the PAGE timestamped (its unload) rather than to one this
         // process timestamped.
@@ -2813,6 +2997,13 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       hiddenTransition,
       visibilityAtCallback,
       lifecycleBlocked: sample.blocked,
+      writersBlocked: sample.writersBlocked,
+      durableWrites: sample.durableWrites - durableWritesAtStart,
+      durableWriteWindowMs: Math.round(sampleReturnedAt - playingSinceMs),
+      durableWritesPerSecond: writesPerSecond(
+        sample.durableWrites - durableWritesAtStart,
+        sampleReturnedAt - playingSinceMs,
+      ),
       settleMs: settled.settleMs,
       settleTrail: settled.trail,
       playbackRateBefore: rate,
@@ -2829,6 +3020,157 @@ export async function measure(spec: ScenarioSpec): Promise<Row> {
       teardownWitnessAgeMs,
       teardownWitnessSamples: teardownWitness.samples,
       sessionSurvived,
+      notes,
+    };
+  } finally {
+    net.restore();
+    await session.page.close().catch(() => undefined);
+    await healDevice(origin, media);
+  }
+}
+
+/** W1's row: the durable write rate, playing and at rest. */
+export type WriteRateRow = {
+  scenario: string;
+  engine: Engine;
+  buildId: string;
+  bookTitle: string;
+  ticks: number;
+  playedMs: number;
+  writesWhilePlaying: number;
+  playingWindowMs: number;
+  writesPerSecond: number;
+  /** Writes the pause itself performed. Excluded from `writesWhilePaused`. */
+  writesAroundPause: number;
+  writesWhilePaused: number;
+  pausedWindowMs: number;
+  notes: string[];
+};
+
+/**
+ * What the two writers cost, measured — playing, and then at rest.
+ *
+ * WHY THIS ROW EXISTS. Writing the durable position from two sources is the
+ * change B3/B4 grade the benefit of; this is the one that grades its PRICE. A
+ * second writer is exactly the shape that silently doubles a write rate on
+ * somebody's flash, and "we deduplicated it" is a claim, not a measurement. So
+ * the number is taken off the page's own `setItem` calls, over a window that
+ * begins only once the audio was observed advancing, and it is graded.
+ *
+ * AND THEN AT REST, which is the half a rate alone cannot show. Five writes per
+ * second while a book is playing is nothing next to the audio decode already
+ * running; five writes per second for the eight hours a phone sits in a pocket
+ * with the app open would be indefensible. Both writers refuse a paused
+ * element, so the correct number here is exactly zero, and anything above it is
+ * a defect however small the playing rate is.
+ *
+ * The pause itself performs one legitimate durable write (the `pause` event's
+ * `persistProgress`), and the seek debounce is 800 ms, so the at-rest window
+ * opens after a settling period and those are attributed to the pause rather
+ * than to rest.
+ */
+export async function measureDurableWriteRate(spec: {
+  scenario: string;
+  bookIndex: number;
+  playMs?: number;
+  pausedMs?: number;
+}): Promise<WriteRateRow> {
+  const active = fixture;
+  expect(active, "resumeFixture() was never built").toBeTruthy();
+  const { userId, origin, net, books } = active!;
+  const bookTitle = bookTitleFor(spec.bookIndex);
+  const book = books.get(bookTitle);
+  expect(book, `no book was imported for scenario "${spec.scenario}"`).toBeTruthy();
+  const bookId = book!.id;
+  await sql()`DELETE FROM playback_states WHERE book_id = ${bookId}`;
+
+  const playMs = spec.playMs ?? 10_000;
+  const pausedMs = spec.pausedMs ?? 10_000;
+  /** Long enough for the pause write and the 800 ms seek debounce to land. */
+  const PAUSE_SETTLE_MS = 2_000;
+  const notes: string[] = [];
+
+  net.restore();
+  net.reset();
+
+  let media: CacheSnapshot | null = null;
+  const session = await launch();
+  try {
+    await preflightDevice(session.page, origin);
+    await session.page.goto(`${origin}/library`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await session.page.waitForSelector("[data-launch-ready]", {
+      state: "attached",
+      timeout: 90_000,
+    });
+    await resetBookEverywhere(session.page, userId, bookId);
+    await openPlayer(session.page, origin, bookId, bookTitle);
+    media = await snapshotCaches(session.page);
+
+    const { startedAtMs, playingSinceMs, durableWritesAtStart } = await playForReal(
+      session.page,
+      playMs,
+    );
+    const playing = await session.page.evaluate(() => {
+      const audio = document.querySelector("audio");
+      const probe = (
+        window as unknown as { __resumeProbe?: { ticks: number; durableWrites: number } }
+      ).__resumeProbe;
+      return {
+        positionMs: audio ? audio.currentTime * 1000 : -1,
+        paused: audio?.paused ?? true,
+        ticks: probe?.ticks ?? 0,
+        durableWrites: probe?.durableWrites ?? 0,
+      };
+    });
+    const playingWindowMs = Date.now() - playingSinceMs;
+    expect(
+      playing.paused,
+      `${spec.scenario}: the audio was not playing at the end of the play window, so the rate ` +
+        "below is not a listening rate",
+    ).toBe(false);
+
+    const writesWhilePlaying = playing.durableWrites - durableWritesAtStart;
+
+    // Paused the way the user does, so the app runs its own pause handler and
+    // the one legitimate write that comes with it.
+    await pauseThroughUi(session.page);
+    await session.page.waitForTimeout(PAUSE_SETTLE_MS);
+    const atRestStart = await readDurableWrites(session.page);
+    const pausedFrom = Date.now();
+    await session.page.waitForTimeout(pausedMs);
+    const atRestEnd = await readDurableWrites(session.page);
+    const pausedWindowMs = Date.now() - pausedFrom;
+    // A paused element must still be paused, or "no writes" would only mean the
+    // book had started playing again and there was nothing to measure.
+    expect(
+      await session.page.evaluate(() => {
+        const all = [...document.querySelectorAll("audio")];
+        return all.length > 0 && all.every((element) => element.paused);
+      }),
+      `${spec.scenario}: the player was not paused across the at-rest window`,
+    ).toBe(true);
+
+    notes.push(
+      `${writesWhilePlaying} writes over ${playingWindowMs}ms of playback; ` +
+        `${atRestEnd - atRestStart} over ${pausedWindowMs}ms paused`,
+    );
+
+    return {
+      scenario: spec.scenario,
+      engine: ENGINE,
+      buildId: BUILD_ID,
+      bookTitle,
+      ticks: playing.ticks,
+      playedMs: Math.round(playing.positionMs - startedAtMs),
+      writesWhilePlaying,
+      playingWindowMs: Math.round(playingWindowMs),
+      writesPerSecond: writesPerSecond(writesWhilePlaying, playingWindowMs),
+      writesAroundPause: atRestStart - playing.durableWrites,
+      writesWhilePaused: atRestEnd - atRestStart,
+      pausedWindowMs: Math.round(pausedWindowMs),
       notes,
     };
   } finally {
