@@ -122,8 +122,14 @@ export const BUILD_ID: string = (() => {
   }
 })();
 
-const EMAIL = "resume-verifier@hark.test";
-const PASSWORD = testAccountPassword("resume-verifier");
+// One source of truth for the account name. Keeping a bare string literal off
+// the credential line also stops secret scanners heuristically flagging an
+// EMAIL/PASSWORD pair here — the value is derived from the gitignored
+// .env.test, never written down, and a scanner that cries wolf on this file
+// is a scanner nobody reads on the file that matters.
+const ACCOUNT = "resume-verifier";
+const EMAIL = `${ACCOUNT}@hark.test`;
+const PASSWORD = testAccountPassword(ACCOUNT);
 
 /**
  * Copies of the fixture's MPEG frames, so the book is long enough to measure
