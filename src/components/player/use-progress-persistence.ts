@@ -13,7 +13,7 @@ import {
   withProgressMutationLock,
 } from "@/lib/offline-sync";
 import { commitProgress, mirrorProgress } from "@/lib/offline/outbox";
-import { getDeviceId, saveLocalPlaybackState } from "@/lib/playback-core";
+import { getDeviceId, saveLocalPlaybackState, type PlaybackWriteSource } from "@/lib/playback-core";
 
 /**
  * The MINIMUM GAP between two cadence-driven durable local writes — and, since
@@ -131,9 +131,21 @@ export function useProgressPersistence(
    * The synchronous durable write. No await before the `setItem`, by contract:
    * a `pagehide`/`visibilitychange` handler on iOS gets one task and may never
    * get a continuation.
+   *
+   * `source` names the MECHANISM that produced this write and leads the
+   * signature so that no path can reach the durable record anonymously — the
+   * whole point of the provenance is that a record with no `source` means the
+   * build is old, not that a writer forgot to say who it was. It is metadata
+   * riding along on a write that was happening anyway: nothing about what is
+   * written, or when, depends on it.
    */
   const saveDurableState = useCallback(
-    (positionMs?: number, completed?: boolean, bookOverride?: PlayerBook) => {
+    (
+      source: PlaybackWriteSource,
+      positionMs?: number,
+      completed?: boolean,
+      bookOverride?: PlayerBook,
+    ) => {
       const activeBook = bookOverride || activeBookRef.current;
       if (!activeBook) return;
       if (completed !== undefined) completionRef.current.set(activeBook.id, completed);
@@ -146,6 +158,7 @@ export function useProgressPersistence(
         positionMs: position,
         playbackRate: audio?.playbackRate || 1,
         completed: completed ?? completionRef.current.get(activeBook.id) ?? activeBook.completed,
+        source,
       });
     },
     [activeBookRef, audioRef, userId],
@@ -164,11 +177,11 @@ export function useProgressPersistence(
    * because the tick's own value is the one the engine reported.
    */
   const writeDurableIfDue = useCallback(
-    (positionMs: number) => {
+    (source: PlaybackWriteSource, positionMs: number) => {
       const audio = audioRef.current;
       if (!audio || audio.paused || !activeBookRef.current) return;
       if (Date.now() - lastDurableWriteAtRef.current < DURABLE_SAVE_INTERVAL_MS) return;
-      saveDurableState(positionMs, false);
+      saveDurableState(source, positionMs, false);
     },
     [activeBookRef, audioRef, saveDurableState],
   );
@@ -267,8 +280,13 @@ export function useProgressPersistence(
    * nothing here for a caller to recover from.
    */
   const persistProgress = useCallback(
-    (positionMs: number, completed?: boolean, bookOverride?: PlayerBook) => {
-      saveDurableState(positionMs, completed, bookOverride);
+    (
+      source: PlaybackWriteSource,
+      positionMs: number,
+      completed?: boolean,
+      bookOverride?: PlayerBook,
+    ) => {
+      saveDurableState(source, positionMs, completed, bookOverride);
       return sendProgress(positionMs, completed, bookOverride).catch(() => undefined);
     },
     [saveDurableState, sendProgress],
@@ -290,10 +308,10 @@ export function useProgressPersistence(
   const onListeningTick = useCallback(
     (positionMs: number) => {
       if (!activeBookRef.current) return;
-      writeDurableIfDue(positionMs);
+      writeDurableIfDue("media-tick", positionMs);
       if (Date.now() - lastServerSaveRef.current > SERVER_SAVE_INTERVAL_MS) {
         lastServerSaveRef.current = Date.now();
-        void persistProgress(positionMs, false);
+        void persistProgress("media-tick", positionMs, false);
       }
     },
     [activeBookRef, persistProgress, writeDurableIfDue],
@@ -358,7 +376,7 @@ export function useProgressPersistence(
         timer = window.setTimeout(tick, remaining);
         return;
       }
-      writeDurableIfDue(element.currentTime * 1000);
+      writeDurableIfDue("cadence-timer", element.currentTime * 1000);
       timer = window.setTimeout(tick, DURABLE_SAVE_INTERVAL_MS);
     };
     const start = () => {
@@ -411,26 +429,31 @@ export function useProgressPersistence(
      * `"visible"` to this handler. `pagehide` stays unconditional: it is
      * terminal whatever the visibility is, including a foreground navigation.
      */
-    const flush = () => {
+    const flush = (source: PlaybackWriteSource) => {
       const audio = audioRef.current;
       if (!audio || !activeBookRef.current) return;
       // `persistProgress` IS the synchronous-durable-write-then-server-write
       // order this handler needs, and it is the one place that keeps the server
       // half from rejecting onto a page that is already going away.
-      void persistProgress(audio.currentTime * 1000);
+      void persistProgress(source, audio.currentTime * 1000);
     };
+    // The two edges record themselves separately because they answer different
+    // questions on a phone: `visibility-flush` says the page was backgrounded
+    // and then nothing else wrote, while `pagehide-flush` says the page was
+    // navigated away from or torn down. An app-switcher kill delivers neither.
     const flushIfHiding = () => {
       if (document.visibilityState !== "hidden") return;
-      flush();
+      flush("visibility-flush");
     };
+    const flushOnPagehide = () => flush("pagehide-flush");
     document.addEventListener("visibilitychange", flushIfHiding);
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", flushOnPagehide);
     const replay = () => void replayQueuedMutations(userId);
     if (navigator.onLine) replay();
     window.addEventListener("online", replay);
     return () => {
       document.removeEventListener("visibilitychange", flushIfHiding);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", flushOnPagehide);
       window.removeEventListener("online", replay);
     };
   }, [activeBookRef, audioRef, persistProgress, userId]);

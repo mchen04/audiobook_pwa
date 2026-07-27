@@ -57,17 +57,49 @@ the length of the background listen.
 4. Without unlocking, force-quit the app: swipe up into the app switcher and flick it away.
    (Force-quitting is deliberate — it denies the app any chance to write on the way out, so
    what you see is exactly what had already been saved.)
-5. Reopen the app and read the position.
+5. Reopen the app and go to **Settings ▸ Resume diagnostics**. It prints one line: the last
+   position this device saved, **which writer saved it**, and how long ago. That line is the
+   answer — you do not have to infer it from where the book resumes.
 
-**Interpreting it:**
+   ```
+   32:07 · written by cadence-timer · 2s ago
+   ```
+
+**Interpreting the writer:**
+
+| `written by`                                                          | what it means                                                                                                                           | verdict        |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `media-tick`                                                          | the media pipeline's `timeupdate` kept firing while backgrounded                                                                        | **pass**       |
+| `cadence-timer`                                                       | the 200 ms timer kept firing while backgrounded                                                                                         | **pass**       |
+| `visibility-flush` / `pagehide-flush`                                 | the last write was the lifecycle handler at the moment the screen locked — **both cadence writers were suspended for the whole listen** | **fail**       |
+| `pause`, `seek`, `rate-change`, `ended`, `book-switch`, `book-unload` | the listen you meant to measure did not happen, or you touched the transport                                                            | redo the check |
+| `written by an earlier build`                                         | the build on the phone predates this readout                                                                                            | reinstall      |
+
+A **pass** needs both halves: a writer of `media-tick` or `cadence-timer` **and** an age of a
+few seconds, not five minutes. A recent age with `visibility-flush` means something wrote on
+the way back in — foreground the app as little as possible before opening Settings, and
+redo the check if in doubt.
+
+**Cross-check against the resumed position**, which must still agree:
 
 - Resumes within a few seconds of where the audio actually got to → at least one writer
   survives backgrounding. Nothing to do; the residual is closed.
 - Resumes near the **30-second** mark — i.e. roughly where the screen locked, having lost
   the whole 5 minutes → both writers are suspended. Report that; it is a real defect and the
   fix would be to record the position from a source that survives suspension.
-- Resumes **ahead** of where the audio was → report immediately. Skipping content the user
-  never heard is treated as a blocker in this codebase regardless of size.
+- Resumes **ahead** of where the audio was → report immediately, whatever the readout says.
+  Skipping content the user never heard is treated as a blocker in this codebase regardless
+  of size.
+
+If the writer says pass and the position says fail (or the reverse), report **that** — the two
+disagreeing is itself a defect, and the readout is the one making a claim about mechanism.
+
+The readout reads `chapterline:position:*` in `localStorage`: `source` names the mechanism
+that performed the write, and `writtenAt` is the wall clock at the moment of the write. It is
+deliberately NOT `occurredAt`, which means "when this position was reached" and is preserved
+across re-writes that carry no new position — see `momentThisPositionWasReached` in
+`src/lib/playback-core.ts`. Both fields are optional, so records written by older builds still
+parse; they simply cannot answer this question.
 
 Run it once on wifi and once in airplane mode. Airplane mode matters because the server
 write is unavailable there, so the local write is the only thing standing between you and a

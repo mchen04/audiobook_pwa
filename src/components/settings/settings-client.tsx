@@ -3,10 +3,12 @@
 import { ArrowLeft, DownloadSimple, Trash } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 import { usePlayback } from "@/components/player/playback-provider";
+import { formatClock } from "@/lib/format-time";
 import { purgeAccount } from "@/lib/offline/account-purge";
+import { readLatestLocalPlayback } from "@/lib/playback-core";
 import { SKIP_CHOICES_MS } from "@/lib/preferences";
 
 export function SettingsClient({ email }: { email: string }) {
@@ -128,6 +130,8 @@ export function SettingsClient({ email }: { email: string }) {
         </p>
       </section>
 
+      <ResumeDiagnostics userId={userId} />
+
       <section className="settings-group" aria-labelledby="settings-data-title">
         <h2 id="settings-data-title">Your data</h2>
         <p className="details-hint">
@@ -174,4 +178,70 @@ export function SettingsClient({ email }: { email: string }) {
       </section>
     </section>
   );
+}
+
+/**
+ * The provenance of this device's most recent durable position, in plain text.
+ *
+ * This is a readout, not a feature. It exists so the on-device check in
+ * `docs/resume-durability-device-check.md` can be READ rather than inferred: the
+ * one open question about resume durability is whether iOS suspends both
+ * durable writers at once while a PWA plays in the background, and no
+ * instrument on a development machine can answer it. After a backgrounded
+ * listen, the writer named here and the age of its write answer it directly.
+ *
+ * Read on mount only. The record is written by the player, not by this page, so
+ * there is nothing here to keep live — and mount is exactly the moment the check
+ * asks about, since the user relaunches the app and comes straight here.
+ */
+function ResumeDiagnostics({ userId }: { userId: string }) {
+  // localStorage does not exist during the server render, so the first client
+  // render has to match it and the read happens after mount.
+  const [readout, setReadout] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    // Off the effect body, as everywhere else this app reads a client-only
+    // store into React state: setting state synchronously in an effect cascades
+    // renders, and the value cannot be read during render because it does not
+    // exist on the server.
+    void Promise.resolve()
+      .then(() => {
+        if (active) setReadout(describeLatestWrite(userId));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  return (
+    <section className="settings-group" aria-labelledby="settings-diagnostics-title">
+      <h2 id="settings-diagnostics-title">Resume diagnostics</h2>
+      <p className="details-hint">
+        The most recent playback position saved on this device, and which part of the app saved it.
+      </p>
+      <p className="resume-diagnostics">{readout ?? "Reading this device…"}</p>
+    </section>
+  );
+}
+
+function describeLatestWrite(userId: string): string {
+  const latest = readLatestLocalPlayback(userId);
+  if (!latest) return "No position saved on this device yet.";
+  const { positionMs, source, writtenAt } = latest.state;
+  return [
+    formatClock(positionMs),
+    source ? `written by ${source}` : "written by an earlier build, which recorded no writer",
+    writtenAt ? formatAge(Date.now() - writtenAt) : "at an unrecorded time",
+  ].join(" · ");
+}
+
+function formatAge(ageMs: number): string {
+  const seconds = Math.max(0, Math.round(ageMs / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m ago`;
 }

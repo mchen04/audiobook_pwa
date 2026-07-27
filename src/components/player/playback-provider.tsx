@@ -243,7 +243,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         markPausedNow(userId, activeBookRef.current.id);
         trackerRef.current.end(activeBookRef.current.id, positionMs);
       }
-      void persistProgress(positionMs);
+      void persistProgress("pause", positionMs);
       recordAction("pause", positionMs);
     };
     const markEnded = () => {
@@ -251,7 +251,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       const endPositionMs = activeBookRef.current?.durationMs || audio.currentTime * 1000;
       if (activeBookRef.current) trackerRef.current.end(activeBookRef.current.id, endPositionMs);
       markPositionChanged();
-      void persistProgress(endPositionMs, true);
+      void persistProgress("ended", endPositionMs, true);
       recordAction("finished", endPositionMs);
       setLastEndedAt(Date.now());
     };
@@ -325,8 +325,8 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
             // actually has (`completionRef`, then `previousBook.completed`), so
             // switching books records where the user was without ever making a
             // claim about whether they finished it.
-            saveDurableState(previousPositionMs, undefined, previousBook);
-            void persistProgress(previousPositionMs, undefined, previousBook);
+            saveDurableState("book-switch", previousPositionMs, undefined, previousBook);
+            void persistProgress("book-switch", previousPositionMs, undefined, previousBook);
             cancelSeekPersist();
             if (!audio.paused) audio.pause();
             trackerRef.current.end(previousBook.id, previousPositionMs);
@@ -403,7 +403,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         // The rate is part of durable playback state, so it survives reloads
         // even when changed while paused.
         markPositionChanged();
-        void persistProgress((audioRef.current?.currentTime || 0) * 1000);
+        void persistProgress("rate-change", (audioRef.current?.currentTime || 0) * 1000);
         recordAction("playback_rate", undefined, null, `${bounded}×`);
       },
       setSleepMinutes(minutes: number) {
@@ -431,8 +431,8 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         // `currentTime`, so there is nothing left to read afterwards either.
         if (audio && activeBookRef.current) {
           const positionMs = audio.currentTime * 1000;
-          saveDurableState(positionMs);
-          void persistProgress(positionMs);
+          saveDurableState("book-unload", positionMs);
+          void persistProgress("book-unload", positionMs);
         }
         cancelSeekPersist();
         if (audio) {

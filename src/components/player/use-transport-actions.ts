@@ -3,6 +3,7 @@
 import { RefObject, useMemo, useRef } from "react";
 
 import type { PlaybackAction, PlayerBook, PlayerChapter } from "@/domain/player";
+import type { PlaybackWriteSource } from "@/lib/playback-core";
 
 import type { PlaybackTimeStore } from "./playback-time-store";
 
@@ -27,12 +28,18 @@ export function useTransportActions({
   suppressNextPauseRef: RefObject<boolean>;
   timeStore: PlaybackTimeStore;
   persistProgress: (
+    source: PlaybackWriteSource,
     positionMs: number,
     completed?: boolean,
     bookOverride?: PlayerBook,
   ) => Promise<void>;
   /** Synchronous durable write; see `use-progress-persistence`. */
-  saveDurableState: (positionMs?: number, completed?: boolean, bookOverride?: PlayerBook) => void;
+  saveDurableState: (
+    source: PlaybackWriteSource,
+    positionMs?: number,
+    completed?: boolean,
+    bookOverride?: PlayerBook,
+  ) => void;
   markPositionChanged: () => void;
   recordAction: (
     action: PlaybackAction,
@@ -57,7 +64,7 @@ export function useTransportActions({
       seekPersistTimerRef.current = window.setTimeout(() => {
         seekPersistTimerRef.current = null;
         const audio = audioRef.current;
-        if (audio && activeBookRef.current) void persistProgress(audio.currentTime * 1000);
+        if (audio && activeBookRef.current) void persistProgress("seek", audio.currentTime * 1000);
       }, 800);
     };
     const seekWithAction = (
@@ -90,7 +97,7 @@ export function useTransportActions({
       // `cancelSeekPersist` — seek while paused, then leave the player, and
       // there was no `pause` event coming to save it either.
       markPositionChanged();
-      saveDurableState(settledMs);
+      saveDurableState("seek", settledMs);
       persistSeekSoon();
       recordAction(action, settledMs, previousPositionMs, description);
     };
@@ -140,7 +147,7 @@ export function useTransportActions({
           audio.currentTime = activeBook.durationMs / 1000;
           timeStore.write(activeBook.durationMs);
           markPositionChanged();
-          void persistProgress(activeBook.durationMs, true);
+          void persistProgress("ended", activeBook.durationMs, true);
           recordAction("finished", activeBook.durationMs);
         },
         restart() {
@@ -151,7 +158,7 @@ export function useTransportActions({
           audio.currentTime = 0;
           timeStore.write(0);
           markPositionChanged();
-          void persistProgress(0, false);
+          void persistProgress("seek", 0, false);
           recordAction("restarted", 0, previousPositionMs);
         },
       },

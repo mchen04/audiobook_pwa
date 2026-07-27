@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlayerChapter } from "@/domain/player";
 
@@ -6,6 +6,7 @@ import {
   freshestPosition,
   isChapterEnding,
   localWinsOver,
+  readLatestLocalPlayback,
   readLocalPosition,
   readLocalProgress,
   resolveStartPosition,
@@ -210,6 +211,160 @@ describe("local playback state", () => {
         positionMs: 6_793,
         occurredAt: 25_000,
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Provenance on the durable record — the two fields that let a person settle
+ * `docs/resume-durability-device-check.md` by reading the app instead of
+ * inferring from a resumed position.
+ */
+describe("durable write provenance", () => {
+  const KEY = "chapterline:position:user-a:book-1";
+
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      get length() {
+        return store.size;
+      },
+      key: (index: number) => [...store.keys()][index] ?? null,
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as Storage);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("round-trips the mechanism that wrote the record", () => {
+    saveLocalPlaybackState("user-a", "book-1", { positionMs: 1_000, source: "cadence-timer" });
+    expect(readLocalProgress("user-a", "book-1")?.source).toBe("cadence-timer");
+  });
+
+  /**
+   * The readout in Settings renders this verbatim, so a value this build does
+   * not write is dropped rather than shown. Absent reads as "unknown", which is
+   * the truth; a stray string would read as a writer that does not exist.
+   */
+  it("drops a source the current build does not write", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ positionMs: 1_000, occurredAt: 5_000, source: "carrier-pigeon" }),
+    );
+    expect(readLocalProgress("user-a", "book-1")?.source).toBeUndefined();
+    expect(readLocalProgress("user-a", "book-1")?.positionMs).toBe(1_000);
+  });
+
+  /**
+   * THE X3 INVARIANT, restated now that a second timestamp exists beside it.
+   *
+   * `occurredAt` answers "when was this position reached" and must stay frozen
+   * across a re-write that carries no new position — re-stamping it is how a
+   * stale tab overrules another device's real listening. `writtenAt` answers
+   * "when did something last write this record" and must move every time.
+   *
+   * They are pinned together here because the cheap mistake is to satisfy the
+   * new field by reusing the old one, which silently reintroduces the
+   * cross-device regression the frozen `occurredAt` exists to prevent.
+   */
+  it("advances writtenAt on a re-write while occurredAt stays where the listening was", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(10_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_793, source: "pause" });
+      expect(readLocalProgress("user-a", "book-1")).toMatchObject({
+        occurredAt: 10_000,
+        writtenAt: 10_000,
+      });
+
+      // The terminal flush 15 seconds later: same position, no new listening.
+      vi.setSystemTime(new Date(25_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_793, source: "pagehide-flush" });
+      const afterFlush = readLocalProgress("user-a", "book-1")!;
+      expect(
+        afterFlush.occurredAt,
+        "occurredAt moved on a write that carried no new position, which is exactly the " +
+          "cross-device regression X3 measured",
+      ).toBe(10_000);
+      expect(
+        afterFlush.writtenAt,
+        "writtenAt did not move, so the record cannot say how long ago something last wrote it " +
+          "— which is the whole question the device check asks",
+      ).toBe(25_000);
+      expect(afterFlush.source).toBe("pagehide-flush");
+      // And the frozen moment still loses to a newer server record.
+      expect(localWinsOver(afterFlush, new Date(20_000).toISOString())).toBe(false);
+
+      // A write that DOES move the position moves both.
+      vi.setSystemTime(new Date(30_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 6_794, source: "media-tick" });
+      expect(readLocalProgress("user-a", "book-1")).toMatchObject({
+        occurredAt: 30_000,
+        writtenAt: 30_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Both fields are optional and there is no IndexedDB migration, so every
+   * record written by a shipped build has to keep parsing and resuming exactly
+   * as it did — including the pre-v2 bare-number form.
+   */
+  it("still parses and resumes a record written before provenance existed", () => {
+    localStorage.setItem(KEY, JSON.stringify({ positionMs: 42_000, occurredAt: 9_000 }));
+    const record = readLocalProgress("user-a", "book-1")!;
+    expect(record).toStrictEqual({ positionMs: 42_000, occurredAt: 9_000 });
+    expect(record.source).toBeUndefined();
+    expect(record.writtenAt).toBeUndefined();
+    expect(
+      freshestPosition({
+        local: record,
+        serverPositionMs: 8_000,
+        serverOccurredAt: new Date(3_000).toISOString(),
+      }),
+      "a record with no provenance stopped winning against an older server position",
+    ).toBe(42_000);
+
+    localStorage.setItem("chapterline:position:user-a:book-2", "7000");
+    expect(readLocalProgress("user-a", "book-2")).toStrictEqual({
+      positionMs: 7_000,
+      occurredAt: 0,
+    });
+  });
+
+  /**
+   * The settings readout names ONE book, so it has to be the one written last.
+   * Ordering by `occurredAt` would name the wrong one, because that field is
+   * deliberately frozen on re-writes.
+   */
+  it("finds the most recently written book, not the most recently reached position", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(10_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 500, source: "seek" });
+      vi.setSystemTime(new Date(20_000));
+      saveLocalPlaybackState("user-a", "book-2", { positionMs: 900, source: "media-tick" });
+      // book-1 is re-written last but at a position it already held, so its
+      // `occurredAt` stays at 10_000 while its `writtenAt` becomes the newest.
+      vi.setSystemTime(new Date(30_000));
+      saveLocalPlaybackState("user-a", "book-1", { positionMs: 500, source: "visibility-flush" });
+
+      const latest = readLatestLocalPlayback("user-a");
+      expect(latest?.bookId).toBe("book-1");
+      expect(latest?.state).toMatchObject({
+        source: "visibility-flush",
+        writtenAt: 30_000,
+        occurredAt: 10_000,
+      });
+      expect(readLatestLocalPlayback("user-b")).toBeNull();
     } finally {
       vi.useRealTimers();
     }

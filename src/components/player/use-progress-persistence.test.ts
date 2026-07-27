@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { renderHook } from "@testing-library/react";
+import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlayerBook } from "@/domain/player";
@@ -93,7 +93,7 @@ describe("the server half of a progress write", () => {
   it("projects an accepted write to the shelf and journals nothing", async () => {
     respondWith(200);
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(mirrorProgress).toHaveBeenCalledOnce();
     expect(commitProgress).not.toHaveBeenCalled();
   });
@@ -101,7 +101,7 @@ describe("the server half of a progress write", () => {
   it("journals a retryable rejection and projects nothing", async () => {
     respondWith(503);
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(commitProgress).toHaveBeenCalledOnce();
     expect(mirrorProgress).not.toHaveBeenCalled();
   });
@@ -118,7 +118,7 @@ describe("the server half of a progress write", () => {
     it(`neither projects nor journals a permanently refused write (${status})`, async () => {
       respondWith(status);
       const result = mountHook();
-      await result.current.persistProgress(12_000);
+      await result.current.persistProgress("pause", 12_000);
       expect(
         mirrorProgress,
         `a ${status} is a refusal; mirroring it tells this device's shelf the server holds a ` +
@@ -135,7 +135,7 @@ describe("the server half of a progress write", () => {
   it("journals a write that never reached a server", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Load failed")));
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(commitProgress).toHaveBeenCalledOnce();
     expect(mirrorProgress).not.toHaveBeenCalled();
   });
@@ -150,7 +150,7 @@ describe("the server half of a progress write", () => {
     respondWith(200);
     mirrorProgress.mockRejectedValue(new Error("QuotaExceededError"));
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(mirrorProgress).toHaveBeenCalledOnce();
     expect(
       commitProgress,
@@ -166,7 +166,7 @@ describe("the server half of a progress write", () => {
     respondWith(503);
     commitProgress.mockRejectedValue(new Error("QuotaExceededError"));
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(commitProgress).toHaveBeenCalledOnce();
   });
 
@@ -182,14 +182,14 @@ describe("the server half of a progress write", () => {
     // with the database evicted it is the first thing to throw.
     vi.mocked(nextDeviceSequence).mockRejectedValueOnce(new Error("InvalidStateError"));
     const result = mountHook();
-    await expect(result.current.persistProgress(12_000)).resolves.toBeUndefined();
+    await expect(result.current.persistProgress("pause", 12_000)).resolves.toBeUndefined();
   });
 
   it("still writes the durable local position when the server half throws", async () => {
     respondWith(200);
     vi.mocked(nextDeviceSequence).mockRejectedValueOnce(new Error("InvalidStateError"));
     const result = mountHook();
-    await result.current.persistProgress(12_000);
+    await result.current.persistProgress("pause", 12_000);
     expect(JSON.parse(localStorage.getItem("chapterline:position:user-a:book-1")!)).toMatchObject({
       positionMs: 12_000,
     });
@@ -224,9 +224,13 @@ describe("the durable cadence, with two sources", () => {
   }
 
   let writes: number[];
+  /** The full record behind each write, for the provenance rows. */
+  let records: Array<{ positionMs: number; source?: string }>;
+  const sources = () => records.map((record) => record.source);
 
   beforeEach(() => {
     writes = [];
+    records = [];
     const store = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       get length() {
@@ -235,7 +239,11 @@ describe("the durable cadence, with two sources", () => {
       key: (index: number) => [...store.keys()][index] ?? null,
       getItem: (key: string) => store.get(key) ?? null,
       setItem: (key: string, value: string) => {
-        if (key === KEY) writes.push((JSON.parse(value) as { positionMs: number }).positionMs);
+        if (key === KEY) {
+          const record = JSON.parse(value) as { positionMs: number; source?: string };
+          writes.push(record.positionMs);
+          records.push(record);
+        }
         store.set(key, value);
       },
       removeItem: (key: string) => void store.delete(key),
@@ -374,7 +382,7 @@ describe("the durable cadence, with two sources", () => {
     // which is exactly what the flush and the heartbeat do.
     listen(audio, result, { ms: 1_000, tickMs: null });
     vi.advanceTimersByTime(90);
-    result.current.saveDurableState(audio.currentTime * 1000);
+    result.current.saveDurableState("visibility-flush", audio.currentTime * 1000);
     listen(audio, result, { ms: 2_000, tickMs: null });
 
     const gaps = at.slice(1).map((value, index) => value - at[index]!);
@@ -409,6 +417,41 @@ describe("the durable cadence, with two sources", () => {
     unmount();
   });
 
+  /**
+   * WHICH writer wrote it, recorded on the record itself.
+   *
+   * `docs/resume-durability-device-check.md` turns on one question no
+   * instrument here can answer: does iOS suspend the 200 ms timer AND
+   * `timeupdate` at the same time while a backgrounded PWA plays? These rows
+   * pin the part that IS testable — that each mechanism signs its own writes —
+   * so that reading the record on a real phone answers the rest. If the tick
+   * and the timer both wrote `"cadence-timer"`, the check would come back
+   * "the timer survived" no matter which writer actually did.
+   */
+  it("signs a tick-driven write as the media pipeline and a timer-driven one as the timer", () => {
+    const { audio, result, unmount } = playing();
+
+    // No timer advance at all, so only the tick can have written these.
+    result.current.onListeningTick(audio.currentTime * 1000);
+    const fromTick = records.length;
+    expect(fromTick).toBeGreaterThan(0);
+    expect(
+      new Set(sources()),
+      "a write the media pipeline produced is not signed `media-tick`, so a phone whose timer " +
+        "had been suspended could not tell that the tick was what kept the position current",
+    ).toStrictEqual(new Set(["media-tick"]));
+
+    // No tick at all, so only the timer can have written these.
+    vi.advanceTimersByTime(INTERVAL_MS * 2);
+    expect(records.length).toBeGreaterThan(fromTick);
+    expect(
+      new Set(sources().slice(fromTick)),
+      "the timer's writes are being attributed to another writer, so a phone that had suspended " +
+        "`timeupdate` would still report the tick as alive",
+    ).toStrictEqual(new Set(["cadence-timer"]));
+    unmount();
+  });
+
   /** Neither source may put a book's position under a different book's key. */
   it("writes nothing once the active book is gone", () => {
     const audio = new FakeAudio();
@@ -425,5 +468,82 @@ describe("the durable cadence, with two sources", () => {
     listen(audio, result, { ms: 2_000, tickMs: 250 });
     expect(writes).toStrictEqual([]);
     unmount();
+  });
+});
+
+/**
+ * The lifecycle flush, and the plumbing between a caller and the record.
+ *
+ * The flush is the writer that matters most to
+ * `docs/resume-durability-device-check.md`: if a five-minute backgrounded
+ * listen comes back showing `visibility-flush` with a five-minute-old
+ * `writtenAt`, then NOTHING wrote after the page was hidden and both cadence
+ * writers were suspended. That reading only means anything if the flush signs
+ * itself, and if the two lifecycle edges are told apart — an app-switcher kill
+ * delivers neither, a backgrounding delivers only the first.
+ */
+describe("the provenance of a lifecycle write", () => {
+  const KEY = "chapterline:position:user-a:book-1";
+
+  beforeEach(() => {
+    // These rows dispatch real lifecycle events at the document and the window,
+    // so every hook still mounted from an earlier row would answer them too.
+    cleanup();
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      get length() {
+        return store.size;
+      },
+      key: (index: number) => [...store.keys()][index] ?? null,
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as Storage);
+    vi.stubGlobal("crypto", { randomUUID: () => "device-1" } as Crypto);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+    commitProgress.mockReset().mockResolvedValue(undefined);
+    mirrorProgress.mockReset().mockResolvedValue(undefined);
+    replayQueuedMutations.mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const storedSource = () => (JSON.parse(localStorage.getItem(KEY)!) as { source?: string }).source;
+
+  it("signs the hidden edge as the visibility flush", () => {
+    mountHook();
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden" as DocumentVisibilityState);
+    document.dispatchEvent(new Event("visibilitychange"));
+    visibility.mockRestore();
+    expect(storedSource()).toBe("visibility-flush");
+  });
+
+  it("signs a terminal pagehide apart from a backgrounding", () => {
+    mountHook();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(
+      storedSource(),
+      "the two lifecycle edges write the same source, so the readout cannot distinguish a page " +
+        "that was backgrounded from one that was torn down",
+    ).toBe("pagehide-flush");
+  });
+
+  /**
+   * Every other write path reaches the record through `persistProgress`, so the
+   * mechanism each of them names has to survive the trip verbatim. The call
+   * sites themselves are pinned in `playback-provider.history.test.tsx` and
+   * `use-transport-actions.test.ts`.
+   */
+  it("carries a caller's mechanism through to the record unchanged", async () => {
+    for (const source of ["pause", "seek", "ended", "rate-change", "book-unload"] as const) {
+      const result = mountHook();
+      await result.current.persistProgress(source, 12_000);
+      expect(storedSource()).toBe(source);
+    }
   });
 });

@@ -84,7 +84,7 @@ describe("seeking", () => {
     actions.seek(59_000);
 
     expect(audio.currentTime * 1000).toBe(DECODED_DURATION_MS);
-    expect(saveDurableState).toHaveBeenCalledWith(DECODED_DURATION_MS);
+    expect(saveDurableState).toHaveBeenCalledWith("seek", DECODED_DURATION_MS);
     expect(timeStore.read()).toBe(DECODED_DURATION_MS);
     expect(recordAction).toHaveBeenCalledWith("seek", DECODED_DURATION_MS, 0, null);
   });
@@ -100,7 +100,7 @@ describe("seeking", () => {
     const { saveDurableState, actions } = mountTransport(audio);
 
     actions.seek(59_000);
-    const [storedPositionMs] = saveDurableState.mock.calls[0] as [number];
+    const [, storedPositionMs] = saveDurableState.mock.calls[0] as [string, number];
 
     expect(
       resolveStartPosition({
@@ -120,7 +120,7 @@ describe("seeking", () => {
 
     actions.seek(30_000);
 
-    expect(saveDurableState).toHaveBeenCalledWith(30_000);
+    expect(saveDurableState).toHaveBeenCalledWith("seek", 30_000);
   });
 
   it("still bounds a seek past the metadata duration", () => {
@@ -129,6 +129,6 @@ describe("seeking", () => {
 
     actions.seek(500_000);
 
-    expect(saveDurableState).toHaveBeenCalledWith(METADATA_DURATION_MS);
+    expect(saveDurableState).toHaveBeenCalledWith("seek", METADATA_DURATION_MS);
   });
 });

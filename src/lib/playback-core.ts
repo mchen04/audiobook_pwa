@@ -72,12 +72,73 @@ export function isChapterEnding(chapter: PlayerChapter, positionMs: number): boo
 /* Per-user local playback state. Keys are user-scoped so account switches on
  * one device never leak positions between accounts. */
 
+/**
+ * WHICH MECHANISM performed a durable write — not which function called it.
+ *
+ * This exists to settle one question that no instrument on a development
+ * machine can answer (`docs/resume-durability-device-check.md`): while a PWA is
+ * backgrounded with the screen off and audio playing, does iOS suspend BOTH the
+ * 200 ms rescheduling timer AND the media element's `timeupdate`? Each writer
+ * alone is measured to bound the loss; only their simultaneous suspension loses
+ * ground, and the automated suite cannot observe it because Playwright's WebKit
+ * never reports a page as genuinely hidden.
+ *
+ * The answer is legible from the record itself once the record says who wrote
+ * it. After a backgrounded listen, `"visibility-flush"` with a stale `writtenAt`
+ * means both writers were frozen for the whole session; `"media-tick"` or
+ * `"cadence-timer"` with a recent one means that writer survived.
+ *
+ * So these are named for the PLATFORM MECHANISM that produced the write —
+ * `"media-tick"` is the media pipeline, `"cadence-timer"` is `setTimeout` — and
+ * not for the hook or handler the call sits in, because it is the mechanism's
+ * survival that is in question.
+ */
+const PLAYBACK_WRITE_SOURCES = [
+  /** The media pipeline's `timeupdate`. Survives iOS suspending timers. */
+  "media-tick",
+  /** The 200 ms self-rescheduling `setTimeout`. Suspended by a backgrounded page. */
+  "cadence-timer",
+  /** The synchronous flush on `visibilitychange` to hidden. */
+  "visibility-flush",
+  /** The synchronous flush on `pagehide`, which is terminal at any visibility. */
+  "pagehide-flush",
+  "pause",
+  "seek",
+  "ended",
+  "rate-change",
+  /** Leaving one book for another; the write belongs to the book being left. */
+  "book-switch",
+  "book-unload",
+] as const;
+
+export type PlaybackWriteSource = (typeof PLAYBACK_WRITE_SOURCES)[number];
+
 export type LocalPosition = {
   positionMs: number;
   occurredAt: number;
   /** Absent on records written before the rate and completion were durable. */
   playbackRate?: number;
   completed?: boolean;
+  /**
+   * Which mechanism wrote this record. Absent on records written before writes
+   * carried their provenance.
+   */
+  source?: PlaybackWriteSource;
+  /**
+   * WHEN THE WRITE HAPPENED — deliberately NOT `occurredAt`.
+   *
+   * `occurredAt` means "when this position was reached" and is preserved across
+   * a re-write that carries no new position, because it is the only thing
+   * `localWinsOver` compares and re-stamping it lets a stale tab overrule
+   * another device's real listening. `writtenAt` has the opposite job: it is
+   * always the real moment of the write, so a record whose position has not
+   * moved for five minutes still shows that something wrote it five minutes ago
+   * — or that nothing did. Conflating the two would reintroduce the cross-device
+   * regression `momentThisPositionWasReached` exists to prevent.
+   *
+   * Absent on records written before writes carried their provenance.
+   */
+  writtenAt?: number;
 };
 
 /**
@@ -101,17 +162,26 @@ export type LocalPosition = {
 export function saveLocalPlaybackState(
   userId: string,
   bookId: string,
-  state: { positionMs: number; playbackRate?: number; completed?: boolean; occurredAt?: number },
+  state: {
+    positionMs: number;
+    playbackRate?: number;
+    completed?: boolean;
+    occurredAt?: number;
+    source?: PlaybackWriteSource;
+  },
 ): boolean {
   const positionMs = Math.round(state.positionMs);
   const record: LocalPosition = {
     positionMs,
     occurredAt: state.occurredAt ?? momentThisPositionWasReached(userId, bookId, positionMs),
+    // Always the real moment of THIS write, whatever `occurredAt` resolved to.
+    writtenAt: Date.now(),
   };
   if (typeof state.playbackRate === "number" && Number.isFinite(state.playbackRate)) {
     record.playbackRate = state.playbackRate;
   }
   if (typeof state.completed === "boolean") record.completed = state.completed;
+  if (state.source) record.source = state.source;
   try {
     localStorage.setItem(localPositionKey(userId, bookId), JSON.stringify(record));
     return true;
@@ -240,6 +310,26 @@ export function listLocalPlaybackStates(
 }
 
 /**
+ * The book this device wrote a position for most recently — for the settings
+ * diagnostics readout, which reports the provenance of the latest durable write.
+ *
+ * Ordered by `writtenAt`, not `occurredAt`: the question this answers is "what
+ * wrote last", and `occurredAt` is deliberately frozen across re-writes that
+ * carry no new position, so ordering by it would show the wrong book. A record
+ * from before provenance existed has no `writtenAt` and so sorts oldest, which
+ * is the honest answer — nothing is known about when it was written.
+ */
+export function readLatestLocalPlayback(
+  userId: string,
+): { bookId: string; state: LocalPosition } | null {
+  let latest: { bookId: string; state: LocalPosition } | null = null;
+  for (const entry of listLocalPlaybackStates(userId)) {
+    if (!latest || (entry.state.writtenAt ?? 0) > (latest.state.writtenAt ?? 0)) latest = entry;
+  }
+  return latest;
+}
+
+/**
  * Does this device's own record describe a later moment than the server's?
  *
  * A local record with no timestamp (`occurredAt: 0`, which is every pre-v2
@@ -349,5 +439,17 @@ function validLocalPosition(parsed: unknown, occurredAtOverride: number | undefi
     record.playbackRate = entry.playbackRate;
   }
   if (typeof entry?.completed === "boolean") record.completed = entry.completed;
+  // Provenance is diagnostic and is rendered verbatim, so only a value this
+  // build actually writes is carried through; anything else stays absent rather
+  // than putting an unknown string in front of the user.
+  if (isWriteSource(entry?.source)) record.source = entry.source;
+  const writtenAt = entry?.writtenAt;
+  if (typeof writtenAt === "number" && Number.isFinite(writtenAt) && writtenAt >= 0) {
+    record.writtenAt = writtenAt;
+  }
   return record;
+}
+
+function isWriteSource(value: unknown): value is PlaybackWriteSource {
+  return (PLAYBACK_WRITE_SOURCES as readonly string[]).includes(value as string);
 }

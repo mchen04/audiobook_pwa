@@ -7,10 +7,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlaybackHistoryEntry, PlayerBook } from "@/domain/player";
 
-const { loadPlaybackHistory, storePlaybackAction } = vi.hoisted(() => ({
-  loadPlaybackHistory: vi.fn(),
-  storePlaybackAction: vi.fn(),
-}));
+const { loadPlaybackHistory, storePlaybackAction, persistence } = vi.hoisted(() => {
+  // Stable across renders, as the real hook's `useCallback`s are, so a durable
+  // write can be attributed to the transport action that caused it.
+  const persistProgress = vi.fn();
+  const saveDurableState = vi.fn();
+  return {
+    loadPlaybackHistory: vi.fn(),
+    storePlaybackAction: vi.fn(),
+    persistence: {
+      persistProgress,
+      onListeningTick: vi.fn(),
+      markInProgress: vi.fn(),
+      saveDurableState,
+      markPositionChanged: vi.fn(),
+      resetPositionChanged: vi.fn(),
+    },
+  };
+});
+const { persistProgress, saveDurableState } = persistence;
 
 vi.mock("@/lib/playback-history", () => ({
   loadPlaybackHistory,
@@ -18,16 +33,7 @@ vi.mock("@/lib/playback-history", () => ({
   replayPlaybackHistory: vi.fn().mockResolvedValue(undefined),
   storePlaybackAction,
 }));
-vi.mock("./use-progress-persistence", () => ({
-  useProgressPersistence: () => ({
-    persistProgress: vi.fn().mockResolvedValue(undefined),
-    onListeningTick: vi.fn(),
-    markInProgress: vi.fn(),
-    saveDurableState: vi.fn(),
-    markPositionChanged: vi.fn(),
-    resetPositionChanged: vi.fn(),
-  }),
-}));
+vi.mock("./use-progress-persistence", () => ({ useProgressPersistence: () => persistence }));
 vi.mock("./use-sleep-timer", () => ({
   useSleepTimer: () => ({
     sleepMode: null,
@@ -119,6 +125,8 @@ describe("playback action capture", () => {
       .mockReset()
       .mockImplementation(async (_userId, _bookId, snapshot) => snapshot?.entries || []);
     storePlaybackAction.mockReset().mockResolvedValue("stored");
+    persistProgress.mockReset().mockResolvedValue(undefined);
+    saveDurableState.mockReset();
     vi.spyOn(HTMLMediaElement.prototype, "paused", "get").mockImplementation(() => mediaPaused);
     vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function (
       this: HTMLMediaElement,
@@ -185,6 +193,47 @@ describe("playback action capture", () => {
     expect(storePlaybackAction.mock.calls.map((call) => call[2].action)).toEqual(
       expected.map(([, action]) => action),
     );
+  });
+
+  /**
+   * WHICH MECHANISM caused each durable write, at the call sites.
+   *
+   * The record carries a `source` so that a person can read
+   * `docs/resume-durability-device-check.md`'s answer off the phone instead of
+   * inferring it. That only works if every path names itself honestly: a pause
+   * recorded as a cadence write would say a suspended timer was alive.
+   */
+  it("names the mechanism behind every transport-driven durable write", async () => {
+    render(
+      <PlaybackProvider userId="user-1">
+        <HistoryHarness />
+      </PlaybackProvider>,
+    );
+    await waitFor(() => expect(storePlaybackAction).toHaveBeenCalled());
+
+    const lastPersist = () => persistProgress.mock.calls.at(-1)?.[0];
+    const lastDurable = () => saveDurableState.mock.calls.at(-1)?.[0];
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+    fireEvent.click(screen.getByRole("button", { name: "pause" }));
+    expect(lastPersist()).toBe("pause");
+
+    fireEvent.click(screen.getByRole("button", { name: "seek" }));
+    expect(lastDurable()).toBe("seek");
+
+    fireEvent.click(screen.getByRole("button", { name: "rate" }));
+    expect(lastPersist()).toBe("rate-change");
+
+    fireEvent.click(screen.getByRole("button", { name: "finish" }));
+    expect(lastPersist()).toBe("ended");
+
+    fireEvent.click(screen.getByRole("button", { name: "restart" }));
+    expect(lastPersist()).toBe("seek");
+
+    expect(
+      persistProgress.mock.calls.every(([source]) => typeof source === "string"),
+      "a durable write reached the record without naming the mechanism that caused it",
+    ).toBe(true);
   });
 
   it("reconciles server history when the active book is loaded again", async () => {
