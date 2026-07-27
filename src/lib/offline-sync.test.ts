@@ -96,6 +96,92 @@ describe("offline progress queue", () => {
     expect(JSON.parse(fetchFn.mock.calls[1]?.[1]?.body as string).deviceSequence).toBe(2);
   });
 
+  /**
+   * MEASURED, WebKit, hard kill: Postgres left holding 15245 ms against a true
+   * position of 3231 ms. The 15 s heartbeat queued the pre-rewind position, the
+   * kill took the write that would have followed the rewind, and replay then
+   * published the queued value — carrying its ORIGINAL `eventOccurredAt`, which
+   * the server compares against what IT holds rather than against what the
+   * device knows. The user was left ~12 s ahead of themselves the moment the
+   * server became authoritative (a fresh install, a second device, cleared
+   * storage). These three rows pin the collapse, its bounds, and the case it
+   * must not touch.
+   */
+  describe("a queued progress row against a newer local position", () => {
+    const KEY = "chapterline:position:user-a:book-1";
+
+    function withLocalStorage(entries: Record<string, string>) {
+      const store = new Map(Object.entries(entries));
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+        key: (index: number) => [...store.keys()][index] ?? null,
+        get length() {
+          return store.size;
+        },
+      });
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("replays the newer local position instead of the stale queued one", async () => {
+      await queueProgress(
+        progressEntry({ deviceSequence: 4, positionMs: 15_245, playbackRate: 1.5 }),
+      );
+      withLocalStorage({
+        [KEY]: JSON.stringify({
+          positionMs: 3_231,
+          occurredAt: Date.parse("2026-07-09T00:00:05.000Z"),
+          playbackRate: 1.5,
+          completed: false,
+        }),
+      });
+      const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+      await replayQueuedMutations("user-a", fetchFn as typeof fetch);
+
+      const body = JSON.parse(fetchFn.mock.calls[0]?.[1]?.body as string);
+      expect(body.positionMs).toBe(3_231);
+      expect(body.eventOccurredAt).toBe("2026-07-09T00:00:05.000Z");
+      // A carried-over sequence is a write the server answers 200 to and then
+      // discards, so the superseding row has to claim a fresh one.
+      expect(body.deviceSequence).toBeGreaterThan(4);
+      expect(await listQueuedMutations("user-a")).toHaveLength(0);
+    });
+
+    it("leaves the queued row alone when the local record is older", async () => {
+      await queueProgress(progressEntry({ deviceSequence: 4, positionMs: 15_245 }));
+      withLocalStorage({
+        [KEY]: JSON.stringify({
+          positionMs: 3_231,
+          occurredAt: Date.parse("2026-07-08T23:59:00.000Z"),
+        }),
+      });
+      const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+      await replayQueuedMutations("user-a", fetchFn as typeof fetch);
+
+      const body = JSON.parse(fetchFn.mock.calls[0]?.[1]?.body as string);
+      expect(body.positionMs).toBe(15_245);
+      expect(body.deviceSequence).toBe(4);
+    });
+
+    it("does not fold in a record that claims no moment at all", async () => {
+      await queueProgress(progressEntry({ deviceSequence: 4, positionMs: 15_245 }));
+      // Every pre-v2 local value parses to `occurredAt: 0`. It cannot claim to
+      // be later than anything, which is the rule `localWinsOver` applies too.
+      withLocalStorage({ [KEY]: "3231" });
+      const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+      await replayQueuedMutations("user-a", fetchFn as typeof fetch);
+
+      expect(JSON.parse(fetchFn.mock.calls[0]?.[1]?.body as string).positionMs).toBe(15_245);
+    });
+  });
+
   it("allocates device sequences transactionally", async () => {
     await expect(
       Promise.all([nextDeviceSequence("sequence-book"), nextDeviceSequence("sequence-book")]),

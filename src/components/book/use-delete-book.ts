@@ -7,7 +7,7 @@ import { UNLOAD_PLAYER_EVENT } from "@/lib/app-keys";
 import { replayQueuedMutations } from "@/lib/offline-sync";
 import { removeOfflineBook } from "@/lib/offline/deletion-journal";
 import { commitBookDeletion } from "@/lib/offline/outbox";
-import { getDeviceId } from "@/lib/playback-core";
+import { clearLocalPlaybackState, getDeviceId } from "@/lib/playback-core";
 import { clearPlaybackHistoryForBook } from "@/lib/playback-history";
 
 /**
@@ -40,6 +40,14 @@ export function useDeleteBook(userId: string, bookId: string, onError: (message:
       return;
     }
     window.dispatchEvent(new Event(UNLOAD_PLAYER_EVENT));
+    // AFTER the unload, never before. `UNLOAD_PLAYER_EVENT` is dispatched
+    // synchronously and `unloadBook` makes the position durable on its way out
+    // — correct for leaving a player, wrong for a book that is being destroyed.
+    // Clearing first would simply be overwritten by that write; clearing here
+    // removes it, and with it the local record that `healMirrorPlaybackFromLocal`
+    // would otherwise use to resurrect a playback row for a deleted book on
+    // every launch.
+    clearLocalPlaybackState(userId, bookId);
     await clearPlaybackHistoryForBook(userId, bookId).catch(() => undefined);
     await removeOfflineBook(userId, bookId).catch(() => {
       onError("The book was deleted, but device cleanup will retry automatically.");

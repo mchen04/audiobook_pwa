@@ -17,6 +17,25 @@ export type OfflineBook = {
   offlineCoverThumbUrl?: string | null;
   byteSize: number;
   downloadedAt: string;
+  /**
+   * When this device last looked for `offlineMediaUrl` in Cache Storage and did
+   * not find it — the "not on this device" state the player's gate already
+   * renders as "Attach the original MP3".
+   *
+   * A CACHED OBSERVATION, NEVER A TOMBSTONE. WebKit was measured discarding
+   * every Cache Storage record for an origin while the cache names survived, so
+   * a missed `match` proves only that this device cannot reach the bytes right
+   * now. `reconcileOfflineRecord` clears this the moment a `match` succeeds
+   * again, and the record, its journaled cache rows and the book's read-along
+   * cues are all left intact meanwhile: the MP3 exists nowhere else in the
+   * world (design contract section 2), and the transcript is not even addressed
+   * by the token that missed.
+   *
+   * Absent on records written before this field existed, which reads correctly
+   * as "present as far as this device knows" — the same convention as
+   * `offlineCoverThumbUrl`, and why no schema version bump is needed.
+   */
+  mediaMissingSince?: string | null;
 };
 
 export class OfflineStorageUnavailableError extends Error {

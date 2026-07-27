@@ -15,12 +15,10 @@ import {
 } from "./db";
 import {
   deleteJournaledCacheEntries,
-  deleteJournaledCacheEntry,
-  deleteJournaledMedia,
   removeOfflineBook,
   retryPendingOfflineDeletions,
 } from "./deletion-journal";
-import { deleteAllTranscriptsForUser, deleteBookTranscript } from "./transcript-store";
+import { deleteAllTranscriptsForUser } from "./transcript-store";
 
 export async function listOfflineBooks(userId: string): Promise<OfflineBook[]> {
   await retryPendingOfflineDeletions(userId);
@@ -43,6 +41,23 @@ export async function listOfflineBooks(userId: string): Promise<OfflineBook[]> {
 export async function listStoredOfflineBooks(userId: string): Promise<OfflineBook[]> {
   const db = await database();
   return db.getAllFromIndex("downloads", "by-user", userId);
+}
+
+/**
+ * One download record exactly as stored — no deletion retry, no reconcile, no
+ * Cache Storage read at all.
+ *
+ * `getOfflineBook` answers a different question ("can this device play it
+ * right now?") and deliberately returns `undefined` for a book whose audio is
+ * missing. A caller that needs the ROW — to reclaim the bytes the old token
+ * owned, or to put it back after a failed write — has to ask for the row.
+ */
+export async function getStoredOfflineBook(
+  userId: string,
+  bookId: string,
+): Promise<OfflineBook | undefined> {
+  const db = await database();
+  return db.get("downloads", offlineBookKey(userId, bookId));
 }
 
 /**
@@ -73,15 +88,71 @@ export async function getOfflineBook(userId: string, bookId: string) {
   }
 }
 
+/**
+ * Answers one question — can this device play this book right now? — and
+ * records the answer. It DESTROYS NOTHING.
+ *
+ * It used to. A single missed `cache.match` deleted the download record, its
+ * journaled cache rows and the book's read-along cues, on a path that runs on
+ * every `/library` visit and every player open. WebKit was then measured
+ * discarding every Cache Storage *record* for this origin while the cache
+ * *names* survived — a heal restored and verified 33 shell and 6 media entries,
+ * and seconds later both caches read zero from two pages at once. So
+ * `caches.open` resolves, every `match` misses, and the app destroyed the
+ * user's downloads and read-along data on the next launch. Putting the bytes
+ * back afterwards restores neither.
+ *
+ * A failed read is not proof of permanent loss, so it is not treated as one:
+ *
+ * - `undefined` still comes back, which is the ONLY thing the callers ever
+ *   needed. `local-media-gate.tsx` turns it into the "this device does not
+ *   currently have it — attach the original MP3" screen, and
+ *   `listOfflineBooks` drops the book from the playable set. That is already
+ *   the correct destination for a book whose bytes are missing.
+ * - `offlineMediaUrl` and its `cacheEntries` rows stay, so bytes that come back
+ *   are still owned and still reachable rather than swept as orphans.
+ * - The transcript stays. It is keyed by book id and was never addressed by the
+ *   token that missed; losing read-along data because an audio blob was evicted
+ *   is gratuitous.
+ * - The record is marked instead, and unmarked as soon as a `match` succeeds.
+ *
+ * Deletion still happens where it is correct and nowhere else: `removeOfflineBook`
+ * (explicit user delete, and the library's remove-download), `clearLocalDataForUser`
+ * and `purgeAccount`. None of them route through here.
+ */
 async function reconcileOfflineRecord(db: OfflineDb, cache: Cache, record: OfflineBook) {
-  if (await cache.match(record.offlineMediaUrl)) return record;
-  for (const url of [record.offlineCoverUrl, record.offlineCoverThumbUrl]) {
-    if (url) await deleteJournaledCacheEntry(db, cache, url).catch(() => false);
+  if (await cache.match(record.offlineMediaUrl)) {
+    if (!record.mediaMissingSince) return record;
+    await setMediaMissingSince(db, record, null);
+    return { ...record, mediaMissingSince: null };
   }
-  await deleteJournaledMedia(db, cache, record.offlineMediaUrl).catch(() => false);
-  await deleteBookTranscript(db, record.userId, record.book.id).catch(() => undefined);
-  await db.delete("downloads", record.key);
+  if (!record.mediaMissingSince) {
+    await setMediaMissingSince(db, record, new Date().toISOString());
+  }
   return undefined;
+}
+
+/**
+ * Stamps the observation on the stored record, in one transaction, and only
+ * while the record still points at the token that was looked up. An import
+ * mints a fresh token and writes a fresh record, so that check is what stops a
+ * reconcile racing an attach from marking audio that has just arrived.
+ */
+async function setMediaMissingSince(
+  db: OfflineDb,
+  record: OfflineBook,
+  mediaMissingSince: string | null,
+): Promise<void> {
+  const transaction = db.transaction("downloads", "readwrite");
+  const current = await transaction.store.get(record.key);
+  if (
+    current &&
+    current.offlineMediaUrl === record.offlineMediaUrl &&
+    (current.mediaMissingSince ?? null) !== mediaMissingSince
+  ) {
+    await transaction.store.put({ ...current, mediaMissingSince });
+  }
+  await transaction.done;
 }
 
 /**

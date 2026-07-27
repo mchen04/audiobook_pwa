@@ -3,6 +3,7 @@
 import { RefObject, useMemo, useRef } from "react";
 
 import type { PlaybackAction, PlayerBook, PlayerChapter } from "@/domain/player";
+import type { PlaybackWriteSource } from "@/lib/playback-core";
 
 import type { PlaybackTimeStore } from "./playback-time-store";
 
@@ -18,6 +19,8 @@ export function useTransportActions({
   suppressNextPauseRef,
   timeStore,
   persistProgress,
+  saveDurableState,
+  markPositionChanged,
   recordAction,
 }: {
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -25,10 +28,19 @@ export function useTransportActions({
   suppressNextPauseRef: RefObject<boolean>;
   timeStore: PlaybackTimeStore;
   persistProgress: (
+    source: PlaybackWriteSource,
     positionMs: number,
     completed?: boolean,
     bookOverride?: PlayerBook,
   ) => Promise<void>;
+  /** Synchronous durable write; see `use-progress-persistence`. */
+  saveDurableState: (
+    source: PlaybackWriteSource,
+    positionMs?: number,
+    completed?: boolean,
+    bookOverride?: PlayerBook,
+  ) => void;
+  markPositionChanged: () => void;
   recordAction: (
     action: PlaybackAction,
     positionMs?: number,
@@ -52,7 +64,7 @@ export function useTransportActions({
       seekPersistTimerRef.current = window.setTimeout(() => {
         seekPersistTimerRef.current = null;
         const audio = audioRef.current;
-        if (audio && activeBookRef.current) void persistProgress(audio.currentTime * 1000);
+        if (audio && activeBookRef.current) void persistProgress("seek", audio.currentTime * 1000);
       }, 800);
     };
     const seekWithAction = (
@@ -66,9 +78,28 @@ export function useTransportActions({
       const bounded = Math.min(Math.max(positionMs, 0), activeBook.durationMs);
       const previousPositionMs = audio.currentTime * 1000;
       audio.currentTime = bounded / 1000;
-      timeStore.write(bounded);
+      // What the element ACCEPTED, not what it was asked for. `bounded` is
+      // clamped to `activeBook.durationMs`, which is metadata computed at import
+      // from the file's frame headers; the element clamps to the media it
+      // actually decoded. When the first is longer than the second — an
+      // estimated MP3 duration, a truncated download — a seek to the end
+      // durably records a position past the real end of the audio, and nothing
+      // corrects it while the user is paused because the cadence only runs
+      // during playback. `resolveStartPosition` reads that record back, decides
+      // the book is at its very end and restarts it from zero: a seek that
+      // lands the user near the end of a book they have not finished throws
+      // their place away on the next open.
+      const settledMs = settledPositionMs(audio, bounded);
+      timeStore.write(settledMs);
+      // Durable at once, not in 800 ms. The debounce coalesces SERVER writes,
+      // which is all it was ever for; leaving the local position behind it lost
+      // the seek outright whenever the next thing to happen was
+      // `cancelSeekPersist` — seek while paused, then leave the player, and
+      // there was no `pause` event coming to save it either.
+      markPositionChanged();
+      saveDurableState("seek", settledMs);
       persistSeekSoon();
-      recordAction(action, bounded, previousPositionMs, description);
+      recordAction(action, settledMs, previousPositionMs, description);
     };
 
     return {
@@ -115,7 +146,8 @@ export function useTransportActions({
           audio.pause();
           audio.currentTime = activeBook.durationMs / 1000;
           timeStore.write(activeBook.durationMs);
-          void persistProgress(activeBook.durationMs, true);
+          markPositionChanged();
+          void persistProgress("ended", activeBook.durationMs, true);
           recordAction("finished", activeBook.durationMs);
         },
         restart() {
@@ -125,12 +157,38 @@ export function useTransportActions({
           const previousPositionMs = audio.currentTime * 1000;
           audio.currentTime = 0;
           timeStore.write(0);
-          void persistProgress(0, false);
+          markPositionChanged();
+          void persistProgress("seek", 0, false);
           recordAction("restarted", 0, previousPositionMs);
         },
       },
     };
-  }, [activeBookRef, audioRef, persistProgress, recordAction, suppressNextPauseRef, timeStore]);
+  }, [
+    activeBookRef,
+    audioRef,
+    markPositionChanged,
+    persistProgress,
+    recordAction,
+    saveDurableState,
+    suppressNextPauseRef,
+    timeStore,
+  ]);
+}
+
+/**
+ * Where the element ended up after being told to seek.
+ *
+ * Read back rather than assumed, but only once there is something to read.
+ * Before `HAVE_METADATA` the element has no duration to clamp against and, in
+ * WebKit, no media player object to ask — `currentTime` answers 0 — so writing
+ * the read-back at that point would turn a seek into a jump to the start of the
+ * book, which is a far worse failure than the one this exists to prevent. Until
+ * then the request is the best information anyone has.
+ */
+function settledPositionMs(audio: HTMLAudioElement, requestedMs: number): number {
+  if (audio.readyState < audio.HAVE_METADATA) return requestedMs;
+  const settled = audio.currentTime * 1000;
+  return Number.isFinite(settled) && settled >= 0 ? settled : requestedMs;
 }
 
 // Autoplay can be blocked before the first user activation; a rejected play()

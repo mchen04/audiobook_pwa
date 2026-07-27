@@ -3,6 +3,7 @@ import type { IDBPTransaction } from "idb";
 import {
   archiveMutationKey,
   buildMutation,
+  buildProgressMutation,
   collectionMutationKey,
   eventMutationKey,
   metadataMutationKey,
@@ -11,6 +12,7 @@ import {
   tagMutationKey,
   type MutationDraft,
   type QueuedMutation,
+  type QueuedProgress,
 } from "@/lib/offline-sync";
 
 import {
@@ -84,7 +86,12 @@ export async function commitMutation(
   // Coalescing kept an existing row instead: the intent this call carried is
   // already superseded, so projecting it would move the mirror backwards.
   if (queued !== mutation || !patch) return { queued, mirrored: false };
+  await applyMirrorPatch(patch);
+  return { queued, mirrored: true };
+}
 
+/** One mirror patch, atomically, with no outbox row in front of it. */
+export async function applyMirrorPatch(patch: MirrorPatch): Promise<void> {
   const db = await database();
   const transaction = db.transaction(PATCH_STORES as unknown as PatchStore[], "readwrite");
   try {
@@ -94,7 +101,6 @@ export async function commitMutation(
     abortQuietly(transaction);
     throw error;
   }
-  return { queued, mirrored: true };
 }
 
 export function commitDraft(draft: MutationDraft, patch?: MirrorPatch | null) {
@@ -235,6 +241,32 @@ export async function commitTagList(
     }
     await commitTagEdge(origin, bookId, tagId, true);
   }
+}
+
+/**
+ * A progress event, journalled AND projected onto the shelf.
+ *
+ * `queueProgress` wrote the outbox row and nothing else, which is why
+ * `mirrorPatchFor`'s `case "progress"` was unreachable in production: the
+ * library card renders from the mirror's `playbackStates` row, so a device that
+ * only ever queued progress showed "Not started" for a book it had just played
+ * nine seconds of. Routing the queue through `commitMutation` is what makes the
+ * projection run — journal first, patch second, exactly as every other kind
+ * does.
+ */
+export function commitProgress(entry: QueuedProgress) {
+  return commitMutation(buildProgressMutation(entry));
+}
+
+/**
+ * The projection with no outbox row: the server has already accepted this
+ * event, so there is no unsent intent to record, but the shelf on THIS device
+ * still has to show it. Without this the card is only ever as fresh as the last
+ * pull, which is the online half of the same stale-shelf failure.
+ */
+export function mirrorProgress(entry: QueuedProgress): Promise<void> {
+  const patch = mirrorPatchFor(buildProgressMutation(entry));
+  return patch ? applyMirrorPatch(patch) : Promise.resolve();
 }
 
 export function commitCollectionEdge(
@@ -383,7 +415,7 @@ export function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
         const store = transaction.objectStore("playbackStates");
         const key = mirrorKey(userId, entityId);
         const existing = await store.get(key);
-        if (existing && existing.deviceSequence > mutation.deviceSequence) return;
+        if (existing && mirrorHoldsSomethingNewer(existing, mutation)) return;
         const state: MirrorPlaybackState = {
           key,
           userId,
@@ -403,6 +435,39 @@ export function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
     default:
       return null;
   }
+}
+
+/**
+ * Does the mirror already hold a LATER playback state than the one being
+ * projected?
+ *
+ * The guard used to be `existing.deviceSequence > mutation.deviceSequence` with
+ * no regard for who wrote the row, and `deviceSequence` is a per-(user, book,
+ * DEVICE) counter — the server orders on it that way and `nextDeviceSequence`
+ * mints it that way. Comparing this device's counter against a row a *different*
+ * device wrote compares two unrelated integers: the phone that has opened a book
+ * forty times outranks the laptop opening it for the first time, so a genuinely
+ * newer laptop write is discarded, and the reverse lets a stale phone write
+ * through. Neither answer is about time.
+ *
+ * So the comparison is only made where it means something. Same device: the
+ * sequence is the ordering, and it is monotonic by construction, which is why it
+ * is preferred over any clock. Different devices: the sequences share no origin
+ * and the only ordering the two have in common is the event time the server
+ * stamps and hands back on a pull, so that is what is compared — and an
+ * unparseable or absent stamp on either side is not evidence of anything, so the
+ * projection proceeds rather than being dropped on a guess.
+ */
+function mirrorHoldsSomethingNewer(
+  existing: MirrorPlaybackState,
+  mutation: QueuedMutation,
+): boolean {
+  if (existing.deviceId === mutation.deviceId) {
+    return existing.deviceSequence > mutation.deviceSequence;
+  }
+  const held = Date.parse(existing.eventOccurredAt);
+  const incoming = Date.parse(String(mutation.payload.eventOccurredAt ?? ""));
+  return Number.isFinite(held) && Number.isFinite(incoming) && held > incoming;
 }
 
 function bookFieldsFrom(payload: Record<string, unknown>): Partial<MirrorBook> {

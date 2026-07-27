@@ -321,7 +321,6 @@ test("an evicted book is recovered by re-import when the app chunks cannot be fe
     ).toBe(false);
 
     // ------------------------------------------------ re-import, offline
-    const downloadsBefore = new Set((await mirror(page)).downloads.map((row) => row.bookId));
     // The network really goes away here, and that is only survivable because
     // `PwaRegister` pulls the import path's lazy chunks in after every launch
     // paints. Wait for that to finish, and assert it happened: if it silently
@@ -336,14 +335,21 @@ test("an evicted book is recovered by re-import when the app chunks cannot be fe
     // instead, which is the whole reason that fallback exists.
     await context.route("**/_next/**", (route) => route.abort());
     await importThroughUi(page, path.basename(FIXTURE), bytes);
-    // The bytes are on the device again long before the server knows: wait for
-    // the download record the import writes, not for anything on the network.
-    const newDownloads = async () =>
-      (await mirror(page)).downloads
-        .map((row) => row.bookId)
-        .filter((id) => !downloadsBefore.has(id));
+    // The bytes are on the device again long before the server knows, so this
+    // waits for the AUDIO, not for anything on the network.
+    //
+    // It used to wait for a download record under a book id that was not there
+    // before the re-import. That only ever fired because the eviction had
+    // DELETED this book's record — and deleting it on a missed `cache.match`
+    // was a data-loss one-way door (`library.ts#reconcileOfflineRecord`). The
+    // record now survives the eviction, marked "not on this device", so no new
+    // id can appear and that probe could only time out. Waiting on the bytes
+    // themselves is what the sentence meant in the first place, and it is
+    // strictly more than a row appearing.
     try {
-      await expect.poll(async () => (await newDownloads()).length, { timeout: 120_000 }).toBe(1);
+      await expect
+        .poll(async () => (await playable(page, bookId)).media, { timeout: 120_000 })
+        .toBe(true);
     } catch {
       // Re-thrown with the evidence attached, because a bare timeout here has
       // already cost three rounds of guessing at which resource the import was
@@ -357,11 +363,10 @@ test("an evicted book is recovered by re-import when the app chunks cannot be fe
     // and the recovered audio is filed under the id the book already had. What
     // this proves is that the import completed at all with no network available
     // for the app's own code.
-    const mintedId = (await newDownloads())[0]!;
     expect(
-      mintedId,
+      (await mirror(page)).downloads.map((row) => row.bookId).filter((id) => id !== bookId),
       "the recovered audio was filed under a new id instead of the book it belongs to",
-    ).toBe(bookId);
+    ).toStrictEqual([]);
 
     // -------------------------------------------------------- reconnect
     await context.unroute("**/_next/**");

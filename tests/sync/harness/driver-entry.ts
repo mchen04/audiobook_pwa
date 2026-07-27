@@ -75,7 +75,7 @@ export type MirrorSnapshot = {
   collectionBooks: MirrorCollectionBook[];
   playbackStates: MirrorPlaybackState[];
   syncMeta: MirrorSyncMeta | undefined;
-  downloads: Array<{ bookId: string; byteSize: number }>;
+  downloads: Array<{ bookId: string; byteSize: number; mediaMissingSince: string | null }>;
 };
 
 /**
@@ -257,6 +257,10 @@ class Driver {
       downloads: downloads.map((record) => ({
         bookId: record.book.id,
         byteSize: record.byteSize,
+        // Whether this device believes it still holds the audio. Reported so a
+        // spec can tell "the record is gone" from "the record says the bytes
+        // are not here" — the second is the state the product must reach.
+        mediaMissingSince: record.mediaMissingSince ?? null,
       })),
     };
   }
@@ -310,7 +314,7 @@ class Driver {
    * The same two reads the player's gate makes (`local-media-gate.tsx`): the
    * download record for the id, then the media the record's own token points
    * at. Non-destructive on purpose — `getOfflineBook` reconciles a record whose
-   * bytes are gone by deleting it, and an observer that repaired what it was
+   * bytes are gone by marking it, and an observer that changed what it was
    * measuring would be useless here.
    */
   async playable(

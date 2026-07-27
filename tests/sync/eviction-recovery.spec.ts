@@ -192,16 +192,25 @@ test("audio evicted: the book stays visible, never looks playable, and says to r
     ).toHaveCount(0);
     await expect(bookCard(page).getByText(/^[\d.]+ (B|KB|MB|GB) on this device$/)).toHaveCount(0);
 
-    // 5. The stale download record is reconciled away rather than left to make
-    //    the book look playable on the next launch.
+    // 5. The download record is MARKED "not on this device" rather than
+    //    deleted, so the book stops looking playable without the app throwing
+    //    away the only local description of a file that exists nowhere else.
+    //
+    //    This used to assert the record was gone. That assertion encoded a
+    //    data-loss one-way door: WebKit was measured discarding every Cache
+    //    Storage record for an origin while the cache names survived, so a
+    //    missed `cache.match` — which is all this reconcile ever has — deleted
+    //    the download record AND the book's read-along cues on the next launch,
+    //    and putting the bytes back restored neither. A failed read is not
+    //    proof of permanent loss. See `library.ts#reconcileOfflineRecord`.
     await expect
-      .poll(async () => (await mirror(page)).downloads.length, {
+      .poll(async () => (await mirror(page)).downloads.map((row) => row.mediaMissingSince), {
         message:
-          "the download record survived its audio, so the library still believes the bytes " +
-          "are on this device",
+          "the download record still claims the bytes are on this device, or it was " +
+          "destroyed rather than marked",
         timeout: 15_000,
       })
-      .toBe(0);
+      .toStrictEqual([expect.any(String)]);
 
     // 6. The "On this device" facet must now be honest too.
     await page.getByRole("button", { name: "On this device" }).click();

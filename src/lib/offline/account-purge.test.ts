@@ -199,6 +199,11 @@ async function seedAccount(userId: string) {
   await media.put(mediaUrl, new Response("audio"));
   await media.put(`${mediaUrl}/chunk/0`, new Response("chunk"));
   storage.setItem(`chapterline:position:${userId}`, "1");
+  // The answer this account gave to a recovery offer. It names the account and
+  // one of its books, so it is residue in its own right — and the sweep below
+  // finds it by key shape rather than by anything that knows it exists, which
+  // is only worth relying on if the fixture actually contains one.
+  storage.setItem(`chapterline:suspension-dismissed:${userId}:book`, "1700000000000");
   // A replay counter for this account, scoped `userId:bookId`.
   await nextDeviceSequence("book", userId);
 }
