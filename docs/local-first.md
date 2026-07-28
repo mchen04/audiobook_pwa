@@ -1,5 +1,7 @@
 # Local-first architecture
 
+Last reviewed against the implementation: 2026-07-28
+
 Hark's library reads from the device, always. The network only syncs in the
 background. There is no "am I online?" branch anywhere on the read path.
 

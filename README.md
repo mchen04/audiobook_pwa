@@ -136,18 +136,23 @@ again.
 
 ## Repository layout
 
-All application code lives in `src/` (~17k lines, plus ~7k of co-located unit
-tests): `app/` (routes and API), `components/` (UI), `lib/` (the device mirror,
-the outbox and sync, storage, playback history), `server/` (DB schema, queries,
-and the sync pull), and `domain/` (pure logic). Migrations are in `drizzle/`,
-browser-driven suites in `tests/` (`e2e/`, `perf/`, `parity/`, `sync/`), and the
-service worker (maintained directly, not build-generated) is `public/sw.js`.
+All application code lives in `src/`: `app/` (routes and API), `components/`
+(UI), `lib/` (the device mirror, outbox, storage, and playback), `server/`
+(schema, queries, and sync), and `domain/` (pure logic). Browser-driven suites
+live in `tests/`, migrations in `drizzle/`, and the directly maintained service
+worker in `public/sw.js`.
 
-Everything else on disk is generated and git-ignored — `.next/` (the Next.js
-build, ~500MB and hundreds of thousands of lines of compiled JS),
-`node_modules/`, `tsconfig.tsbuildinfo`, `test-results/`, and `.vercel/`. A
-line count that includes those directories will look ~50x larger than the
-actual source; count `src/` (plus `drizzle/` and `tests/`) for a real figure.
+A tracked-text count is about 94k lines, but that is not 94k lines of production
+logic. Roughly 36.6k are Drizzle's required cumulative migration snapshots,
+8.3k are the lockfile, 31k are `src/` including co-located tests, and 15.9k are
+browser/verifier suites. Generated migration and dependency state is marked for
+GitHub in `.gitattributes`, not deleted or misclassified.
+
+Local build and run output remains ignored: `.next/`, `node_modules/`,
+TypeScript build metadata, test reports, `.data/`, local env files, and
+`.vercel/`. See [`docs/repository-anatomy.md`](docs/repository-anatomy.md) for
+the exact audit, required generated files, large authored files, and counting
+rules.
 
 ## Documentation
 
@@ -158,3 +163,9 @@ actual source; count `src/` (plus `drizzle/` and `tests/`) for a real figure.
   eviction, and account lifecycle.
 - `docs/operations.md` — deployment, backups, troubleshooting, limitations.
 - `docs/ios-pwa-testing.md` — automated WebKit and physical-iPhone release gates.
+- `docs/resume-durability-device-check.md` — the remaining physical-device
+  resume-position check and its observable pass/fail signal.
+- `docs/repository-anatomy.md` — tracked-line breakdown, generated-file policy,
+  and large-file classification.
+- `tests/perf/BASELINE.md` — historical proven-red launch baseline and the
+  later measured local-first result.

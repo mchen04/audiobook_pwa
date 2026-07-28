@@ -1,5 +1,7 @@
 # iPhone PWA verification
 
+Last reviewed: 2026-07-28
+
 Hark has a repeatable iPhone-shaped WebKit gate and a short physical-device
 gate. The automated run catches Safari engine differences in auth cookies, the
 Files picker, MP3 parsing, device storage, media range requests, playback, seeking,
