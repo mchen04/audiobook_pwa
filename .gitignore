@@ -33,6 +33,7 @@
 # editor, agent, and OS files
 .DS_Store
 *.log
+/*-loop.log.md
 .vscode/
 .idea/
 .claude/
