@@ -1,5 +1,9 @@
 # Launch benchmark — proven-red baseline
 
+Status: historical verifier record, not current production behavior
+
+Repository-reference audit: 2026-07-28
+
 This is the recorded output of `pnpm test:e2e:launch` against the launch path as
 it exists today: `/library` is server-rendered off Postgres, behind two
 `requireSession()` round trips plus `listBooksPage` + `getLibraryOverview`. The

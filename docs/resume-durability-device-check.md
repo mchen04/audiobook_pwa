@@ -1,5 +1,7 @@
 # Resume durability: the one check that needs a real iPhone
 
+Last reviewed: 2026-07-28
+
 Everything else about resume position is measured automatically in WebKit by the
 `resume-durability` Playwright project (`tests/resume/`). This file covers the single
 question that project **cannot** answer, why it cannot, and how to settle it by hand in

@@ -2,14 +2,18 @@
 
 ## Status
 
-Decision record started 2026-07-09; last reconciled with the code on 2026-07-25
-after the local-first pass that made the device authoritative for library reads.
+Decision record started 2026-07-09; last reconciled with the code on 2026-07-28
+after the resume-durability pass and repository-anatomy audit.
 Update this document whenever executable reality changes.
 
 `docs/local-first.md` is the design contract for that pass — what is mirrored,
 the outbox, pull, conflict rules, the launch path, eviction, and account
 lifecycle. This document records how the app is built; that one records why the
 local-first rules are what they are, and it is not restated here.
+
+`docs/repository-anatomy.md` classifies the large tracked paths. In particular,
+Drizzle snapshots are required generated migration state, while the service
+worker and resume oracle are authored behavior.
 
 ## Product boundary
 

@@ -1,5 +1,7 @@
 # Operations
 
+Last reviewed: 2026-07-28
+
 ## Deployment shape
 
 - Single Next.js instance (`pnpm build && pnpm start`) behind HTTPS. The
@@ -38,6 +40,10 @@
   playback never has to materialize a whole audiobook in one WebKit process.
   Downloads made by the older whole-file store require attaching the original
   MP3 once after this upgrade; server metadata, position, and playback history remain.
+
+The checked-in `drizzle/meta/*.json` files are migration-generation state, not
+database backups. Keep the complete snapshot chain with its SQL migrations;
+restore live data from Neon snapshots or `pg_dump`, never from Drizzle metadata.
 
 ## Data lifecycle
 
