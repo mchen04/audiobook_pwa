@@ -187,6 +187,8 @@ export async function resetAccount(userId: string): Promise<void> {
   await client`DELETE FROM book_tombstones WHERE owner_id = ${userId}`;
   await client`DELETE FROM listening_sessions WHERE user_id = ${userId}`;
   await client`DELETE FROM playback_device_sequences WHERE user_id = ${userId}`;
+  await client`DELETE FROM preference_write_receipts WHERE user_id = ${userId}`;
+  await client`DELETE FROM user_preferences WHERE user_id = ${userId}`;
 }
 
 /**

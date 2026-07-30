@@ -24,6 +24,7 @@ import {
 import type { FuzzOp } from "./harness/driver-entry";
 import { compare, LibraryModel, summarize, type Intent } from "./harness/model";
 import { Random } from "./harness/random";
+import { positiveInt, resolveSyncSeeds } from "./harness/seeds";
 import { readBookIds, readDeviceState, readServerState, readTagIds } from "./harness/state";
 
 /**
@@ -45,10 +46,7 @@ import { readBookIds, readDeviceState, readServerState, readTagIds } from "./har
  */
 
 // ------------------------------------------------------------------ settings
-const SEED_COUNT = positiveInt(process.env.HARK_SYNC_SEEDS, 12);
-const OPS_PER_SEED = positiveInt(process.env.HARK_SYNC_OPS, 26);
-/** Fixed by default so `pnpm test:sync` is reproducible; override to explore. */
-const DEFAULT_SEED_BASE = 20_260_101;
+const OPS_PER_SEED = positiveInt(process.env.HARK_SYNC_OPS, 26, "HARK_SYNC_OPS");
 
 const TAG_VOCABULARY = ["fiction", "history", "reread", "commute", "long"] as const;
 const COLLECTION_NAMES = ["Winter", "Queue"] as const;
@@ -67,28 +65,8 @@ const OMITTED_KINDS = new Set(
     .filter(Boolean),
 );
 
-const SEEDS = resolveSeeds();
-
-function positiveInt(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function resolveSeeds(): number[] {
-  const explicit = process.env.HARK_SYNC_SEED;
-  if (explicit) {
-    return explicit
-      .split(",")
-      .map((value) => Number(value.trim()))
-      .filter((value) => Number.isFinite(value));
-  }
-  const raw = process.env.HARK_SYNC_SEED_BASE;
-  const base =
-    raw === "random"
-      ? Math.floor(Math.random() * 1_000_000_000)
-      : positiveInt(raw, DEFAULT_SEED_BASE);
-  return Array.from({ length: SEED_COUNT }, (_, index) => base + index);
-}
+const SEEDS = resolveSyncSeeds();
+if (SEEDS.length === 0) throw new Error("The sync fuzz verifier resolved zero seeds");
 
 test.beforeAll(() => {
   console.log(

@@ -111,7 +111,8 @@ const T5_RETIRED_RATIONALE =
  * is ~120 s, which leaves a 65 s listen sitting 35 s clear of the floor after
  * the rewind, so a per-cycle walk has somewhere to show itself.
  */
-const LONG_BOOK_INDEX = 11;
+const FIVE_MINUTE_BOOK_INDEX = 10;
+const TOP_TIER_BOOK_INDEX = 11;
 const LONG_BOOK_REPEAT = 15;
 
 const CUMULATIVE = [
@@ -127,21 +128,20 @@ const CUMULATIVE = [
    * makes each open apply a genuine rewind, and then demands that the position
    * still not walk backwards across the cycles.
    *
-   * 300_000 ms picks the 5 s rewind tier deliberately. The oracle fixture book
-   * is ~24 s long; five cycles at the 30 s tier (>1 h absence) would drive the
-   * position to zero on the FIRST cycle and every later cycle would then read a
-   * clean 0 ms delta — a rewind that bottoms out cannot show a walk, so the
-   * higher tiers are UNREACHABLE with this fixture and are recorded as such
-   * rather than faked. At the 5 s tier the ~12 s anchor leaves room for two
-   * full cycles of walk before the floor, which is enough for the per-cycle
-   * column to show one; and a walk that bottoms out later still blows the
-   * total, since `anchor - 0` is thirty times the bar. Measured under
+   * 300_000 ms picks the 5 s rewind tier deliberately. This row also gets a
+   * long fixture: WebKit can spend several seconds between the requested play
+   * interval and the pause taking effect under a loaded full-matrix run. With
+   * a ~24 s book that instrumentation latency can put the saved position inside
+   * `BOOK_END_EPSILON_MS`, where reopening correctly restarts a finished book
+   * from zero and leaves no anchor to grade. A ~120 s book keeps the row far
+   * from that unrelated boundary while preserving the same rewind tier and
+   * bars. Measured under
    * `HARK_RESUME_POISON=persist-rewound-start`: per-cycle [0,5000,2806,0,0],
    * total 7806 against a 250 ms bar.
    */
   {
     scenario: "C3 cycles online, 5min absence each",
-    bookIndex: 10,
+    bookIndex: FIVE_MINUTE_BOOK_INDEX,
     network: "online" as const,
     cycles: 5,
     playMs: 12_000,
@@ -153,7 +153,7 @@ const CUMULATIVE = [
    * C3 deliberately grades the 5 s tier and records the two above it as
    * UNREACHABLE, because a 24 s book has no room for a 30 s subtraction. That
    * is a fixture limit, not a product one, so it is removed by giving this row
-   * a ~120 s book (`LONG_BOOK_INDEX`) and a 65 s listen. An absence of 65
+   * a ~120 s book (`TOP_TIER_BOOK_INDEX`) and a 65 s listen. An absence of 65
    * minutes puts it past the ladder's one-hour threshold, so every cycle
    * credits the full 30 s — asserted, not assumed, by `assertCumulativeMeasured`
    * — and the anchor lands around 35 s, comfortably clear of the floor, so a
@@ -164,7 +164,7 @@ const CUMULATIVE = [
    */
   {
     scenario: "C4 cycles online, 65min absence each",
-    bookIndex: LONG_BOOK_INDEX,
+    bookIndex: TOP_TIER_BOOK_INDEX,
     network: "online" as const,
     cycles: 5,
     playMs: 65_000,
@@ -190,7 +190,10 @@ const BOOK_COUNT = 14;
 
 test.beforeAll(async () => {
   test.setTimeout(900_000);
-  await resumeFixture(BOOK_COUNT, { [LONG_BOOK_INDEX]: LONG_BOOK_REPEAT });
+  await resumeFixture(BOOK_COUNT, {
+    [FIVE_MINUTE_BOOK_INDEX]: LONG_BOOK_REPEAT,
+    [TOP_TIER_BOOK_INDEX]: LONG_BOOK_REPEAT,
+  });
 });
 
 test.afterAll(async () => {

@@ -134,6 +134,48 @@
       "when": 1784961474325,
       "tag": "0018_stiff_sharon_ventura",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1785354336978,
+      "tag": "0019_next_korg",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785360704898,
+      "tag": "0020_disable_legacy_smart_rewind",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785362352746,
+      "tag": "0021_smart_rewind_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785362586255,
+      "tag": "0022_smart_rewind_provenance_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1785363077977,
+      "tag": "0023_enforce_smart_rewind_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785366453574,
+      "tag": "0024_strong_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

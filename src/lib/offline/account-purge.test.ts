@@ -5,6 +5,13 @@ import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
 import { listQueuedMutations, nextDeviceSequence } from "@/lib/offline-sync";
 import { listPendingPlaybackActions, storePlaybackAction } from "@/lib/playback-history";
+import {
+  DEFAULT_PREFERENCES,
+  listPendingPreferenceWrites,
+  PREFERENCES_DEFAULTS_VERSION,
+  PREFERENCES_WRITE_ID_HEADER,
+  savePreferences,
+} from "@/lib/preferences";
 import { openDB } from "idb";
 
 import { listLocalUserIds, purgeAccount, purgeOnSignIn, purgeOnSignOut } from "./account-purge";
@@ -65,6 +72,15 @@ function fakeLocalStorage() {
     clear: () => map.clear(),
     snapshot: () => [...map.keys()],
   };
+}
+
+function acknowledgePreferenceRequest(_url: RequestInfo | URL, init?: RequestInit): Response {
+  return Response.json({
+    preferences: DEFAULT_PREFERENCES,
+    defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
+    acknowledgedWriteId: new Headers(init?.headers).get(PREFERENCES_WRITE_ID_HEADER),
+    acknowledgedPatch: JSON.parse(String(init?.body ?? "{}")),
+  });
 }
 
 let caches: ReturnType<typeof fakeCaches>;
@@ -537,9 +553,9 @@ describe("sign-out drains before it purges", () => {
     const userId = "user-prefs-drain";
     seedPendingPreference(userId, 45_000);
     const sent: string[] = [];
-    const fetchFn = (async (url: RequestInfo | URL) => {
+    const fetchFn = (async (url: RequestInfo | URL, init?: RequestInit) => {
       sent.push(String(url));
-      return ok();
+      return acknowledgePreferenceRequest(url, init);
     }) as typeof fetch;
 
     const outcome = await purgeOnSignOut(userId, { fetchFn });
@@ -547,7 +563,7 @@ describe("sign-out drains before it purges", () => {
     expect(
       sent,
       "the pending preference change was never sent before its only record was deleted",
-    ).toContain("/api/preferences");
+    ).toContain("/api/preferences/v2");
     expect(outcome.undelivered).toStrictEqual([]);
   });
 
@@ -567,6 +583,32 @@ describe("sign-out drains before it purges", () => {
     expect(storage.getItem(`chapterline:preferences:${userId}`)).toBe(null);
   });
 
+  it("reports a current opt-in that only a predecessor server acknowledged", async () => {
+    const userId = "user-prefs-old-server";
+    storage.setItem(
+      `chapterline:preferences:${userId}`,
+      JSON.stringify({
+        preferences: { ...DEFAULT_PREFERENCES, smartRewind: true },
+        defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
+        revision: 4,
+        pendingRevision: 4,
+        pendingPatch: { smartRewind: true },
+        legacyPendingPreferences: null,
+        pendingSince: 1_772_000_000_000,
+      }),
+    );
+    const fetchFn = (async () =>
+      Response.json({ preferences: DEFAULT_PREFERENCES })) as typeof fetch;
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn });
+
+    expect(
+      outcome.undelivered.map((write) => `${write.kind}:${write.entityId}`),
+      "a predecessor 200 response was mistaken for a current-protocol acknowledgment",
+    ).toStrictEqual([`preferences:${userId}`]);
+    expect(storage.getItem(`chapterline:preferences:${userId}`)).toBe(null);
+  });
+
   it("cannot be hung by a network that never answers", async () => {
     const userId = "user-hangs";
     await commitMetadataEdit({ userId, deviceId: "device-1" }, "book", { title: "Renamed" });
@@ -576,6 +618,40 @@ describe("sign-out drains before it purges", () => {
 
     expect(outcome.undelivered.map((write) => write.kind)).toStrictEqual(["metadata"]);
     expect(await listQueuedMutations(userId)).toStrictEqual([]);
+  });
+
+  it("does not let a timed-out preference request strand writes after signing back in", async () => {
+    const userId = "user-preference-hangs";
+    storage.setItem(
+      `chapterline:preferences:${userId}`,
+      JSON.stringify({
+        preferences: { ...DEFAULT_PREFERENCES, skipBackMs: 45_000 },
+        defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
+        revision: 1,
+        pendingRevision: 1,
+        pendingSeriesId: "f51e4b7e-ecf6-4ae8-b1ee-ff0a9bf0fb90",
+        pendingWriteId: "6191fe4a-272d-4cc6-9be7-09020985d068",
+        pendingPatch: { skipBackMs: 45_000 },
+        legacyPendingPreferences: null,
+        legacyPendingWriteId: null,
+        pendingSince: 1_772_000_000_000,
+      }),
+    );
+    const never: typeof fetch = () => new Promise<Response>(() => undefined);
+
+    const outcome = await purgeOnSignOut(userId, { fetchFn: never, drainTimeoutMs: 25 });
+    expect(outcome.undelivered.map((write) => write.kind)).toStrictEqual(["preferences"]);
+    expect(storage.getItem(`chapterline:preferences:${userId}`)).toBe(null);
+
+    const nextFetch = vi.fn().mockResolvedValue(new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", nextFetch);
+    await savePreferences(userId, DEFAULT_PREFERENCES, { skipForwardMs: 45_000 });
+
+    expect(
+      nextFetch,
+      "the new write stayed queued behind the timed-out old request",
+    ).toHaveBeenCalledTimes(1);
+    expect(listPendingPreferenceWrites(userId)).toHaveLength(1);
   });
 });
 

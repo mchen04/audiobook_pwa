@@ -21,6 +21,7 @@ import { testAccountPassword } from "../../shared/test-account-password";
 // `context.setOffline` and `context.route` are both unusable here).
 import { closeSql, resetAccount, sql } from "../../sync/harness/app";
 import { startControllableNetwork, type ControllableNetwork } from "../../parity/harness/network";
+import { enableSmartRewindForOracle } from "./preferences";
 
 /**
  * The resume oracle.
@@ -1553,8 +1554,7 @@ export async function resumeFixture(
     `;
     const userId = row!.id;
     await resetAccount(userId);
-    await page.goto(`${net.origin}/library`, { waitUntil: "domcontentloaded" });
-    await page.waitForSelector("[data-launch-ready]", { state: "attached", timeout: 90_000 });
+    await enableSmartRewindForOracle(page, userId, `${net.origin}/library`);
     await assertEngineCanStoreMedia(page);
     // The worker has to be CONTROLLING, not merely activated: an uncontrolled
     // page cannot be served `/offline-media/*`, which is the URL the player
@@ -2368,7 +2368,7 @@ async function readRewindInputs(
 ): Promise<{ smartRewind: boolean; msSinceLastPause: number | null; markerKeysSeen: string[] }> {
   return page.evaluate(
     ({ id, book }) => {
-      let smartRewind = true;
+      let smartRewind = false;
       try {
         const raw = localStorage.getItem(`chapterline:preferences:${id}`);
         if (raw) {
@@ -2378,7 +2378,7 @@ async function readRewindInputs(
           }
         }
       } catch {
-        smartRewind = true;
+        smartRewind = false;
       }
       // Every marker key the app actually wrote, so a key-shape drift between
       // the app and this reader shows up as a row that names the keys it found
@@ -3663,11 +3663,7 @@ export type StaleAheadRow = {
   localAfterKillOccurredAt: number | null;
   /** Sampled off the element and carried forward to the instant of the SIGKILL. */
   truePositionMs: number;
-  /**
-   * How long the debounced post-rewind server write had to fire before the
-   * process died. It must be under the 800 ms seek debounce: if that write
-   * lands, it coalesces over the stale row and the trap was never armed.
-   */
+  /** Diagnostic wall time from the rewind click to the requested kill. */
   skipToKillMs: number;
   /** `queuedAfterKill - true`: how far ahead the thing about to be replayed is. */
   armedAheadMs: number | null;
@@ -3708,8 +3704,9 @@ export type StaleAheadRow = {
  *
  * The trap has to be armed for the row to mean anything, and "armed" is not
  * assumed: the queued position is read twice (before the skip, and after the
- * kill from a document that runs no app code), and the interval between the
- * skip and the kill is measured against the debounce it has to beat.
+ * kill from a document that runs no app code). The post-kill row itself is the
+ * authority on whether the debounced replacement ran; the measured interval is
+ * retained as a diagnostic because wall-clock scheduling varies under load.
  */
 export async function measureStaleAheadReplay(spec: {
   scenario: string;
@@ -3789,9 +3786,10 @@ export async function measureStaleAheadReplay(spec: {
     const lifecycleBeforeKill = await readLifecycle(session.page);
     const skippedAt = Date.now();
     await backControl.click();
-    // Long enough for the seek and the SYNCHRONOUS local write, short enough
-    // that the 800 ms debounced server write has not fired.
-    await session.page.waitForTimeout(120);
+    // The click resolves after the seek handler's synchronous local write. Do
+    // not add a fixed wait here: on a loaded WebKit process it only spends the
+    // debounce budget without proving anything about the queued row. That row
+    // is read directly from the restore stub after the kill.
 
     const sample = await session.page.evaluate(() => {
       const audio = document.querySelector("audio");

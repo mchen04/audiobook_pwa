@@ -1,6 +1,7 @@
 import type { PlayerBook } from "@/domain/player";
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
 import { clearQueuedMutationsForUser } from "@/lib/offline-sync";
+import { invalidatePreferenceWrites } from "@/lib/preferences";
 
 import {
   database,
@@ -385,6 +386,7 @@ export function asOfflinePlayerBook(record: OfflineBook): PlayerBook {
  * device keep their data.
  */
 export async function clearLocalDataForUser(userId: string): Promise<void> {
+  invalidatePreferenceWrites(userId);
   const downloads = await listStoredOfflineBooks(userId);
   const cleanup = await Promise.allSettled(
     downloads.map((record) => removeOfflineBook(userId, record.book.id)),

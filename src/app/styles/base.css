@@ -1,4 +1,10 @@
 :root {
+  /* Native system faces keep the installed PWA visually at home on iOS and
+     remove both a render-blocking font payload and a network-bound build step. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
   /* Color */
   --bg: #fafafa;
   --surface: #ffffff;

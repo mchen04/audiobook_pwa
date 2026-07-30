@@ -8,11 +8,24 @@ export type PlayerPreferences = {
 export const DEFAULT_PREFERENCES: PlayerPreferences = {
   skipBackMs: 15_000,
   skipForwardMs: 30_000,
-  smartRewind: true,
+  // Exact resume is the safe default. Smart rewind is still available, but a
+  // returning listener must opt in before opening a book can move behind the
+  // durable position they actually reached.
+  smartRewind: false,
   autoplayNextInCollection: false,
 };
 
 export const SKIP_CHOICES_MS = [5_000, 10_000, 15_000, 30_000, 45_000, 60_000, 90_000];
+export const PREFERENCES_DEFAULTS_VERSION = 2;
+export const PREFERENCES_DEFAULTS_HEADER = "X-Chapterline-Preferences-Defaults-Version";
+export const PREFERENCES_WRITE_ID_HEADER = "X-Chapterline-Preferences-Write-Id";
+export const PREFERENCES_LEGACY_REPLAY_HEADER = "X-Chapterline-Preferences-Legacy-Replay";
+const PREFERENCES_WRITE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isPreferenceWriteId(value: unknown): value is string {
+  return typeof value === "string" && PREFERENCES_WRITE_ID_PATTERN.test(value);
+}
 
 /** Shared skip bounds: client normalizer, API schema, and the database check
  * constraints in `db/schema.ts` all enforce this same range. */
@@ -22,8 +35,20 @@ const armedReconnectRetries = new Map<string, () => void>();
 
 type CachedPreferences = {
   preferences: PlayerPreferences;
+  /** Which product defaults an otherwise untouched cache was created from. */
+  defaultsVersion: number;
   revision: number;
   pendingRevision: number | null;
+  /** Stable across every local change appended before this pending series drains. */
+  pendingSeriesId: string | null;
+  /** Opaque identity for the pending write; unlike revision, it never repeats after a purge. */
+  pendingWriteId: string | null;
+  /** Current-client fields waiting to be acknowledged. */
+  pendingPatch: Partial<PlayerPreferences> | null;
+  /** Full payload queued by a pre-v2 client, retained until acknowledged. */
+  legacyPendingPreferences: PlayerPreferences | null;
+  /** Stable identity for the legacy piece while newer field patches are appended. */
+  legacyPendingWriteId: string | null;
   /** When the still-unacknowledged revision was written on this device. */
   pendingSince: number;
 };
@@ -50,8 +75,14 @@ export function readCachedPreferences(userId: string): PlayerPreferences {
 
 const EMPTY_CACHE: CachedPreferences = {
   preferences: DEFAULT_PREFERENCES,
+  defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
   revision: 0,
   pendingRevision: null,
+  pendingSeriesId: null,
+  pendingWriteId: null,
+  pendingPatch: null,
+  legacyPendingPreferences: null,
+  legacyPendingWriteId: null,
   pendingSince: 0,
 };
 
@@ -62,17 +93,71 @@ function readCache(userId: string): CachedPreferences {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === "object" && "preferences" in parsed) {
       const envelope = parsed as Partial<CachedPreferences>;
+      const revision = finiteOr(envelope.revision, 0);
+      const pendingRevision =
+        typeof envelope.pendingRevision === "number" && Number.isFinite(envelope.pendingRevision)
+          ? envelope.pendingRevision
+          : null;
+      const pendingWriteId =
+        pendingRevision !== null && isPreferenceWriteId(envelope.pendingWriteId)
+          ? envelope.pendingWriteId
+          : null;
+      const pendingSeriesId =
+        pendingRevision !== null && isPreferenceWriteId(envelope.pendingSeriesId)
+          ? envelope.pendingSeriesId
+          : null;
+      const storedPreferences = normalize(envelope.preferences);
+      const preferences = { ...storedPreferences };
+      const defaultsVersion = finiteOr(envelope.defaultsVersion, 0);
+      const isLegacy = defaultsVersion < PREFERENCES_DEFAULTS_VERSION;
+      // Builds before defaults v2 cannot distinguish an explicit opt-in from
+      // the inherited enabled default. Reset every legacy envelope once so an
+      // unrelated preference write cannot preserve an unexpected rewind.
+      // A listener can opt back in after the upgrade, at which point the cache
+      // carries defaultsVersion 2 and this migration no longer applies.
+      if (isLegacy) {
+        preferences.smartRewind = DEFAULT_PREFERENCES.smartRewind;
+      }
+      const savedPatch = normalizePatch(envelope.pendingPatch);
+      const hasSavedPatch = Object.prototype.hasOwnProperty.call(envelope, "pendingPatch");
+      const savedLegacy =
+        envelope.legacyPendingPreferences && typeof envelope.legacyPendingPreferences === "object"
+          ? normalize(envelope.legacyPendingPreferences)
+          : null;
+      let pendingPatch: Partial<PlayerPreferences> | null = null;
+      let legacyPendingPreferences: PlayerPreferences | null = null;
+      if (pendingRevision !== null) {
+        if (isLegacy) {
+          pendingPatch = savedPatch;
+          legacyPendingPreferences = storedPreferences;
+        } else {
+          pendingPatch = hasSavedPatch ? savedPatch : savedLegacy ? null : storedPreferences;
+          legacyPendingPreferences = savedLegacy;
+        }
+      }
+      const legacyPendingWriteId =
+        legacyPendingPreferences && isPreferenceWriteId(envelope.legacyPendingWriteId)
+          ? envelope.legacyPendingWriteId
+          : null;
       return {
-        preferences: normalize(envelope.preferences),
-        revision: finiteOr(envelope.revision, 0),
-        pendingRevision:
-          typeof envelope.pendingRevision === "number" && Number.isFinite(envelope.pendingRevision)
-            ? envelope.pendingRevision
-            : null,
+        preferences,
+        defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
+        revision,
+        pendingRevision,
+        pendingSeriesId,
+        pendingWriteId,
+        pendingPatch,
+        // A pre-v2 pending envelope is the only durable copy of an offline
+        // write. Retain its exact normalized payload until the server
+        // acknowledges it; the server applies legacy default policy.
+        legacyPendingPreferences,
+        legacyPendingWriteId,
         pendingSince: finiteOr(envelope.pendingSince, 0),
       };
     }
-    return { ...EMPTY_CACHE, preferences: normalize(parsed) };
+    const legacyPreferences = normalize(parsed);
+    legacyPreferences.smartRewind = DEFAULT_PREFERENCES.smartRewind;
+    return { ...EMPTY_CACHE, preferences: legacyPreferences };
   } catch {
     return EMPTY_CACHE;
   }
@@ -93,8 +178,17 @@ export async function fetchPreferences(userId: string): Promise<PlayerPreference
   try {
     const response = await fetch("/api/preferences", { cache: "no-store" });
     if (!response.ok) throw new Error("Preferences could not be loaded.");
-    const payload = (await response.json()) as { preferences: unknown };
+    const payload = (await response.json()) as {
+      preferences: unknown;
+      defaultsVersion?: unknown;
+    };
     const preferences = normalize(payload.preferences);
+    // A predecessor server cannot prove that true was an explicit opt-in.
+    // Preserve this v2 device's known value while mixed-version instances
+    // drain instead of adopting an ambiguous old response.
+    if (payload.defaultsVersion !== PREFERENCES_DEFAULTS_VERSION) {
+      preferences.smartRewind = before.preferences.smartRewind;
+    }
     const latest = readCache(userId);
     // The server's answer is adopted only if this device has written nothing
     // since the GET was issued. `pendingRevision === null` is not enough on its
@@ -118,14 +212,32 @@ export async function savePreferences(
   patch: Partial<PlayerPreferences>,
 ): Promise<PlayerPreferences> {
   const next = normalize({ ...current, ...patch });
-  const revision = readCache(userId).revision + 1;
+  const cached = readCache(userId);
+  const revision = cached.revision + 1;
+  const continuingSeries = cached.pendingRevision !== null;
+  const seriesId = continuingSeries
+    ? (cached.pendingSeriesId ?? crypto.randomUUID())
+    : crypto.randomUUID();
+  const writeId = continuingSeries
+    ? (cached.pendingWriteId ?? crypto.randomUUID())
+    : crypto.randomUUID();
+  const legacyWriteId = cached.legacyPendingPreferences
+    ? (cached.legacyPendingWriteId ?? crypto.randomUUID())
+    : null;
+  const pendingPatch = { ...(cached.pendingPatch ?? {}), ...(normalizePatch(patch) ?? {}) };
   cachePreferences(userId, {
     preferences: next,
+    defaultsVersion: PREFERENCES_DEFAULTS_VERSION,
     revision,
     pendingRevision: revision,
-    pendingSince: Date.now(),
+    pendingSeriesId: seriesId,
+    pendingWriteId: writeId,
+    pendingPatch,
+    legacyPendingPreferences: cached.legacyPendingPreferences,
+    legacyPendingWriteId: legacyWriteId,
+    pendingSince: cached.pendingRevision === null ? Date.now() : cached.pendingSince,
   });
-  await enqueuePreferenceWrite(userId, next, revision).catch(() => undefined);
+  await enqueuePreferenceWrite(userId, seriesId).catch(() => undefined);
   armReconnectRetry(userId);
   return next;
 }
@@ -140,11 +252,27 @@ export async function flushPendingPreferences(
   userId: string,
   fetchFn?: typeof fetch,
 ): Promise<void> {
-  const cached = readCache(userId);
+  let cached = readCache(userId);
   if (cached.pendingRevision === null) return;
-  await enqueuePreferenceWrite(userId, cached.preferences, cached.pendingRevision, fetchFn).catch(
-    () => undefined,
-  );
+  const seriesId = cached.pendingSeriesId ?? crypto.randomUUID();
+  const writeId = cached.pendingWriteId ?? crypto.randomUUID();
+  const legacyWriteId = cached.legacyPendingPreferences
+    ? (cached.legacyPendingWriteId ?? crypto.randomUUID())
+    : null;
+  if (
+    cached.pendingSeriesId === null ||
+    cached.pendingWriteId === null ||
+    cached.legacyPendingWriteId !== legacyWriteId
+  ) {
+    cached = {
+      ...cached,
+      pendingSeriesId: seriesId,
+      pendingWriteId: writeId,
+      legacyPendingWriteId: legacyWriteId,
+    };
+    cachePreferences(userId, cached);
+  }
+  await enqueuePreferenceWrite(userId, seriesId, fetchFn).catch(() => undefined);
   armReconnectRetry(userId);
 }
 
@@ -153,6 +281,12 @@ export function listPendingPreferenceWrites(userId: string): PendingPreferenceWr
   const cached = readCache(userId);
   if (cached.pendingRevision === null) return [];
   return [{ kind: "preferences", entityId: userId, queuedAt: cached.pendingSince }];
+}
+
+/** Detaches requests that may outlive sign-out from writes made after a new sign-in. */
+export function invalidatePreferenceWrites(userId: string): void {
+  activePreferenceWrites.delete(userId);
+  disarmReconnectRetry(userId);
 }
 
 /**
@@ -167,7 +301,7 @@ export function listPendingPreferenceWrites(userId: string): PendingPreferenceWr
  * revision, so the retry retires.
  */
 function armReconnectRetry(userId: string): void {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
   if (readCache(userId).pendingRevision === null) {
     disarmReconnectRetry(userId);
     return;
@@ -184,13 +318,14 @@ function disarmReconnectRetry(userId: string): void {
   const retry = armedReconnectRetries.get(userId);
   if (!retry) return;
   armedReconnectRetries.delete(userId);
-  window.removeEventListener("online", retry);
+  if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+    window.removeEventListener("online", retry);
+  }
 }
 
 function enqueuePreferenceWrite(
   userId: string,
-  preferences: PlayerPreferences,
-  revision: number,
+  seriesId: string,
   fetchFn?: typeof fetch,
 ): Promise<void> {
   const previous = activePreferenceWrites.get(userId) || Promise.resolve();
@@ -198,15 +333,66 @@ function enqueuePreferenceWrite(
     .catch(() => undefined)
     .then(async () => {
       const send = fetchFn ?? fetch;
-      const response = await send("/api/preferences", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preferences),
-      });
-      if (!response.ok) throw new Error("Preferences could not be saved.");
-      const latest = readCache(userId);
-      if (latest.pendingRevision === revision) {
-        cachePreferences(userId, { ...latest, pendingRevision: null, pendingSince: 0 });
+      let latest = readCache(userId);
+      if (latest.pendingSeriesId !== seriesId) return;
+
+      if (latest.legacyPendingPreferences && latest.legacyPendingWriteId) {
+        const legacyBody = latest.legacyPendingPreferences;
+        const legacyWriteId = latest.legacyPendingWriteId;
+        const acknowledged = await sendPreferencePatch(send, legacyBody, false, legacyWriteId);
+        if (!patchIncludes(acknowledged, legacyBody)) {
+          throw new Error("The server returned a mismatched legacy preference receipt.");
+        }
+        latest = readCache(userId);
+        if (latest.pendingSeriesId === seriesId && latest.legacyPendingWriteId === legacyWriteId) {
+          cachePreferences(userId, {
+            ...latest,
+            legacyPendingPreferences: null,
+            legacyPendingWriteId: null,
+          });
+        }
+      }
+
+      for (;;) {
+        latest = readCache(userId);
+        if (latest.pendingSeriesId !== seriesId) return;
+        const body = latest.pendingPatch;
+        if (!body || Object.keys(body).length === 0) break;
+        const writeId = latest.pendingWriteId ?? crypto.randomUUID();
+        if (latest.pendingWriteId === null) {
+          latest = { ...latest, pendingWriteId: writeId };
+          cachePreferences(userId, latest);
+        }
+        const acknowledged = await sendPreferencePatch(send, body, true, writeId);
+        latest = readCache(userId);
+        if (latest.pendingSeriesId !== seriesId || latest.pendingWriteId !== writeId) continue;
+        const remaining = removeAcknowledgedFields(latest.pendingPatch, acknowledged);
+        cachePreferences(userId, {
+          ...latest,
+          pendingPatch: remaining,
+          // A receipt identifies one immutable body. Fields appended while it
+          // was in flight continue under a fresh receipt instead of replaying
+          // acknowledged values as though they were part of the old write.
+          pendingWriteId: remaining ? crypto.randomUUID() : null,
+        });
+      }
+
+      latest = readCache(userId);
+      if (
+        latest.pendingSeriesId === seriesId &&
+        !latest.pendingPatch &&
+        !latest.legacyPendingPreferences
+      ) {
+        cachePreferences(userId, {
+          ...latest,
+          pendingRevision: null,
+          pendingSeriesId: null,
+          pendingWriteId: null,
+          pendingPatch: null,
+          legacyPendingPreferences: null,
+          legacyPendingWriteId: null,
+          pendingSince: 0,
+        });
         disarmReconnectRetry(userId);
       }
     })
@@ -215,6 +401,91 @@ function enqueuePreferenceWrite(
     });
   activePreferenceWrites.set(userId, next);
   return next;
+}
+
+async function sendPreferencePatch(
+  send: typeof fetch,
+  body: Partial<PlayerPreferences>,
+  currentVersion: boolean,
+  writeId: string,
+): Promise<Partial<PlayerPreferences>> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (currentVersion) {
+    headers[PREFERENCES_DEFAULTS_HEADER] = String(PREFERENCES_DEFAULTS_VERSION);
+  } else {
+    headers[PREFERENCES_LEGACY_REPLAY_HEADER] = "1";
+  }
+  headers[PREFERENCES_WRITE_ID_HEADER] = writeId;
+  // The versioned path is also the rollback fence for migrated legacy writes:
+  // a predecessor instance returns 404 instead of applying an unreceipted body.
+  const response = await send("/api/preferences/v2", {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error("Preferences could not be saved.");
+
+  const acknowledgment = (await response.json().catch(() => null)) as {
+    defaultsVersion?: unknown;
+    preferences?: unknown;
+    acknowledgedWriteId?: unknown;
+    acknowledgedPatch?: unknown;
+  } | null;
+  if (acknowledgment?.defaultsVersion !== PREFERENCES_DEFAULTS_VERSION) {
+    throw new Error("A predecessor server could not acknowledge the current preference write.");
+  }
+  if (!acknowledgment.preferences || typeof acknowledgment.preferences !== "object") {
+    throw new Error("The server returned no applied preferences acknowledgment.");
+  }
+  if (acknowledgment.acknowledgedWriteId !== writeId) {
+    throw new Error("The server did not acknowledge this preference write.");
+  }
+  if (!acknowledgment.acknowledgedPatch || typeof acknowledgment.acknowledgedPatch !== "object") {
+    throw new Error("The server returned no idempotent preference receipt.");
+  }
+  return acknowledgment.acknowledgedPatch as Partial<PlayerPreferences>;
+}
+
+function patchIncludes(
+  acknowledged: Partial<PlayerPreferences>,
+  expected: Partial<PlayerPreferences>,
+): boolean {
+  return (
+    Object.entries(expected) as Array<
+      [keyof PlayerPreferences, PlayerPreferences[keyof PlayerPreferences]]
+    >
+  ).every(([key, value]) => acknowledged[key] === value);
+}
+
+function removeAcknowledgedFields(
+  pending: Partial<PlayerPreferences> | null,
+  acknowledged: Partial<PlayerPreferences>,
+): Partial<PlayerPreferences> | null {
+  if (!pending) return null;
+  const remaining = { ...pending };
+  for (const [key, value] of Object.entries(acknowledged) as Array<
+    [keyof PlayerPreferences, PlayerPreferences[keyof PlayerPreferences]]
+  >) {
+    if (remaining[key] === value) delete remaining[key];
+  }
+  return Object.keys(remaining).length > 0 ? remaining : null;
+}
+
+function normalizePatch(value: unknown): Partial<PlayerPreferences> | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<PlayerPreferences>;
+  const patch: Partial<PlayerPreferences> = {};
+  if (raw.skipBackMs !== undefined) {
+    patch.skipBackMs = boundSkip(raw.skipBackMs, DEFAULT_PREFERENCES.skipBackMs);
+  }
+  if (raw.skipForwardMs !== undefined) {
+    patch.skipForwardMs = boundSkip(raw.skipForwardMs, DEFAULT_PREFERENCES.skipForwardMs);
+  }
+  if (typeof raw.smartRewind === "boolean") patch.smartRewind = raw.smartRewind;
+  if (typeof raw.autoplayNextInCollection === "boolean") {
+    patch.autoplayNextInCollection = raw.autoplayNextInCollection;
+  }
+  return patch;
 }
 
 function normalize(value: unknown): PlayerPreferences {

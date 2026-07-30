@@ -12,6 +12,7 @@ import type {
   PulledTombstone,
 } from "@/lib/offline/sync-protocol";
 import { db } from "@/server/db/client";
+import { serializePlayerPreferences } from "@/server/preferences/write-policy";
 import { planBookPage } from "@/server/sync/page-plan";
 import { planTombstoneWindow } from "@/server/sync/tombstone-window";
 import {
@@ -332,10 +333,7 @@ async function loadPreferences(transaction: PullTransaction, userId: string) {
     .limit(1);
   if (!row) return null;
   return {
-    skipBackMs: row.skipBackMs,
-    skipForwardMs: row.skipForwardMs,
-    smartRewind: row.smartRewind,
-    autoplayNextInCollection: row.autoplayNextInCollection,
+    ...serializePlayerPreferences(row),
     updatedAt: row.updatedAt.toISOString(),
   };
 }

@@ -5,6 +5,7 @@ import {
   check,
   index,
   integer,
+  jsonb,
   numeric,
   pgTable,
   primaryKey,
@@ -467,7 +468,8 @@ export const userPreferences = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     skipBackMs: integer("skip_back_ms").default(15_000).notNull(),
     skipForwardMs: integer("skip_forward_ms").default(30_000).notNull(),
-    smartRewind: boolean("smart_rewind").default(true).notNull(),
+    smartRewind: boolean("smart_rewind").default(false).notNull(),
+    smartRewindExplicit: boolean("smart_rewind_explicit").default(false).notNull(),
     autoplayNextInCollection: boolean("autoplay_next_in_collection").default(false).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -480,6 +482,27 @@ export const userPreferences = pgTable(
       "user_preferences_skip_forward_valid",
       sql`${table.skipForwardMs} >= 5000 AND ${table.skipForwardMs} <= 120000`,
     ),
+  ],
+);
+
+// Preferences are not outbox rows, but their local-first PATCH still needs a
+// durable server receipt: a response can be lost after commit, and replaying
+// that old intent after another device writes would otherwise move state back.
+export const preferenceWriteReceipts = pgTable(
+  "preference_write_receipts",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    writeId: uuid("write_id").notNull(),
+    appliedPatch: jsonb("applied_patch").$type<Record<string, unknown>>().notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.writeId] }),
+    index("preference_write_receipts_user_time_idx").on(table.userId, table.recordedAt),
   ],
 );
 
@@ -524,4 +547,5 @@ export const schema = {
   bookTags,
   listeningSessions,
   userPreferences,
+  preferenceWriteReceipts,
 };

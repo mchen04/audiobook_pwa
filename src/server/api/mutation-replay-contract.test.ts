@@ -252,6 +252,7 @@ describe("mutation schemas reject a body they do not understand", () => {
     ).toBe(true);
     expect(bookPatchSchema.safeParse({ archived: true }).success).toBe(true);
     expect(collectionPatchSchema.safeParse({ bookId: BOOK, include: true }).success).toBe(true);
+    expect(preferencesPatchSchema.safeParse({ smartRewind: true }).success).toBe(true);
     expect(
       preferencesPatchSchema.safeParse({
         skipBackMs: 15_000,
@@ -260,5 +261,8 @@ describe("mutation schemas reject a body they do not understand", () => {
         autoplayNextInCollection: false,
       }).success,
     ).toBe(true);
+    expect(
+      preferencesPatchSchema.safeParse({ defaultsVersion: 2, smartRewind: true }).success,
+    ).toBe(false);
   });
 });

@@ -2,11 +2,13 @@ import { defineConfig, devices } from "@playwright/test";
 
 import { assertLocalDatabase } from "./scripts/lib/assert-local-database.mjs";
 import { DEFAULT_TEST_ENV_FILE, loadEnvFile } from "./scripts/lib/env-file.mjs";
+import { materializeRandomSyncSeeds } from "./tests/sync/harness/seeds";
 
 // The e2e suite registers accounts and imports books, so it reads .env.test and
 // never .env.local. Start the database it expects with: node scripts/test-db.mjs
 const envFile = process.env.HARK_ENV_FILE ?? DEFAULT_TEST_ENV_FILE;
 loadEnvFile(envFile);
+materializeRandomSyncSeeds();
 
 // Refuses to continue if this is aimed at a hosted database. Also re-checked
 // inside scripts/run-standalone.mjs, which is the process that connects.
@@ -78,6 +80,7 @@ export default defineConfig({
     {
       name: "sync",
       testDir: "./tests/sync",
+      testIgnore: "**/*.test.ts",
       // Fuzz seeds interleaved with offline/online transitions and reloads.
       timeout: 900_000,
       use: { ...devices["iPhone 15"], browserName: "webkit" },

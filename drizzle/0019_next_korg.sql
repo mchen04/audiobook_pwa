@@ -1,0 +1,1 @@
+ALTER TABLE "user_preferences" ALTER COLUMN "smart_rewind" SET DEFAULT false;

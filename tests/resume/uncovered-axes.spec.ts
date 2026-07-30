@@ -461,13 +461,14 @@ test("W1: two writers must not mean two write rates, and a paused player must wr
  * The trap, and why every guard below is a guard on the INSTRUMENT.
  *
  * The failure needs three things to line up: a heartbeat that journalled a
- * position, a rewind after it, and a process death inside the 800 ms window
- * before the rewind's own server write fires. Miss any one and the row comes
+ * position, a rewind after it, and a process death before the rewind's own
+ * server write replaces the queued heartbeat. Miss any one and the row comes
  * back green having tested nothing — the most dangerous outcome this file can
- * produce, because it would retire a real defect on a vacuous pass. So the row
- * carries the queued value read twice (once before the rewind, once after the
- * kill from a document that runs no app code) and the measured skip-to-kill
- * interval, and each is asserted before the product is graded at all.
+ * produce, because it would retire a real defect on a vacuous pass. The direct
+ * witness is the queued value read after the kill from a document that runs no
+ * app code: it must still be one stale row materially ahead of the user's
+ * position. The measured skip-to-kill interval stays diagnostic, but is not a
+ * proxy for state the row can inspect directly.
  */
 test("S1: a kill between the rewind and its write must not leave the server ahead", async () => {
   test.setTimeout(600_000);
@@ -485,13 +486,6 @@ test("S1: a kill between the rewind and its write must not leave the server ahea
   ).toBeGreaterThan(10_000);
 
   // --------------------------------------------------------- was it armed?
-  expect(
-    row.skipToKillMs,
-    `S1: UNCOVERED. ${row.skipToKillMs}ms elapsed between the rewind and the SIGKILL, which is ` +
-      "past the 800ms seek debounce, so the post-rewind server write had time to be journalled. " +
-      "It would then coalesce over the stale row and the trap was never set — this row's green " +
-      "would mean nothing.",
-  ).toBeLessThan(800);
   expect(
     row.queuedAfterKillCount,
     `S1: UNCOVERED. The outbox held ${row.queuedAfterKillCount} progress rows for this book after ` +
