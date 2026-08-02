@@ -69,7 +69,7 @@ export type StoredChapterTranscript = {
  * bounded, provable sweep instead of a best-effort one.
  */
 
-export type MirrorMediaAsset = {
+type MirrorMediaAsset = {
   originalFilename: string;
   mimeType: string;
   byteSize: number;
@@ -162,7 +162,7 @@ export type MirrorCollectionBook = {
   position: number;
 };
 
-export type MirrorPreferences = {
+type MirrorPreferences = {
   userId: string;
   skipBackMs: number;
   skipForwardMs: number;

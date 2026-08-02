@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "fake-indexeddb/auto";
 
-import type { PlaybackHistoryEntry } from "@/domain/player";
+import { PLAYBACK_HISTORY_LIMIT, type PlaybackHistoryEntry } from "@/domain/playback-history";
 
 import {
   clearPlaybackHistoryForUser,
   loadPlaybackHistory,
-  PLAYBACK_HISTORY_LIMIT,
   replayPlaybackHistory,
   storePlaybackAction,
 } from "./playback-history";

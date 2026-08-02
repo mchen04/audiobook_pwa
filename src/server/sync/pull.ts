@@ -11,7 +11,7 @@ import type {
   PulledTag,
   PulledTombstone,
 } from "@/lib/offline/sync-protocol";
-import { db } from "@/server/db/client";
+import { db, type Transaction } from "@/server/db/client";
 import { serializePlayerPreferences } from "@/server/preferences/write-policy";
 import { planBookPage } from "@/server/sync/page-plan";
 import { planTombstoneWindow } from "@/server/sync/tombstone-window";
@@ -40,7 +40,7 @@ import {
 
 const BOOK_PAGE_SIZE = 200;
 const RECENT_SESSION_LIMIT = 200;
-export const EPOCH_CURSOR = "1970-01-01T00:00:00.000000Z";
+const EPOCH_CURSOR = "1970-01-01T00:00:00.000000Z";
 
 /**
  * Cursors are microsecond-precision UTC text, produced by and compared against
@@ -59,7 +59,11 @@ function after(column: SQLWrapper, cursor: string) {
   return sql`${column} > ${cursor}::timestamptz`;
 }
 
-export async function loadPullBatch(userId: string, since: string | null): Promise<PullBatch> {
+export async function loadPullBatch(
+  userId: string,
+  since: string | null,
+  options: { finalSnapshotsOnly?: boolean } = {},
+): Promise<PullBatch> {
   return db.transaction(
     async (transaction) => {
       const floor = since || EPOCH_CURSOR;
@@ -78,13 +82,27 @@ export async function loadPullBatch(userId: string, since: string | null): Promi
           )
         : page.watermark;
 
+      // The snapshot streams — tags, collections, preferences, sessions — are
+      // whole-account truths, so re-sending them on every page of a paged sync
+      // is pure waste: only the final page's copy survives. But a bundle that
+      // predates the mirror's `complete` gate applies every page's streams
+      // unconditionally, and an interim page's empty copies would wipe its
+      // local state. Only a client that declared `snapshots=final` may be
+      // spared the interim copies.
+      const snapshotPage = page.complete || !options.finalSnapshotsOnly;
       const [aggregates, tagRows, collectionRows, preferences, sessions, liveBookIds] =
         await Promise.all([
           loadBookAggregates(transaction, page.rows),
-          loadTags(transaction, userId),
-          loadCollections(transaction, userId),
-          loadPreferences(transaction, userId),
-          loadRecentSessions(transaction, userId),
+          snapshotPage ? loadTags(transaction, userId) : Promise.resolve([]),
+          snapshotPage ? loadCollections(transaction, userId) : Promise.resolve([]),
+          snapshotPage ? loadPreferences(transaction, userId) : Promise.resolve(null),
+          snapshotPage ? loadRecentSessions(transaction, userId) : Promise.resolve([]),
+          // Incremental pulls learn deletions from `tombstones`, but the
+          // complete id list still rides every final page: clients installed
+          // before tombstone consumption shipped ignore `tombstones` entirely,
+          // and a cursor older than the tombstone retention window (route
+          // DELETE prunes at 365 days) would silently miss deletions. It may
+          // drop to first-sync-only once neither reader exists.
           page.complete ? loadLiveBookIds(transaction, userId) : Promise.resolve(null),
         ]);
 
@@ -106,7 +124,6 @@ export async function loadPullBatch(userId: string, since: string | null): Promi
   );
 }
 
-type PullTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type BookRow = typeof books.$inferSelect & { cursorAt: string };
 type BookPage = { rows: BookRow[]; watermark: string; complete: boolean };
 
@@ -121,7 +138,7 @@ type BookPage = { rows: BookRow[]; watermark: string; complete: boolean };
  * whole group is fetched instead — bounded by the size of one import.
  */
 async function loadBookPage(
-  transaction: PullTransaction,
+  transaction: Transaction,
   userId: string,
   floor: string,
 ): Promise<BookPage> {
@@ -169,7 +186,7 @@ async function loadBookPage(
  * single scalar cursor sound for both streams.
  */
 async function loadPlaybackStates(
-  transaction: PullTransaction,
+  transaction: Transaction,
   userId: string,
   floor: string,
   page: BookPage,
@@ -204,7 +221,7 @@ function toPulledPlaybackState(row: typeof playbackStates.$inferSelect): PulledP
 
 /** Chapters and tag edges travel with their book; neither carries an `updatedAt`. */
 async function loadBookAggregates(
-  transaction: PullTransaction,
+  transaction: Transaction,
   rows: BookRow[],
 ): Promise<PulledBook[]> {
   if (!rows.length) return [];
@@ -279,7 +296,7 @@ async function loadBookAggregates(
   });
 }
 
-async function loadTags(transaction: PullTransaction, userId: string): Promise<PulledTag[]> {
+async function loadTags(transaction: Transaction, userId: string): Promise<PulledTag[]> {
   return transaction
     .select({ id: tags.id, name: tags.name })
     .from(tags)
@@ -288,7 +305,7 @@ async function loadTags(transaction: PullTransaction, userId: string): Promise<P
 }
 
 async function loadCollections(
-  transaction: PullTransaction,
+  transaction: Transaction,
   userId: string,
 ): Promise<PulledCollection[]> {
   const rows = await transaction
@@ -325,7 +342,7 @@ async function loadCollections(
   }));
 }
 
-async function loadPreferences(transaction: PullTransaction, userId: string) {
+async function loadPreferences(transaction: Transaction, userId: string) {
   const [row] = await transaction
     .select()
     .from(userPreferences)
@@ -340,11 +357,19 @@ async function loadPreferences(transaction: PullTransaction, userId: string) {
 
 /** Append-only and deduped by id on the device, so a full recent window is safe. */
 async function loadRecentSessions(
-  transaction: PullTransaction,
+  transaction: Transaction,
   userId: string,
 ): Promise<PulledListeningSession[]> {
   const rows = await transaction
-    .select()
+    .select({
+      id: listeningSessions.id,
+      bookId: listeningSessions.bookId,
+      startedAt: listeningSessions.startedAt,
+      endedAt: listeningSessions.endedAt,
+      startPositionMs: listeningSessions.startPositionMs,
+      endPositionMs: listeningSessions.endPositionMs,
+      listenedMs: listeningSessions.listenedMs,
+    })
     .from(listeningSessions)
     .where(eq(listeningSessions.userId, userId))
     .orderBy(desc(listeningSessions.startedAt))
@@ -369,7 +394,7 @@ async function loadRecentSessions(
  * deletions since the device's cursor, not the size of the library.
  */
 async function loadTombstones(
-  transaction: PullTransaction,
+  transaction: Transaction,
   userId: string,
   window: ReturnType<typeof planTombstoneWindow>,
 ): Promise<PulledTombstone[]> {
@@ -394,13 +419,13 @@ async function loadTombstones(
 }
 
 /**
- * The legacy deletion oracle, kept until every reader consumes `tombstones`.
- * This complete, unpaged id list is an explicit statement of what still exists,
- * and the device turns the difference into deletes. It is index-only over
- * `books (owner_id, updated_at, id)` and rides along only on the final page of
- * a sync.
+ * The complete deletion oracle. This unpaged id list is the explicit statement
+ * of what still exists, and the device turns the difference into deletes. It
+ * anchors a first sync (which has no cursor for tombstones), heals a cursor
+ * older than tombstone retention, and keeps pre-tombstone clients correct.
+ * Index-only over `books (owner_id, updated_at, id)`.
  */
-async function loadLiveBookIds(transaction: PullTransaction, userId: string): Promise<string[]> {
+async function loadLiveBookIds(transaction: Transaction, userId: string): Promise<string[]> {
   const rows = await transaction
     .select({ id: books.id })
     .from(books)

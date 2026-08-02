@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_PREFERENCES,
-  fetchPreferences,
-  flushPendingPreferences,
-  listPendingPreferenceWrites,
   PREFERENCES_DEFAULTS_HEADER,
   PREFERENCES_DEFAULTS_VERSION,
   PREFERENCES_LEGACY_REPLAY_HEADER,
   PREFERENCES_WRITE_ID_HEADER,
+} from "@/domain/preferences";
+
+import {
+  fetchPreferences,
+  flushPendingPreferences,
+  listPendingPreferenceWrites,
   readCachedPreferences,
   savePreferences,
 } from "./preferences";

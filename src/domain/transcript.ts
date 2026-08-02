@@ -9,8 +9,8 @@ import { z } from "zod";
  */
 
 export const TRANSCRIPT_GEOB_DESCRIPTION = "EPUB_LISTENER_TRANSCRIPT";
-export const TRANSCRIPT_FORMAT = "epub-listener-transcript";
-export const TRANSCRIPT_VERSION = 1;
+const TRANSCRIPT_FORMAT = "epub-listener-transcript";
+const TRANSCRIPT_VERSION = 1;
 
 /** Reject transcript frames larger than this before even inflating. */
 export const MAX_COMPRESSED_TRANSCRIPT_BYTES = 24 * 1024 * 1024;
@@ -22,7 +22,7 @@ export function maxDecompressedTranscriptBytes(durationMs: number): number {
   return Math.min(MAX_DECOMPRESSED_ABSOLUTE_BYTES, 1024 * 1024 + 600 * durationSeconds);
 }
 
-export type TranscriptWord = {
+type TranscriptWord = {
   text: string;
   startMs: number;
   endMs: number;
@@ -38,7 +38,7 @@ export type TranscriptSentence = {
   words: TranscriptWord[];
 };
 
-export type TranscriptChapter = {
+type TranscriptChapter = {
   /** Index into the book's embedded chapter list; the array may be sparse. */
   index: number;
   granularity: "word" | "sentence";

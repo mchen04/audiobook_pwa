@@ -1,15 +1,17 @@
 import { z } from "zod";
 
 import { progressSchema } from "@/server/api/mutation-schemas";
-import { withMutationParams } from "@/server/api/route-handler";
+import { withMutation } from "@/server/api/route-handler";
 import { saveProgress } from "@/server/playback/progress";
 
 export const runtime = "nodejs";
 
-export const PATCH = withMutationParams(
-  z.object({ bookId: z.uuid() }),
-  progressSchema,
-  "Invalid progress update.",
+export const PATCH = withMutation(
+  {
+    params: z.object({ bookId: z.uuid() }),
+    body: progressSchema,
+    invalidBody: "Invalid progress update.",
+  },
   async ({ session, params, data }) => {
     const result = await saveProgress(session.user.id, { bookId: params.bookId, ...data });
     if (result.kind === "not-found") return Response.json({ error: "Not found" }, { status: 404 });

@@ -25,14 +25,7 @@ const { playback, timeState } = vi.hoisted(() => ({
     history: [],
     historyNotice: null,
     sleepMode: null,
-    preferences: {
-      skipBackMs: 15_000,
-      skipForwardMs: 30_000,
-      smartRewind: true,
-      autoplayNextInCollection: false,
-    },
     lastEndedAt: 0,
-    updatePreferences: vi.fn(),
     loadBook: vi.fn(),
     toggle: vi.fn(),
     pause: vi.fn(),
@@ -55,6 +48,17 @@ vi.mock("./playback-provider", () => ({
   usePlaybackTime: () => timeState.currentTimeMs,
   usePlaybackDerived: <T,>(derive: () => T) => derive(),
   useCurrentChapter: () => timeState.currentChapter,
+}));
+vi.mock("./preferences-provider", () => ({
+  usePreferences: () => ({
+    preferences: {
+      skipBackMs: 15_000,
+      skipForwardMs: 30_000,
+      smartRewind: true,
+      autoplayNextInCollection: false,
+    },
+    updatePreferences: vi.fn(),
+  }),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 

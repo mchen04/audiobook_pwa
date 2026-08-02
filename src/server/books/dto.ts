@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { LibraryBook } from "@/domain/library";
-import type { PlaybackHistoryEntry } from "@/domain/player";
+import type { PlaybackHistoryEntry } from "@/domain/playback-history";
 import type { listBooksPage } from "@/server/books/queries";
 import type { playbackActions } from "@/server/db/schema";
 

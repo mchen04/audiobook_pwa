@@ -1,4 +1,4 @@
-import { PREFERENCES_DEFAULTS_VERSION, type PlayerPreferences } from "@/lib/preferences";
+import { PREFERENCES_DEFAULTS_VERSION, type PlayerPreferences } from "@/domain/preferences";
 
 export type PreferenceWritePolicy = {
   patch: Partial<PlayerPreferences>;

@@ -7,11 +7,10 @@ import { listQueuedMutations, nextDeviceSequence } from "@/lib/offline-sync";
 import { listPendingPlaybackActions, storePlaybackAction } from "@/lib/playback-history";
 import {
   DEFAULT_PREFERENCES,
-  listPendingPreferenceWrites,
   PREFERENCES_DEFAULTS_VERSION,
   PREFERENCES_WRITE_ID_HEADER,
-  savePreferences,
-} from "@/lib/preferences";
+} from "@/domain/preferences";
+import { listPendingPreferenceWrites, savePreferences } from "@/lib/preferences";
 import { openDB } from "idb";
 
 import { listLocalUserIds, purgeAccount, purgeOnSignIn, purgeOnSignOut } from "./account-purge";

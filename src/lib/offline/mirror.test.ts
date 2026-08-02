@@ -303,6 +303,48 @@ describe("tombstones", () => {
     expect(await storeContents("listeningSessions")).toStrictEqual([]);
   });
 
+  it("deletes a tombstoned book and everything hanging off it on an incremental pull", async () => {
+    await applyPullBatch(USER_A, seeded());
+
+    await applyPullBatch(
+      USER_A,
+      batch({
+        since: "2026-07-01T00:00:00.000000Z",
+        tombstones: [{ bookId: "book-2", deletedAt: "2026-07-03T00:00:00.000000Z" }],
+      }),
+    );
+
+    expect((await listMirrorBooks(USER_A)).map((row) => row.id)).toStrictEqual(["book-1"]);
+    expect(await storeContents("listeningSessions")).toStrictEqual([]);
+  });
+
+  it("ignores a tombstone for a book this device never held", async () => {
+    await applyPullBatch(USER_A, seeded());
+
+    await applyPullBatch(
+      USER_A,
+      batch({
+        since: "2026-07-01T00:00:00.000000Z",
+        tombstones: [{ bookId: "book-elsewhere", deletedAt: "2026-07-03T00:00:00.000000Z" }],
+      }),
+    );
+
+    expect(await listMirrorBooks(USER_A)).toHaveLength(2);
+  });
+
+  it("keeps snapshot stores untouched by an interim page's empty streams", async () => {
+    await applyPullBatch(USER_A, seeded());
+
+    await applyPullBatch(
+      USER_A,
+      batch({ complete: false, tags: [], collections: [], listeningSessions: [] }),
+    );
+
+    expect(await listMirrorTagNames(USER_A)).toStrictEqual(["Fiction"]);
+    expect(await storeContents("collections")).toHaveLength(1);
+    expect(await storeContents("listeningSessions")).toHaveLength(1);
+  });
+
   it("does not delete another account's books through one account's manifest", async () => {
     await applyPullBatch(USER_B, batch({ books: [book("book-b")] }));
     await applyPullBatch(USER_A, seeded());

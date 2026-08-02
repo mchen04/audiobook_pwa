@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { isReasonablePlaybackActionTime } from "@/lib/playback-history-policy";
 import { playbackHistoryEventSchema } from "@/server/api/mutation-schemas";
-import { withMutationParams } from "@/server/api/route-handler";
+import { withMutation } from "@/server/api/route-handler";
 import { savePlaybackAction } from "@/server/playback/history";
 import {
   listeningSessionResponse,
@@ -19,10 +19,12 @@ export const runtime = "nodejs";
  * mutation kind, and `history` is the kind that never coalesces — which is what
  * makes each event survive rather than collapse into the last one.
  */
-export const POST = withMutationParams(
-  z.object({ bookId: z.uuid() }),
-  playbackHistoryEventSchema,
-  "Invalid playback history event.",
+export const POST = withMutation(
+  {
+    params: z.object({ bookId: z.uuid() }),
+    body: playbackHistoryEventSchema,
+    invalidBody: "Invalid playback history event.",
+  },
   async ({ session, params, data }) => {
     if ("startedAt" in data) {
       const { id, ...stretch } = data;

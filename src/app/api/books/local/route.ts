@@ -24,8 +24,7 @@ const CHAPTER_INSERT_BATCH = 2_000;
  * and organization — never the audio bytes.
  */
 export const POST = withMutation(
-  bookRegistrationSchema,
-  "The book registration is invalid.",
+  { body: bookRegistrationSchema, invalidBody: "The book registration is invalid." },
   async ({ session, data }) => {
     let filename: string;
     try {

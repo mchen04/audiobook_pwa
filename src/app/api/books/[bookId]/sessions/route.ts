@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { listeningSessionSchema } from "@/server/api/mutation-schemas";
-import { withMutationParams } from "@/server/api/route-handler";
+import { withMutation } from "@/server/api/route-handler";
 import {
   listeningSessionResponse,
   recordListeningSession,
@@ -9,10 +9,12 @@ import {
 
 export const runtime = "nodejs";
 
-export const POST = withMutationParams(
-  z.object({ bookId: z.uuid() }),
-  listeningSessionSchema,
-  "Invalid listening session.",
+export const POST = withMutation(
+  {
+    params: z.object({ bookId: z.uuid() }),
+    body: listeningSessionSchema,
+    invalidBody: "Invalid listening session.",
+  },
   async ({ session, params, data }) => {
     const { mutationId, ...stretch } = data;
     return listeningSessionResponse(

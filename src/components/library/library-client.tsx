@@ -17,7 +17,7 @@ import {
 import Link from "next/link";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
-import { ChangeEvent, memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useState } from "react";
 
 import { FullPlayer } from "@/components/player/full-player";
 import { useActiveUserId } from "@/components/use-active-user";
@@ -25,23 +25,19 @@ import type { LibraryBook } from "@/domain/library";
 import { formatBytes } from "@/lib/format-bytes";
 import { formatDurationRounded } from "@/lib/format-time";
 import { markLaunchPainted } from "@/lib/launch-revalidation";
-import { importLocalMp3 } from "@/lib/local-import";
 import type { OfflineBook } from "@/lib/offline/db";
 import { asOfflinePlayerBook } from "@/lib/offline/library";
 import { listBookIdsWithTranscripts } from "@/lib/offline/transcript-store";
 
+import { UploadBanners, useMp3Import } from "./library-upload";
 import { type SortOrder, type StatusFilter } from "./library-view";
+import { usePageWindow, useSeedFollowingToggle } from "./use-derived-reset";
 import { type DeviceIndex, useLibraryBooks } from "./use-library-books";
+import { useOfflineBookRoute } from "./use-offline-book-route";
 
 type LibraryClientProps = {
   /** Present only when the server rendered this page; absent on a warm launch. */
   userId?: string;
-};
-
-type UploadState = {
-  filename: string;
-  percent: number;
-  stage: string;
 };
 
 const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
@@ -58,8 +54,6 @@ const PAGE_SIZE = 50;
 const MISSING_MEDIA_HINT =
   "The audio for this book lives only on the device that imported it. Re-import the MP3 here to listen.";
 
-const BOOK_PATH = /^\/books\/([0-9a-fA-F-]{36})\/?$/;
-
 /**
  * Every `Link` below carries `prefetch={false}`, deliberately.
  *
@@ -74,45 +68,36 @@ const BOOK_PATH = /^\/books\/([0-9a-fA-F-]{36})\/?$/;
 
 export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
   const userId = useActiveUserId(serverUserId);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const [query, setQuery] = useState("");
+  // The input stays controlled and immediate; the listing reads the deferred
+  // value, so a slow re-read never holds a keystroke back from the screen.
+  const deferredQuery = useDeferredValue(query);
   const [status, setStatus] = useState<StatusFilter>("all");
   // The header's Downloads link is `?device=1`, so the facet follows the URL
   // until the user works the chip themselves — and follows it again the next
   // time that link is used.
   const facetFromUrl = useSearchParams().get("device") === "1";
-  const [facetChoice, setFacetChoice] = useState<{ from: boolean; on: boolean } | null>(null);
-  const onDevice = facetChoice?.from === facetFromUrl ? facetChoice.on : facetFromUrl;
+  const [onDevice, setOnDevice] = useSeedFollowingToggle(facetFromUrl);
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [sort, setSort] = useState<SortOrder>("activity");
   const [view, setView] = useState<"grid" | "list">("grid");
-  const [upload, setUpload] = useState<UploadState | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [readAlongIds, setReadAlongIds] = useState<Set<string>>(new Set());
-  /**
-   * The service worker answers a navigation it cannot fetch with the cached
-   * library document, whatever URL was asked for. Sitting at a `/books/` URL
-   * therefore means the user asked to play a book and the network could not
-   * answer — so this device's own copy answers instead. Online the book page
-   * renders and this component never mounts at that URL, which is why opening
-   * a book needs no "am I online?" question anywhere.
-   */
-  const [fallbackBookId, setFallbackBookId] = useState(bookIdFromUrl);
-  /** Whether the library is one history entry back; see `leavePlayer`. */
-  const [cameFromLibrary] = useState(openedFromLibrary);
-  const [pagination, setPagination] = useState({ key: "", pages: 1 });
+  const { bookId: fallbackBookId, leavePlayer } = useOfflineBookRoute();
 
   const { snapshot, preparing, firstSyncStatus, unavailable, reload, retry, removeDownload } =
-    useLibraryBooks(userId, { query, status, tag: activeTag, sort, onDevice });
+    useLibraryBooks(userId, { query: deferredQuery, status, tag: activeTag, sort, onDevice });
+
+  // The page owns its one alert region; the import hook and the download
+  // remover both report into it.
+  const [error, setError] = useState<string | null>(null);
+  const { fileInput, upload, chooseFile } = useMp3Import(userId, reload, setError);
 
   const books = snapshot?.books || [];
   const device: DeviceIndex = snapshot?.device || EMPTY_DEVICE_INDEX;
   const playing = fallbackBookId ? device.get(fallbackBookId) || null : null;
-  // A filter change resets the page window without an effect: the window is
-  // simply not carried across a different set of filters.
-  const filterKey = JSON.stringify([query, status, activeTag, sort, onDevice]);
-  const pages = pagination.key === filterKey ? pagination.pages : 1;
+  const filterKey = JSON.stringify([deferredQuery, status, activeTag, sort, onDevice]);
+  const { pages, showMore } = usePageWindow(filterKey);
   // A first launch on a device that has never synced holds an empty mirror, and
   // "you have no books" would simply be false there. Section 12's upgrading
   // device is unaffected: it has downloads, so `libraryTotal` is not zero and
@@ -147,38 +132,6 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
     if (launchReady) markLaunchPainted();
   }, [launchReady]);
 
-  /**
-   * The URL, not a click, is what decides whether the player or the grid is on
-   * screen here — so every way it can change has to be followed, and the back
-   * button changes it without a click. `AppShell` and `MiniPlayer` already
-   * follow it through `usePathname()`; a book id read only at mount would
-   * leave the player up under a header and a mini player that had gone back to
-   * library chrome.
-   */
-  useEffect(() => {
-    const follow = () => setFallbackBookId(bookIdFromUrl());
-    window.addEventListener("popstate", follow);
-    return () => window.removeEventListener("popstate", follow);
-  }, []);
-
-  /**
-   * Leaving the player is a real `back()` whenever there is something to go
-   * back to: the entry is popped rather than overwritten, so the book stays
-   * ahead in history, forward still works, and this button and the system back
-   * button agree about where the library is. The `popstate` above is what then
-   * puts the grid on screen. A document opened straight at a book URL — a
-   * shared link, a bookmark — has only the browser behind it, so there the URL
-   * is rewritten in place rather than walking the user out of the app.
-   */
-  const leavePlayer = useCallback(() => {
-    if (cameFromLibrary) {
-      window.history.back();
-      return;
-    }
-    window.history.replaceState(null, "", "/library");
-    setFallbackBookId(null);
-  }, [cameFromLibrary]);
-
   useEffect(() => {
     if (!userId) return;
     let active = true;
@@ -199,37 +152,8 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
         setError("The download could not be removed right now. It will retry automatically.");
       }
     },
-    [removeDownload],
+    [removeDownload, setError],
   );
-
-  function chooseFile() {
-    setError(null);
-    inputRef.current?.click();
-  }
-
-  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".mp3")) {
-      setError("Choose an MP3 file. Other audiobook formats are not supported.");
-      return;
-    }
-    if (!userId) return;
-
-    setError(null);
-    setUpload({ filename: file.name, percent: 0, stage: "Starting" });
-    try {
-      await importLocalMp3(userId, file, (percent, stage) =>
-        setUpload({ filename: file.name, percent, stage }),
-      );
-      await reload();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "The MP3 could not be imported.");
-    } finally {
-      setUpload(null);
-    }
-  }
 
   if (playing) {
     return (
@@ -304,15 +228,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
 
   return (
     <>
-      <input
-        ref={inputRef}
-        className="visually-hidden"
-        type="file"
-        accept=".mp3,audio/mpeg,audio/mp3"
-        onChange={handleFile}
-        tabIndex={-1}
-        aria-label="Choose an MP3 file to import"
-      />
+      {fileInput}
 
       {snapshot.libraryTotal === 0 ? (
         <section
@@ -466,7 +382,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
               type="button"
               className="filter-chip filter-chip-device"
               aria-pressed={onDevice}
-              onClick={() => setFacetChoice({ from: facetFromUrl, on: !onDevice })}
+              onClick={() => setOnDevice(!onDevice)}
             >
               <DownloadSimple size={15} weight="bold" aria-hidden="true" />
               <span>On this device</span>
@@ -518,7 +434,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
                   setQuery("");
                   setStatus("all");
                   setActiveTag(null);
-                  setFacetChoice({ from: facetFromUrl, on: false });
+                  setOnDevice(false);
                 }}
               >
                 Clear filters
@@ -527,11 +443,7 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
           )}
           {books.length > shown.length && (
             <div className="library-more">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setPagination({ key: filterKey, pages: pages + 1 })}
-              >
+              <button type="button" className="secondary-button" onClick={showMore}>
                 Load more books
               </button>
               <small>
@@ -542,57 +454,12 @@ export function LibraryClient({ userId: serverUserId }: LibraryClientProps) {
         </section>
       )}
 
-      {upload && (
-        <div className="upload-status" role="status" aria-live="polite">
-          <div>
-            <span>
-              {upload.stage} · {upload.filename}
-            </span>
-            <strong>{upload.percent}%</strong>
-          </div>
-          <progress value={upload.percent} max={100} aria-label={`Importing ${upload.filename}`} />
-        </div>
-      )}
-
-      {error && (
-        <div className="upload-error" role="alert">
-          <WarningCircle size={21} weight="fill" aria-hidden="true" />
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">
-            <X size={17} aria-hidden="true" />
-          </button>
-        </div>
-      )}
+      <UploadBanners upload={upload} error={error} onDismissError={() => setError(null)} />
     </>
   );
 }
 
 const EMPTY_DEVICE_INDEX: DeviceIndex = new Map();
-
-/** The book this document was asked for, when the URL names one. */
-function bookIdFromUrl(): string | null {
-  if (typeof window === "undefined") return null;
-  return BOOK_PATH.exec(window.location.pathname)?.[1] || null;
-}
-
-/**
- * Whether the library itself is the entry behind this document.
- *
- * Deliberately narrower than "came from this origin": the mini player links to
- * a book from every screen that carries it, so a document opened from
- * `/settings` has Settings one entry back, and a button labelled Library that
- * went back would land somewhere it did not name.
- */
-function openedFromLibrary(): boolean {
-  if (typeof document === "undefined" || !document.referrer) return false;
-  try {
-    const referrer = new URL(document.referrer);
-    if (referrer.origin !== window.location.origin) return false;
-    return referrer.pathname === "/" || referrer.pathname === "/library";
-  } catch {
-    return false;
-  }
-}
 
 function coverUrlFor(record: OfflineBook | undefined): string | undefined {
   return record ? record.offlineCoverThumbUrl || record.offlineCoverUrl || undefined : undefined;

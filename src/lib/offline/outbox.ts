@@ -61,7 +61,7 @@ const PATCH_STORES = [
 ] as const;
 
 type PatchStore = (typeof PATCH_STORES)[number];
-export type MirrorPatchTransaction = IDBPTransaction<OfflineDatabase, PatchStore[], "readwrite">;
+type MirrorPatchTransaction = IDBPTransaction<OfflineDatabase, PatchStore[], "readwrite">;
 export type MirrorPatch = (transaction: MirrorPatchTransaction) => Promise<void>;
 
 export type CommitResult = {
@@ -91,7 +91,7 @@ export async function commitMutation(
 }
 
 /** One mirror patch, atomically, with no outbox row in front of it. */
-export async function applyMirrorPatch(patch: MirrorPatch): Promise<void> {
+async function applyMirrorPatch(patch: MirrorPatch): Promise<void> {
   const db = await database();
   const transaction = db.transaction(PATCH_STORES as unknown as PatchStore[], "readwrite");
   try {
@@ -364,7 +364,7 @@ function abortQuietly(transaction: MirrorPatchTransaction): void {
  * `updatedAt`, mirroring the server rule from section 3 — otherwise the local
  * copy would order differently from the one the next pull delivers.
  */
-export function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
+function mirrorPatchFor(mutation: QueuedMutation): MirrorPatch | null {
   const { userId, entityId, payload } = mutation;
   const now = new Date().toISOString();
   switch (mutation.kind) {

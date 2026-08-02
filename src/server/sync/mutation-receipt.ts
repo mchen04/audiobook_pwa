@@ -2,10 +2,8 @@ import "server-only";
 
 import { and, eq } from "drizzle-orm";
 
-import type { db } from "@/server/db/client";
+import type { Transaction } from "@/server/db/client";
 import { playbackActionReceipts } from "@/server/db/schema";
-
-type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export type ReceiptClaim = {
   /** True the first time this `mutationId` is seen; false on every replay. */

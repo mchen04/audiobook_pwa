@@ -1,13 +1,12 @@
 import { openDB, type DBSchema, type IDBPDatabase, type IDBPObjectStore } from "idb";
 
-import type { PlaybackHistoryEntry, PlaybackHistorySnapshot } from "@/domain/player";
+import type { PlaybackHistoryEntry, PlaybackHistorySnapshot } from "@/domain/playback-history";
 import { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
 import { withKeyedLock } from "@/lib/keyed-lock";
 import { REPLAY_CONCURRENCY, REPLAY_PAGE_SIZE, shouldRetainMutation } from "@/lib/offline-sync";
 import { singleFlight } from "@/lib/single-flight";
 import { runBounded } from "@/lib/run-bounded";
 
-export { PLAYBACK_HISTORY_LIMIT } from "@/domain/playback-history";
 const DATABASE_NAME = "hark-playback-history-v1";
 const activeHistoryReplays = new Map<string, Promise<void>>();
 
@@ -208,7 +207,7 @@ export async function clearPlaybackHistoryForBook(userId: string, bookId: string
  * Every account with a recorded play, pause or seek in this database.
  *
  * `hark-playback-history-v1` is a separate database from the mirror, opened by
- * this lazily-imported module and named nothing like the others, so an account
+ * this module alone and named nothing like the others, so an account
  * whose only surviving trace is what it listened to would otherwise be invisible
  * to the account sweep. Read from the `by-user` index's keys.
  */

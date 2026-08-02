@@ -9,7 +9,8 @@ import {
   useState,
 } from "react";
 
-import type { PlaybackHistoryEntry, PlayerChapter } from "@/domain/player";
+import type { PlaybackHistoryEntry } from "@/domain/playback-history";
+import type { PlayerChapter } from "@/domain/player";
 import { formatClock, formatDurationRounded } from "@/lib/format-time";
 
 import { CHAPTER_WINDOW_SIZE, chapterWindow, chapterWindowStart } from "./chapter-window";

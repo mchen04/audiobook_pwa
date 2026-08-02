@@ -48,3 +48,6 @@ const sqlClient =
 if (process.env.NODE_ENV !== "production") globalDatabase.sqlClient = sqlClient;
 
 export const db = drizzle(sqlClient, { schema });
+
+/** The transaction handle `db.transaction` passes to its callback. */
+export type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];

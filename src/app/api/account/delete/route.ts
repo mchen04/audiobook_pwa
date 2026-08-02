@@ -19,8 +19,7 @@ const deleteSchema = z.object({
  * objects to clean; the client wipes this device's local data afterward.
  */
 export const POST = withMutation(
-  deleteSchema,
-  "Type your account email exactly to confirm deletion.",
+  { body: deleteSchema, invalidBody: "Type your account email exactly to confirm deletion." },
   async ({ request, session, data }) => {
     if (data.confirmEmail.toLowerCase() !== session.user.email.toLowerCase()) {
       return Response.json(

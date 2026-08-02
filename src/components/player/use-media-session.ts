@@ -3,7 +3,7 @@
 import { RefObject, useEffect } from "react";
 
 import type { PlayerBook } from "@/domain/player";
-import type { PlayerPreferences } from "@/lib/preferences";
+import type { PlayerPreferences } from "@/domain/preferences";
 
 /**
  * System media controls, feature-detected. A missing or partial Media Session

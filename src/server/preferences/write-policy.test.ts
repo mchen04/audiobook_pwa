@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PREFERENCES_DEFAULTS_VERSION } from "@/lib/preferences";
+import { PREFERENCES_DEFAULTS_VERSION } from "@/domain/preferences";
 
 import {
   applyPreferenceWritePolicy,

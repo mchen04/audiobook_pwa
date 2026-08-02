@@ -7,7 +7,7 @@ export type ParsedChapter = {
   endMs: number;
 };
 
-export type ParsedArtwork = {
+type ParsedArtwork = {
   data: Uint8Array;
   extension: "jpg" | "png" | "webp";
   mimeType: string;
@@ -109,7 +109,7 @@ export function interpretMp3Metadata(
 
 // Embedded artwork is only trusted when its actual bytes match a known raster
 // signature; declared MIME alone is not enough.
-export function extractArtwork(
+function extractArtwork(
   pictures: Array<{ format?: string; data: Uint8Array }> | undefined,
 ): ParsedArtwork | null {
   const picture = pictures?.[0];

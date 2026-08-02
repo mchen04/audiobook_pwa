@@ -31,52 +31,21 @@ const { savePreferences, fetchPreferences, readCachedPreferences, DEFAULTS } = v
 }));
 
 vi.mock("@/lib/preferences", () => ({
-  DEFAULT_PREFERENCES: DEFAULTS,
-  SKIP_CHOICES_MS: [15_000, 30_000],
   savePreferences,
   fetchPreferences,
   readCachedPreferences,
 }));
-vi.mock("@/lib/playback-history", () => ({
-  loadPlaybackHistory: vi.fn().mockResolvedValue([]),
-  PLAYBACK_HISTORY_LIMIT: 50,
-  replayPlaybackHistory: vi.fn().mockResolvedValue(undefined),
-  storePlaybackAction: vi.fn().mockResolvedValue("stored"),
-}));
-vi.mock("./use-progress-persistence", () => ({
-  useProgressPersistence: () => ({
-    persistProgress: vi.fn().mockResolvedValue(undefined),
-    onListeningTick: vi.fn(),
-    markInProgress: vi.fn(),
-  }),
-}));
-vi.mock("./use-sleep-timer", () => ({
-  useSleepTimer: () => ({
-    sleepMode: null,
-    setSleepMinutes: vi.fn(),
-    setSleepAtChapterEnd: vi.fn(),
-    clearSleep: vi.fn(),
-    onTimeUpdate: vi.fn(),
-  }),
-}));
-vi.mock("./use-tab-arbitration", () => ({ useTabArbitration: () => vi.fn() }));
-vi.mock("./use-media-session", () => ({
-  setMediaSessionMetadata: vi.fn(),
-  setMediaSessionPlaybackState: vi.fn(),
-  syncMediaSessionPosition: vi.fn(),
-  useMediaSession: vi.fn(),
-}));
 
-import { PlaybackProvider, usePlayback } from "./playback-provider";
+import { PreferencesProvider, usePreferences } from "./preferences-provider";
 
 function PreferencesHarness() {
-  const playback = usePlayback();
+  const { preferences, updatePreferences } = usePreferences();
   return (
     <>
-      <button onClick={() => playback.updatePreferences({ skipBackMs: 45_000 })}>skip back</button>
-      <button onClick={() => playback.updatePreferences({ smartRewind: false })}>rewind</button>
-      <output aria-label="skip back">{playback.preferences.skipBackMs}</output>
-      <output aria-label="smart rewind">{String(playback.preferences.smartRewind)}</output>
+      <button onClick={() => updatePreferences({ skipBackMs: 45_000 })}>skip back</button>
+      <button onClick={() => updatePreferences({ smartRewind: false })}>rewind</button>
+      <output aria-label="skip back">{preferences.skipBackMs}</output>
+      <output aria-label="smart rewind">{String(preferences.smartRewind)}</output>
     </>
   );
 }
@@ -95,9 +64,9 @@ afterEach(() => {
 async function mount(): Promise<void> {
   render(
     <StrictMode>
-      <PlaybackProvider userId="user-1">
+      <PreferencesProvider userId="user-1">
         <PreferencesHarness />
-      </PlaybackProvider>
+      </PreferencesProvider>
     </StrictMode>,
   );
   await waitFor(() => expect(screen.getByLabelText("skip back")).toBeInTheDocument());

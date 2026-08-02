@@ -2,7 +2,8 @@
 
 import { RefObject, useMemo, useRef } from "react";
 
-import type { PlaybackAction, PlayerBook, PlayerChapter } from "@/domain/player";
+import type { PlaybackAction } from "@/domain/playback-history";
+import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import type { PlaybackWriteSource } from "@/lib/playback-core";
 
 import type { PlaybackTimeStore } from "./playback-time-store";

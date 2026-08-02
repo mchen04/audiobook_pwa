@@ -5,7 +5,8 @@ import "@testing-library/jest-dom/vitest";
 import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PlaybackHistoryEntry, PlayerBook } from "@/domain/player";
+import type { PlaybackHistoryEntry } from "@/domain/playback-history";
+import type { PlayerBook } from "@/domain/player";
 
 const { loadPlaybackHistory, storePlaybackAction, persistence } = vi.hoisted(() => {
   // Stable across renders, as the real hook's `useCallback`s are, so a durable

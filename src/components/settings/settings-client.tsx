@@ -6,15 +6,16 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 
 import { usePlayback } from "@/components/player/playback-provider";
+import { usePreferences } from "@/components/player/preferences-provider";
 import { formatClock } from "@/lib/format-time";
 import { purgeAccount } from "@/lib/offline/account-purge";
 import { readLatestLocalPlayback } from "@/lib/playback-core";
-import { SKIP_CHOICES_MS } from "@/lib/preferences";
+import { SKIP_CHOICES_MS } from "@/domain/preferences";
 
 export function SettingsClient({ email }: { email: string }) {
   const router = useRouter();
-  const playback = usePlayback();
-  const { preferences, updatePreferences, userId } = playback;
+  const { userId } = usePlayback();
+  const { preferences, updatePreferences } = usePreferences();
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 

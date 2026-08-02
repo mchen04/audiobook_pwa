@@ -4,7 +4,7 @@ import {
   PREFERENCES_DEFAULTS_HEADER,
   PREFERENCES_DEFAULTS_VERSION,
   PREFERENCES_WRITE_ID_HEADER,
-} from "../../../src/lib/preferences";
+} from "../../../src/domain/preferences";
 
 /**
  * The resume oracle covers the optional rewind ladder as well as exact resume,

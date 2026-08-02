@@ -5,7 +5,8 @@ import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { PlaybackHistoryEntry, PlayerChapter } from "@/domain/player";
+import type { PlaybackHistoryEntry } from "@/domain/playback-history";
+import type { PlayerChapter } from "@/domain/player";
 
 import { PlayerSheet, type PlayerSheetView } from "./chapter-sheet";
 

@@ -104,18 +104,19 @@ export type PullBatch = {
   complete: boolean;
   books: PulledBook[];
   playbackStates: PulledPlaybackState[];
-  /** Full vocabulary every pull; small and user-level (section 3). */
+  /** Full vocabulary, riding only the final page of a sync (section 3). */
   tags: PulledTag[];
-  /** Full list every pull, each with its complete membership. */
+  /** Full list with complete membership, riding only the final page. */
   collections: PulledCollection[];
   preferences: PulledPreferences | null;
   listeningSessions: PulledListeningSession[];
   /**
    * The complete, unpaged set of the user's live book ids — the deletion
-   * oracle. Absence from a *page* means nothing, but absence from this list is
-   * an explicit statement that the book is gone, so the mirror turns the
-   * difference into explicit deletes. Null while pages remain, because sending
-   * every id on every page is waste, not because it would be unsafe.
+   * oracle for a first, full sync, where there is no cursor to anchor
+   * tombstones. Absence from a *page* means nothing, but absence from this
+   * list is an explicit statement that the book is gone, so the mirror turns
+   * the difference into explicit deletes. Null on incremental pulls, whose
+   * deletions arrive as `tombstones` instead.
    */
   liveBookIds: string[] | null;
   /**
@@ -127,8 +128,7 @@ export type PullBatch = {
    * tombstone, and the batch itself is the complete truth.
    *
    * Optional on the wire so a device running a build that predates it still
-   * validates a batch, and so `liveBookIds` remains the fallback oracle until
-   * every reader consumes tombstones.
+   * validates a batch.
    */
   tombstones?: PulledTombstone[];
 };

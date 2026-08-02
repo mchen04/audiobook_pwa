@@ -5,7 +5,7 @@ import {
   PREFERENCES_DEFAULTS_VERSION,
   PREFERENCES_LEGACY_REPLAY_HEADER,
   PREFERENCES_WRITE_ID_HEADER,
-} from "../../src/lib/preferences";
+} from "../../src/domain/preferences";
 import {
   ACCOUNT_A,
   ensureAccount,

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { PLAYBACK_ACTIONS } from "@/domain/playback-history";
-import { SKIP_BOUNDS_MS } from "@/lib/preferences";
+import { SKIP_BOUNDS_MS } from "@/domain/preferences";
 
 /**
  * Every mutation route's accepted request shape, in one place.
@@ -49,7 +49,7 @@ const optionalTrimmed = (max: number) =>
  * device added in the meantime. The edge form is add-wins per edge, which is
  * what the design contract's conflict table asks for (section 7).
  */
-export const tagEdgeSchema = z.strictObject({
+const tagEdgeSchema = z.strictObject({
   tagId: z.uuid(),
   include: z.boolean(),
   /**
@@ -163,7 +163,7 @@ export const listeningSessionSchema = z.strictObject({
  * append-only insert with no receipt to claim would record the same listen
  * twice on the first retry.
  */
-export const listeningStretchSchema = z.strictObject({
+const listeningStretchSchema = z.strictObject({
   id: z.uuid(),
   startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime(),
@@ -189,9 +189,9 @@ export const playbackHistoryEventSchema = z.union([playbackActionSchema, listeni
 
 // Reverend-Insanity-scale ceilings, not upload limits: the audio bytes never
 // reach the server, so these only bound what one registration may write.
-export const MAX_CHAPTERS = 10_000;
-export const MAX_DURATION_MS = 1_000 * 60 * 60 * 1_000; // 1,000 hours
-export const MAX_BYTE_SIZE = 100 * 1024 * 1024 * 1024; // 100 GB
+const MAX_CHAPTERS = 10_000;
+const MAX_DURATION_MS = 1_000 * 60 * 60 * 1_000; // 1,000 hours
+const MAX_BYTE_SIZE = 100 * 1024 * 1024 * 1024; // 100 GB
 
 const chapterSchema = z.strictObject({
   position: z.number().int().min(0),

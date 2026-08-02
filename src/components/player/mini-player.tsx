@@ -6,10 +6,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { usePlayback, usePlaybackTime } from "./playback-provider";
+import { usePreferences } from "./preferences-provider";
 
 export function MiniPlayer() {
   const pathname = usePathname();
-  const { book, isPlaying, toggle, skip, preferences } = usePlayback();
+  const { book, isPlaying, toggle, skip } = usePlayback();
+  const { preferences } = usePreferences();
   if (!book || pathname.startsWith("/books/")) return null;
   const backSeconds = Math.round(preferences.skipBackMs / 1000);
   const forwardSeconds = Math.round(preferences.skipForwardMs / 1000);

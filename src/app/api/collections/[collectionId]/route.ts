@@ -2,7 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { collectionPatchSchema } from "@/server/api/mutation-schemas";
-import { withMutationParams, withRawMutationParams } from "@/server/api/route-handler";
+import { withMutation } from "@/server/api/route-handler";
 import { db } from "@/server/db/client";
 import { books, collectionBooks, collections } from "@/server/db/schema";
 
@@ -10,10 +10,8 @@ export const runtime = "nodejs";
 
 const paramsSchema = z.object({ collectionId: z.uuid() });
 
-export const PATCH = withMutationParams(
-  paramsSchema,
-  collectionPatchSchema,
-  "Invalid collection update.",
+export const PATCH = withMutation(
+  { params: paramsSchema, body: collectionPatchSchema, invalidBody: "Invalid collection update." },
   async ({ session, params, data }) => {
     const { name, bookId, include } = data;
     const updated = await db.transaction(async (transaction) => {
@@ -77,7 +75,7 @@ export const PATCH = withMutationParams(
   },
 );
 
-export const DELETE = withRawMutationParams(paramsSchema, async ({ session, params }) => {
+export const DELETE = withMutation({ params: paramsSchema }, async ({ session, params }) => {
   const deleted = await db
     .delete(collections)
     .where(and(eq(collections.id, params.collectionId), eq(collections.userId, session.user.id)))

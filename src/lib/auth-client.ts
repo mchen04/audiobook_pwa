@@ -149,7 +149,7 @@ export function whenAccountPurgeGateOpen(): Promise<void> {
  * Phase 1. Runs before the sign-out request leaves the device, while the
  * session is still good, and records anything the server would not take.
  */
-export async function runSignOutDrain(context: AuthRequestContext): Promise<void> {
+async function runSignOutDrain(context: AuthRequestContext): Promise<void> {
   if (typeof window === "undefined") return;
   if (!isSignOut(pathOf(context))) return;
   signOutDrain = { ran: false, undelivered: [] };

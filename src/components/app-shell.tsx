@@ -9,6 +9,7 @@ import { AccountMenu } from "@/components/account-menu";
 import { BrandMark } from "@/components/brand-mark";
 import { MiniPlayer } from "@/components/player/mini-player";
 import { PlaybackProvider } from "@/components/player/playback-provider";
+import { PreferencesProvider } from "@/components/player/preferences-provider";
 import { useActiveUserId } from "@/components/use-active-user";
 
 /**
@@ -41,13 +42,15 @@ export function AppShell({
   if (!userId) return <main className="app-page">{header}</main>;
 
   return (
-    <PlaybackProvider userId={userId}>
-      <main className="app-page">
-        {header}
-        {children}
-      </main>
-      <MiniPlayer />
-    </PlaybackProvider>
+    <PreferencesProvider userId={userId}>
+      <PlaybackProvider userId={userId}>
+        <main className="app-page">
+          {header}
+          {children}
+        </main>
+        <MiniPlayer />
+      </PlaybackProvider>
+    </PreferencesProvider>
   );
 }
 

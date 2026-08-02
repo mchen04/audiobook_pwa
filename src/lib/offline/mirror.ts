@@ -62,8 +62,8 @@ const MIRROR_STORES: MirrorStoreName[] = [
 type MirrorTransaction = IDBPTransaction<OfflineDatabase, MirrorStoreName[], "readwrite">;
 
 /** Mirrors `LibrarySort` in `server/books/library-cursor.ts`; the same four orders. */
-export type MirrorSort = "activity" | "added" | "title" | "author";
-export type MirrorStatus = "all" | "in-progress" | "not-started" | "finished" | "archived";
+type MirrorSort = "activity" | "added" | "title" | "author";
+type MirrorStatus = "all" | "in-progress" | "not-started" | "finished" | "archived";
 
 export type MirrorLibraryQuery = {
   query?: string;
@@ -93,10 +93,14 @@ export async function applyPullBatch(userId: string, batch: PullBatch): Promise<
     await clearBookAggregates(transaction, userId, batch.books);
     await writeBookAggregates(transaction, userId, batch.books);
     await writePlaybackStates(transaction, userId, batch);
-    await replaceTags(transaction, userId, batch);
-    await replaceCollections(transaction, userId, batch);
-    await writePreferences(transaction, userId, batch);
-    await writeListeningSessions(transaction, userId, batch);
+    // The snapshot streams ride only the final page of a paged sync; applying
+    // an interim page's empty copies would wipe them until that page arrived.
+    if (batch.complete) {
+      await replaceTags(transaction, userId, batch);
+      await replaceCollections(transaction, userId, batch);
+      await writePreferences(transaction, userId, batch);
+      await writeListeningSessions(transaction, userId, batch);
+    }
     await applyTombstones(transaction, userId, batch);
 
     const meta: MirrorSyncMeta = {
@@ -334,19 +338,29 @@ async function writeListeningSessions(
 }
 
 /**
- * `liveBookIds` is the server's complete statement of what still exists, so a
- * locally held book it omits is deleted explicitly, along with everything that
- * hangs off it. A null list — pages still outstanding — deletes nothing.
+ * Two deletion signals, applied with one mechanism. `tombstones` carries the
+ * per-row deletions since the requested cursor — the signal that scales with
+ * deletions, not library size. `liveBookIds`, sent only on a complete first
+ * sync, is the server's full statement of what still exists, and a locally
+ * held book it omits is deleted explicitly. Everything hanging off a doomed
+ * book goes with it.
  */
 async function applyTombstones(
   transaction: MirrorTransaction,
   userId: string,
   batch: PullBatch,
 ): Promise<void> {
-  if (!batch.liveBookIds) return;
-  const live = new Set(batch.liveBookIds);
+  const doomedSet = new Set((batch.tombstones || []).map((tombstone) => tombstone.bookId));
   const localKeys = await transaction.objectStore("books").index("by-user").getAllKeys(userId);
-  const doomed = localKeys.map(mirrorKeyTail).filter((bookId) => !live.has(bookId));
+  const localIds = localKeys.map(mirrorKeyTail);
+  if (batch.liveBookIds) {
+    const live = new Set(batch.liveBookIds);
+    for (const bookId of localIds) if (!live.has(bookId)) doomedSet.add(bookId);
+  }
+  // Tombstones may name books this device never held; deleting only what is
+  // local keeps the pass bounded and the deletes meaningful.
+  const localIdSet = new Set(localIds);
+  const doomed = [...doomedSet].filter((bookId) => localIdSet.has(bookId));
   if (!doomed.length) return;
 
   const doomedIds = new Set(doomed);

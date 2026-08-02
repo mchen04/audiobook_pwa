@@ -34,8 +34,10 @@ vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/lib/offline/account-purge", () => purge);
 vi.mock("@/lib/offline/library", () => smallerSweep);
 vi.mock("@/components/player/playback-provider", () => ({
-  usePlayback: () => ({
-    userId: USER_ID,
+  usePlayback: () => ({ userId: USER_ID }),
+}));
+vi.mock("@/components/player/preferences-provider", () => ({
+  usePreferences: () => ({
     preferences: { skipBackMs: 15_000, skipForwardMs: 30_000 },
     updatePreferences: vi.fn(),
   }),

@@ -3,7 +3,6 @@
 import {
   createContext,
   ReactNode,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -12,22 +11,10 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import type {
-  PlaybackAction,
-  PlaybackHistoryEntry,
-  PlaybackHistorySnapshot,
-  PlayerBook,
-  PlayerChapter,
-} from "@/domain/player";
+import type { PlaybackHistoryEntry, PlaybackHistorySnapshot } from "@/domain/playback-history";
+import type { PlayerBook, PlayerChapter } from "@/domain/player";
 import { ACTIVE_USER_KEY, PROGRESS_CONFLICT_EVENT, UNLOAD_PLAYER_EVENT } from "@/lib/app-keys";
-import { afterLaunchPaint } from "@/lib/launch-revalidation";
 import { createListeningTracker, queueListeningSession } from "@/lib/listening-tracker";
-import {
-  loadPlaybackHistory,
-  PLAYBACK_HISTORY_LIMIT,
-  replayPlaybackHistory,
-  storePlaybackAction,
-} from "@/lib/playback-history";
 import {
   markPausedNow,
   freshestPosition,
@@ -37,21 +24,17 @@ import {
   resolveStartPosition,
   selectCurrentChapter,
 } from "@/lib/playback-core";
-import {
-  DEFAULT_PREFERENCES,
-  fetchPreferences,
-  type PlayerPreferences,
-  readCachedPreferences,
-  savePreferences,
-} from "@/lib/preferences";
 
 import { createTimeStore, type PlaybackTimeStore } from "./playback-time-store";
+import { usePreferencesRef } from "./preferences-provider";
+import type { ProgressConflictDetail } from "./progress-persister";
 import {
   setMediaSessionMetadata,
   setMediaSessionPlaybackState,
   syncMediaSessionPosition,
   useMediaSession,
 } from "./use-media-session";
+import { usePlaybackHistoryLog } from "./use-playback-history-log";
 import { useProgressPersistence } from "./use-progress-persistence";
 import { type SleepMode, useSleepTimer } from "./use-sleep-timer";
 import { useTabArbitration } from "./use-tab-arbitration";
@@ -65,10 +48,8 @@ type PlaybackContextValue = {
   history: PlaybackHistoryEntry[];
   historyNotice: string | null;
   sleepMode: SleepMode;
-  preferences: PlayerPreferences;
   /** Bumped each time a book plays to its end; consumers react to completion. */
   lastEndedAt: number;
-  updatePreferences: (patch: Partial<PlayerPreferences>) => void;
   loadBook: (
     book: PlayerBook,
     autoplay?: boolean,
@@ -97,17 +78,16 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   const activeBookRef = useRef<PlayerBook | null>(null);
   const trackerRef = useRef(createListeningTracker(queueListeningSession(userId)));
   const suppressNextPauseRef = useRef(false);
-  const preferencesRef = useRef<PlayerPreferences>(DEFAULT_PREFERENCES);
   const positionSyncKeyRef = useRef("");
   const timeStore = useMemo(() => createTimeStore(), []);
   const [book, setBook] = useState<PlayerBook | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setRateState] = useState(1);
-  const [history, setHistory] = useState<PlaybackHistoryEntry[]>([]);
-  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
-  const [preferences, setPreferences] = useState<PlayerPreferences>(DEFAULT_PREFERENCES);
   const [lastEndedAt, setLastEndedAt] = useState(0);
 
+  // Read-at-call-time: preferences must not re-render the transport, so the
+  // provider never subscribes to them. `PreferencesProvider` owns the state.
+  const preferencesRef = usePreferencesRef();
   const announcePlaying = useTabArbitration(audioRef);
   const {
     persistProgress,
@@ -116,7 +96,10 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     saveDurableState,
     markPositionChanged,
     resetPositionChanged,
+    reconcileCompletion,
   } = useProgressPersistence(userId, audioRef, activeBookRef);
+  const { history, historyNotice, recordAction, hydrateHistory, clearHistory, clearHistoryNotice } =
+    usePlaybackHistoryLog(userId, audioRef, activeBookRef);
   const {
     sleepMode,
     setSleepMinutes: setSleepMinutesTarget,
@@ -125,85 +108,12 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     onTimeUpdate: onSleepTick,
   } = useSleepTimer(audioRef);
 
-  const recordAction = useCallback(
-    (
-      action: PlaybackAction,
-      positionMs?: number,
-      previousPositionMs: number | null = null,
-      description: string | null = null,
-    ) => {
-      const activeBook = activeBookRef.current;
-      const audio = audioRef.current;
-      if (!activeBook || !audio) return;
-      const now = new Date().toISOString();
-      const entry: PlaybackHistoryEntry = {
-        id: crypto.randomUUID(),
-        action,
-        positionMs: Math.round(positionMs ?? audio.currentTime * 1000),
-        previousPositionMs: previousPositionMs === null ? null : Math.round(previousPositionMs),
-        playbackRate: audio.playbackRate || 1,
-        description,
-        occurredAt: now,
-        recordedAt: now,
-      };
-      setHistory((current) => [entry, ...current].slice(0, PLAYBACK_HISTORY_LIMIT));
-      void storePlaybackAction(userId, activeBook.id, entry)
-        .then((result) => {
-          if (result === "stored") {
-            setHistoryNotice(null);
-            return;
-          }
-          setHistory((current) => current.filter((item) => item.id !== entry.id));
-          if (result === "unavailable") {
-            setHistoryNotice("Playback history is unavailable on this device.");
-          }
-        })
-        .catch(() => {
-          setHistory((current) => current.filter((item) => item.id !== entry.id));
-          setHistoryNotice("Playback history is unavailable on this device.");
-        });
-    },
-    [userId],
-  );
-
   useEffect(() => {
     activeBookRef.current = book;
   }, [book]);
 
   useEffect(() => {
-    preferencesRef.current = preferences;
-  }, [preferences]);
-
-  useEffect(() => {
     localStorage.setItem(ACTIVE_USER_KEY, userId);
-    let active = true;
-    const refresh = () => {
-      void fetchPreferences(userId)
-        .then((fresh) => {
-          if (active) setPreferences(fresh);
-        })
-        .catch(() => undefined);
-    };
-    // This device's own answer is applied at once; the server's is revalidation
-    // and waits for the launch to paint. `fetchPreferences` used to fire from
-    // mount, which put a network round trip and a Postgres query in front of
-    // the frame the launch is measured on for every page carrying the player.
-    void Promise.resolve()
-      .then(() => {
-        if (active) setPreferences(readCachedPreferences(userId));
-      })
-      .catch(() => undefined);
-    const cancelRevalidation = afterLaunchPaint(refresh);
-    const replayHistory = () => void replayPlaybackHistory(userId).catch(() => undefined);
-    if (navigator.onLine) replayHistory();
-    window.addEventListener("online", refresh);
-    window.addEventListener("online", replayHistory);
-    return () => {
-      active = false;
-      cancelRevalidation();
-      window.removeEventListener("online", refresh);
-      window.removeEventListener("online", replayHistory);
-    };
   }, [userId]);
 
   useEffect(() => {
@@ -293,19 +203,6 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   // created once; consumers can put it (or any method) in effect deps safely.
   const actions = useMemo(() => {
     return {
-      updatePreferences(patch: Partial<PlayerPreferences>) {
-        // The save is deliberately OUTSIDE the state updater. React may invoke
-        // an updater more than once for a single call — StrictMode does it on
-        // every render in development — so a PATCH fired from inside one is
-        // sent twice, and a state updater is required to be pure regardless.
-        // The ref is written here rather than left to its effect so two
-        // updates in the same tick still compose.
-        const current = preferencesRef.current;
-        const next = { ...current, ...patch };
-        preferencesRef.current = next;
-        setPreferences(next);
-        void savePreferences(userId, current, patch);
-      },
       loadBook(nextBook: PlayerBook, autoplay = false, historySnapshot?: PlaybackHistorySnapshot) {
         const audio = audioRef.current;
         if (!audio) return;
@@ -369,7 +266,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
           // start back as if the user had chosen it.
           resetPositionChanged();
           setBook(nextBook);
-          setHistory([]);
+          clearHistory();
           timeStore.write(startAtMs);
           setRateState(startRate);
           setMediaSessionMetadata(nextBook);
@@ -382,18 +279,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
               : null,
           );
         }
-        void loadPlaybackHistory(userId, nextBook.id, historySnapshot)
-          .catch(() => historySnapshot?.entries || [])
-          .then((entries) => {
-            if (activeBookRef.current?.id !== nextBook.id) return;
-            setHistory((current) =>
-              [...current, ...entries]
-                .filter(
-                  (entry, index, all) => all.findIndex((item) => item.id === entry.id) === index,
-                )
-                .slice(0, PLAYBACK_HISTORY_LIMIT),
-            );
-          });
+        hydrateHistory(nextBook.id, historySnapshot);
         if (autoplay) safePlay(audio);
       },
       setPlaybackRate(rate: number) {
@@ -443,17 +329,21 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
         resetPositionChanged();
         activeBookRef.current = null;
         setBook(null);
-        setHistory([]);
-        setHistoryNotice(null);
+        clearHistory();
+        clearHistoryNotice();
         timeStore.write(0);
         setIsPlaying(false);
       },
     };
   }, [
     cancelSeekPersist,
+    clearHistory,
+    clearHistoryNotice,
     clearSleepTarget,
+    hydrateHistory,
     markPositionChanged,
     persistProgress,
+    preferencesRef,
     recordAction,
     resetPositionChanged,
     saveDurableState,
@@ -469,16 +359,13 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
   }, [actions]);
 
   useEffect(() => {
+    // The ONE listener for a conflict another device won. Completion
+    // bookkeeping is brought in step FIRST, then the playback surface
+    // (element, stores) — the order is load-bearing and owned here.
     const reconcile = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          userId: string;
-          bookId: string;
-          positionMs: number;
-          playbackRate: number;
-        }>
-      ).detail;
+      const detail = (event as CustomEvent<ProgressConflictDetail>).detail;
       if (detail.userId !== userId || activeBookRef.current?.id !== detail.bookId) return;
+      reconcileCompletion(detail);
       const audio = audioRef.current;
       if (audio) {
         audio.currentTime = detail.positionMs / 1000;
@@ -489,7 +376,7 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
     };
     window.addEventListener(PROGRESS_CONFLICT_EVENT, reconcile);
     return () => window.removeEventListener(PROGRESS_CONFLICT_EVENT, reconcile);
-  }, [timeStore, userId]);
+  }, [reconcileCompletion, timeStore, userId]);
 
   useMediaSession({
     audioRef,
@@ -508,7 +395,6 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       history,
       historyNotice,
       sleepMode,
-      preferences,
       lastEndedAt,
       ...transport,
       ...actions,
@@ -521,7 +407,6 @@ export function PlaybackProvider({ children, userId }: { children: ReactNode; us
       history,
       historyNotice,
       sleepMode,
-      preferences,
       lastEndedAt,
       transport,
       actions,

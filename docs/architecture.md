@@ -158,8 +158,8 @@ pending deletion journal comes through intact.
 
 ## Write path
 
-Writes go through the outbox (`src/lib/offline-sync.ts`, database
-`chapterline-sync-v1` version 4, plus `src/lib/offline/outbox.ts`):
+Writes go through the outbox (`src/lib/offline-sync/`, database
+`chapterline-sync-v1` version 5, plus `src/lib/offline/outbox.ts`):
 
 - **Journal intent, then act.** The outbox row is committed first and the
   optimistic mirror patch second, so a crash can leave a queued write with no
@@ -268,7 +268,7 @@ playable; byte size and "remove the download" survive in the merged view.
   `account-purge`) + `local-import.ts`: the device-local media store and the
   in-browser import pipeline; `mirror.ts` + `sync-protocol.ts`: the library
   mirror and the wire guards for a pulled batch; `outbox.ts` +
-  `offline-sync.ts`: the outbox, coalescing, and idempotent replay.
+  the `offline-sync/` modules: the outbox, coalescing, and idempotent replay.
 - `src/server/sync/pull.ts` + `src/app/api/sync/pull/route.ts`: the cursored
   pull; `src/server/api/mutation-schemas.ts`: every mutation route's `.strict()`
   request shape, in one importable place.

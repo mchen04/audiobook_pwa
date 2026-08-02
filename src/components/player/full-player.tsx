@@ -22,7 +22,8 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import type { BookDetails } from "@/components/book/book-details-dialog";
-import type { NextInCollection, PlaybackHistorySnapshot, PlayerBook } from "@/domain/player";
+import type { PlaybackHistorySnapshot } from "@/domain/playback-history";
+import type { NextInCollection, PlayerBook } from "@/domain/player";
 import type { TranscriptSentence } from "@/domain/transcript";
 import { formatClock, formatDurationRounded } from "@/lib/format-time";
 import { getChapterTranscript, getTranscriptChapterIndexes } from "@/lib/offline/transcript-store";
@@ -35,6 +36,7 @@ import {
   usePlaybackDerived,
   usePlaybackTime,
 } from "./playback-provider";
+import { usePreferences } from "./preferences-provider";
 import { CoverNowReading, TranscriptPane } from "./transcript-pane";
 import type { SleepMode } from "./use-sleep-timer";
 import { useSuspensionRecovery } from "./use-suspension-recovery";
@@ -74,6 +76,7 @@ export function FullPlayer({
 }) {
   const router = useRouter();
   const playback = usePlayback();
+  const { preferences } = usePreferences();
   const currentChapter = useCurrentChapter();
   const { loadBook } = playback;
   /**
@@ -156,7 +159,7 @@ export function FullPlayer({
     loadBook(playerBook, shouldAutoplay, historySnapshot);
   }, [autoplay, historySnapshot, loadBook, playerBook]);
 
-  const autoplayNext = playback.preferences.autoplayNextInCollection;
+  const autoplayNext = preferences.autoplayNextInCollection;
   useEffect(() => {
     if (playback.lastEndedAt === mountedEndedAtRef.current) return;
     mountedEndedAtRef.current = playback.lastEndedAt;
@@ -175,8 +178,8 @@ export function FullPlayer({
     }
   }
 
-  const skipBackSeconds = Math.round(playback.preferences.skipBackMs / 1000);
-  const skipForwardSeconds = Math.round(playback.preferences.skipForwardMs / 1000);
+  const skipBackSeconds = Math.round(preferences.skipBackMs / 1000);
+  const skipForwardSeconds = Math.round(preferences.skipForwardMs / 1000);
   // Bound to a const so the jump handler closes over a value TypeScript has
   // narrowed, rather than re-reading a property it cannot narrow inside a
   // callback and needing a non-null assertion to say so.
@@ -292,7 +295,7 @@ export function FullPlayer({
             </button>
             <button
               type="button"
-              onClick={() => playback.skip(-playback.preferences.skipBackMs)}
+              onClick={() => playback.skip(-preferences.skipBackMs)}
               aria-label={`Back ${skipBackSeconds} seconds`}
               className="timed-skip"
             >
@@ -313,7 +316,7 @@ export function FullPlayer({
             </button>
             <button
               type="button"
-              onClick={() => playback.skip(playback.preferences.skipForwardMs)}
+              onClick={() => playback.skip(preferences.skipForwardMs)}
               aria-label={`Forward ${skipForwardSeconds} seconds`}
               className="timed-skip"
             >
@@ -370,7 +373,7 @@ export function FullPlayer({
             <p className="up-next">
               Up next in {nextInCollection.collectionName}:{" "}
               <Link href={`/books/${nextInCollection.id}`}>{nextInCollection.title}</Link>
-              {playback.preferences.autoplayNextInCollection ? " · plays automatically" : ""}
+              {preferences.autoplayNextInCollection ? " · plays automatically" : ""}
             </p>
           )}
         </section>

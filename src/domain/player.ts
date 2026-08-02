@@ -27,10 +27,3 @@ export type NextInCollection = {
   title: string;
   collectionName: string;
 };
-
-export { PLAYBACK_ACTIONS, PLAYBACK_HISTORY_LIMIT } from "./playback-history";
-export type {
-  PlaybackAction,
-  PlaybackHistoryEntry,
-  PlaybackHistorySnapshot,
-} from "./playback-history";

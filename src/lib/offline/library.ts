@@ -1,6 +1,11 @@
 import type { PlayerBook } from "@/domain/player";
 import { ACTIVE_USER_KEY } from "@/lib/app-keys";
-import { clearQueuedMutationsForUser } from "@/lib/offline-sync";
+import {
+  clearQueuedMutationsForUser,
+  registerImportReattachedHandler,
+  registerProgressConflictHandler,
+} from "@/lib/offline-sync";
+import { clearPlaybackHistoryForUser } from "@/lib/playback-history";
 import { invalidatePreferenceWrites } from "@/lib/preferences";
 
 import {
@@ -59,19 +64,6 @@ export async function getStoredOfflineBook(
 ): Promise<OfflineBook | undefined> {
   const db = await database();
   return db.get("downloads", offlineBookKey(userId, bookId));
-}
-
-/**
- * Light read for library cover art: one indexed lookup, no deletion retry and
- * no cache reconcile, so callers can refresh per keystroke without cost.
- */
-export async function listOfflineCoverUrls(userId: string): Promise<Record<string, string>> {
-  const covers: Record<string, string> = {};
-  for (const record of await listStoredOfflineBooks(userId)) {
-    const url = record.offlineCoverThumbUrl || record.offlineCoverUrl;
-    if (url) covers[record.book.id] = url;
-  }
-  return covers;
 }
 
 export async function getOfflineBook(userId: string, bookId: string) {
@@ -420,7 +412,6 @@ export async function clearLocalDataForUser(userId: string): Promise<void> {
 
   await deleteAllTranscriptsForUser(userId).catch(() => undefined);
   await clearQueuedMutationsForUser(userId);
-  const { clearPlaybackHistoryForUser } = await import("@/lib/playback-history");
   await clearPlaybackHistoryForUser(userId);
   if (localStorage.getItem(ACTIVE_USER_KEY) === userId) {
     localStorage.removeItem(ACTIVE_USER_KEY);
@@ -429,3 +420,11 @@ export async function clearLocalDataForUser(userId: string): Promise<void> {
     throw new OfflineStorageUnavailableError();
   }
 }
+
+// This module owns the records a 409 reconciliation must touch, and the sync
+// layer below it must not import upward — that edge is what closed the
+// offline-sync ↔ offline/library cycle. So the dependency is inverted:
+// registered here, at module init, the handlers exist before anything that can
+// see a download record can trigger a replay.
+registerImportReattachedHandler(reattachLocalBookIdentity);
+registerProgressConflictHandler(projectOfflineProgress);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { LibraryBook } from "@/domain/library";
 import { afterLaunchPaint } from "@/lib/launch-revalidation";
@@ -53,7 +53,7 @@ export type LibraryFilters = {
  */
 export type DeviceIndex = Map<string, OfflineBook>;
 
-export type LibraryListing = {
+type LibraryListing = {
   /** Matching rows, already filtered and sorted. */
   books: LibraryBook[];
   /** Every book on this device, regardless of the active filters. */
@@ -122,6 +122,10 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
   const [listing, setListing] = useState<Listing | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [nonce, setNonce] = useState(0);
+  // Per-mount heal bookkeeping: returning to the library must heal again (the
+  // player wrote fresh local positions), but keystrokes within a visit must
+  // not. A ref scopes the marker to this mount without module-level state.
+  const healScope = useRef<HealScope>({ healed: null });
   const [reconnects, setReconnects] = useState(0);
   const [firstSync, setFirstSync] = useState<FirstSync>("unknown");
   /**
@@ -140,7 +144,7 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
   useEffect(() => {
     if (!userId) return;
     let active = true;
-    void readOverview(userId)
+    void readOverview(userId, healScope.current, `${nonce}`)
       .then((next) => {
         if (active) setOverview(next);
       })
@@ -157,7 +161,7 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
   useEffect(() => {
     if (!userId) return;
     let active = true;
-    void readListing(userId, { query, status, tag, sort, onDevice })
+    void readListing(userId, { query, status, tag, sort, onDevice }, healScope.current, `${nonce}`)
       .then((next) => {
         if (active) setListing(next);
       })
@@ -326,17 +330,32 @@ export function useLibraryBooks(userId: string | null, filters: LibraryFilters) 
  * the same rows.
  */
 const activeHeals = new Map<string, Promise<void>>();
+type HealScope = { healed: string | null };
 
-function healBeforeRead(userId: string): Promise<void> {
+function healBeforeRead(userId: string, scope: HealScope, generation: string): Promise<void> {
+  // One heal per refresh generation. Filter keystrokes within a visit reuse
+  // it rather than opening a read-write transaction per keypress; the accepted
+  // cost is that a card's progress can lag by a few seconds while the
+  // mini-player plays on this page, until the next reload or visit.
+  const key = `${userId}:${generation}`;
+  if (scope.healed === key) return Promise.resolve();
   return singleFlight(activeHeals, userId, async () => {
     // Never fatal to a library read: a device that cannot write the mirror can
     // still show what the mirror already holds.
     await healMirrorPlaybackFromLocal(userId).catch(() => 0);
+  }).then(() => {
+    // Marked by every caller, not inside the flight: a reader that joined an
+    // in-progress heal must remember its own scope was covered too.
+    scope.healed = key;
   });
 }
 
-async function readOverview(userId: string): Promise<Overview> {
-  await healBeforeRead(userId);
+async function readOverview(
+  userId: string,
+  scope: HealScope,
+  generation: string,
+): Promise<Overview> {
+  await healBeforeRead(userId, scope, generation);
   const [tags, continueBook, mirrorIds, records] = await Promise.all([
     listMirrorTagNames(userId),
     getMirrorContinueBook(userId),
@@ -347,8 +366,13 @@ async function readOverview(userId: string): Promise<Overview> {
   return { libraryTotal: mirrorIds.size + deviceOnly, tags, continueBook };
 }
 
-async function readListing(userId: string, filters: LibraryFilters): Promise<Listing> {
-  await healBeforeRead(userId);
+async function readListing(
+  userId: string,
+  filters: LibraryFilters,
+  scope: HealScope,
+  generation: string,
+): Promise<Listing> {
+  await healBeforeRead(userId, scope, generation);
   const [rows, records, mirrorIds] = await Promise.all([
     listMirrorBooks(userId, {
       query: filters.query.trim() || undefined,
@@ -478,10 +502,14 @@ async function pull(userId: string): Promise<PullOutcome> {
   // its cursor must not spin here.
   for (let page = 0; page < PULL_PAGE_LIMIT; page += 1) {
     const meta = await getSyncMeta(userId).catch(() => undefined);
-    const since = meta?.cursor ? `?since=${encodeURIComponent(meta.cursor)}` : "";
+    // `snapshots=final` declares that this bundle skips interim pages'
+    // snapshot streams (mirror.ts gates on `batch.complete`), so the server
+    // may omit them there. Bundles that predate the gate never send it and
+    // keep receiving snapshots on every page.
+    const since = meta?.cursor ? `&since=${encodeURIComponent(meta.cursor)}` : "";
     let response: Response;
     try {
-      response = await fetch(`/api/sync/pull${since}`, { cache: "no-store" });
+      response = await fetch(`/api/sync/pull?snapshots=final${since}`, { cache: "no-store" });
     } catch {
       return "unreachable";
     }

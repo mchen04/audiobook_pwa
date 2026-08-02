@@ -34,8 +34,7 @@ export const GET = withQuery(async ({ request, session }) => {
 const MAX_COLLECTIONS = 100;
 
 export const POST = withMutation(
-  collectionCreateSchema,
-  "Give the collection a name.",
+  { body: collectionCreateSchema, invalidBody: "Give the collection a name." },
   async ({ session, data }) => {
     const created = await db.transaction(async (transaction) => {
       await transaction.execute(

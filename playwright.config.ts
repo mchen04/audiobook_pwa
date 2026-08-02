@@ -64,6 +64,8 @@ export default defineConfig({
     {
       name: "parity",
       testDir: "./tests/parity",
+      // Vitest owns the *.test.ts files here (executable server/mirror parity).
+      testIgnore: "**/*.test.ts",
       timeout: 240_000,
       use: { ...devices["iPhone 15"], browserName: "webkit" },
     },

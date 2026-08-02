@@ -114,18 +114,19 @@ and the mirror simply starts empty and fills on first pull.
 
 #### Upgrade steps must be awaited
 
-Both existing cursor sweeps are fire-and-forget:
+One cursor sweep is still fire-and-forget:
 
-- `db.ts` — `void downloads.openCursor().then(...)` (the legacy-bookmark strip)
-- `offline-sync.ts` — `void mutations.openCursor().then(...)` (the legacy purge)
+- `offline/db.ts` — `void downloads.openCursor().then(...)` (the legacy-bookmark
+  strip)
 
 The `void` means a rejection inside the sweep becomes an unhandled rejection
 instead of aborting the version-change transaction. The new version number still
-commits, and because each sweep is guarded by `oldVersion < N` it can never run
-again.
+commits, and because the sweep is guarded by `oldVersion < N` it can never run
+again. The outbox's sweeps in `offline-sync/db.ts` are awaited — the v4 step
+rewrites rows and says so in place.
 
-Today both sweeps only _delete_ legacy rows, so a silent partial sweep leaves
-stale-but-harmless data. That stops being true the moment an upgrade **rewrites**
+Today the fire-and-forget sweep only _deletes_ legacy rows, so a silent partial
+sweep leaves stale-but-harmless data. That stops being true the moment an upgrade **rewrites**
 data. Any new upgrade step must be `await`ed inside `upgrade()` before the
 version is bumped, so a failure aborts the transaction and the upgrade is retried
 rather than half-committed. Copying the existing `void` pattern into a
@@ -187,7 +188,8 @@ Rules:
    support Background Sync and will not wake a closed PWA. The queue drains when
    the app is open. No UI may imply otherwise.
 5. **Failure classification is inherited**, not reinvented:
-   `isRetryableMutationStatus` and `shouldRetainMutation` in `offline-sync.ts`
+   `isRetryableMutationStatus` and `shouldRetainMutation` in
+   `offline-sync/replay.ts`
    already encode it. 401/403 retain (the session may come back). 4xx other than
    409 is terminal. 409 goes to conflict reconciliation.
 

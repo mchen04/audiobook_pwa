@@ -19,6 +19,8 @@ import { playbackHistoryLockKey } from "@/server/playback/lock-key";
 import {
   decodeLibraryCursor,
   encodeLibraryCursor,
+  libraryCursorValue,
+  librarySortsAscending,
   type LibraryCursor,
   type LibrarySort,
 } from "./library-cursor";
@@ -57,13 +59,22 @@ export async function listBooksPage(userId: string, input: LibraryQuery = {}) {
   const normalizedQuery = input.query?.trim().toLowerCase();
   if (normalizedQuery) {
     const pattern = `%${normalizedQuery}%`;
-    conditions.push(sql`(
-      lower(coalesce(${books.title}, '') || ' ' || coalesce(${books.author}, '') || ' ' || coalesce(${books.narrator}, '') || ' ' || coalesce(${books.series}, '')) like ${pattern}
-      or exists (
-        select 1 from ${bookTags}
-        join ${tags} on ${tags.id} = ${bookTags.tagId}
-        where ${bookTags.bookId} = ${books.id} and lower(${tags.name}) like ${pattern}
-      )
+    // A semi-join over a UNION of matching ids, instead of OR-ing the text
+    // match with a correlated tag subquery: each branch stands alone, so the
+    // planner can serve the first from books_search_trgm_idx and the second
+    // from tags_name_trgm_idx, where the OR form defeated both. Inside the
+    // subquery the unqualified `books` references resolve to the inner scan,
+    // and the text branch must stay verbatim-identical to the expression
+    // index in drizzle/0009_fuzzy_spitfire.sql. Semantics are unchanged: the
+    // UNION deduplicates, and IN over ids matches exactly the rows the OR did.
+    conditions.push(sql`${books.id} in (
+      select ${books.id} from ${books}
+      where ${books.ownerId} = ${userId}
+        and lower(coalesce(${books.title}, '') || ' ' || coalesce(${books.author}, '') || ' ' || coalesce(${books.narrator}, '') || ' ' || coalesce(${books.series}, '')) like ${pattern}
+      union
+      select ${bookTags.bookId} from ${bookTags}
+      join ${tags} on ${tags.id} = ${bookTags.tagId}
+      where ${tags.userId} = ${userId} and lower(${tags.name}) like ${pattern}
     )`);
   }
   if (input.tag) {
@@ -87,8 +98,8 @@ export async function listBooksPage(userId: string, input: LibraryQuery = {}) {
     )
     .where(and(...conditions))
     .orderBy(
-      sort === "title" || sort === "author" ? asc(sortExpression) : desc(sortExpression),
-      sort === "title" || sort === "author" ? asc(books.id) : desc(books.id),
+      librarySortsAscending(sort) ? asc(sortExpression) : desc(sortExpression),
+      librarySortsAscending(sort) ? asc(books.id) : desc(books.id),
     )
     .limit(limit + 1);
 
@@ -226,30 +237,10 @@ function cursorCondition(
   expression: SQL,
   cursor: LibraryCursor,
 ): SQL {
-  if (sort === "title" || sort === "author") {
+  if (librarySortsAscending(sort)) {
     return sql`(${expression}, ${books.id}) > (${cursor.value}, ${cursor.id}::uuid)`;
   }
   return sql`(${expression}, ${books.id}) < (${cursor.value}::timestamptz, ${cursor.id}::uuid)`;
-}
-
-function libraryCursorValue(
-  sort: NonNullable<LibraryQuery["sort"]>,
-  row: {
-    title: string;
-    author: string;
-    createdAt: Date;
-    updatedAt: Date;
-    progressUpdatedAt: Date | null;
-  },
-): string {
-  if (sort === "title") return String(row.title).toLowerCase();
-  if (sort === "author") return String(row.author).toLowerCase();
-  if (sort === "added") return (row.createdAt as Date).toISOString();
-  const activityAt =
-    row.progressUpdatedAt && row.progressUpdatedAt > row.updatedAt
-      ? row.progressUpdatedAt
-      : row.updatedAt;
-  return activityAt.toISOString();
 }
 
 export async function getBookForUser(userId: string, bookId: string) {
